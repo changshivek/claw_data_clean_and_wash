@@ -1,5 +1,6 @@
 """Click CLI for agent data filter tool."""
 import logging
+import re
 import sys
 from pathlib import Path
 
@@ -87,11 +88,21 @@ def filter_cmd(ctx, progress_score, overall_score, task_type, export, report, li
     """Filter samples and export to JSONL with optional report."""
     config = ctx.obj["config"]
 
+    OVERALL_SCORE_PATTERN = re.compile(r"^(>=|<=|>|<|!=|=)\s*([\d.]+)$")
+
     builder = FilterQueryBuilder()
     if progress_score:
         builder.add_progress_score_filter(progress_score)
     if overall_score:
-        builder.add_progress_score_filter(overall_score)
+        match = OVERALL_SCORE_PATTERN.match(overall_score.strip())
+        if match:
+            op_str, value_str = match.groups()
+            from claw_data_filter.filters.query import ComparisonOp
+            op = ComparisonOp(op_str)
+            value = float(value_str) if "." in value_str else int(value_str)
+            builder.add_condition("overall_score", op, value)
+        else:
+            raise ValueError(f"Invalid overall-score expression: {overall_score}")
     if task_type:
         builder.add_task_type_filter(list(task_type))
 
