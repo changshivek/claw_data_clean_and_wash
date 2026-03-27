@@ -78,9 +78,9 @@ class DuckDBStore:
         query = "SELECT raw_json FROM samples"
         if evaluated_only:
             query += " WHERE id IN (SELECT sample_id FROM evaluations)"
-        query += f" LIMIT {limit} OFFSET {offset}"
+        query += " LIMIT ? OFFSET ?"
 
-        rows = self.conn.execute(query).fetchall()
+        rows = self.conn.execute(query, [limit, offset]).fetchall()
         return [Sample.from_dict(json.loads(row[0])) for row in rows]
 
     def get_unevaluated_samples(self, limit: int = 100) -> list[tuple[int, Sample]]:
