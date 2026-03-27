@@ -15,9 +15,9 @@ class DuckDBStore:
     def __init__(self, db_path: Path):
         self.db_path = Path(db_path)
         self.conn = duckdb.connect(str(self.db_path))
-        self._init_schema()
+        self.init_schema()
 
-    def _init_schema(self):
+    def init_schema(self):
         """Create tables and sequences if not exist."""
         # Samples table
         self.conn.execute("""
