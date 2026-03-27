@@ -1,11 +1,30 @@
 """JSONL export functionality."""
 import json
 import logging
+import re
 from pathlib import Path
 
 from claw_data_filter.storage.duckdb_store import DuckDBStore
 
 logger = logging.getLogger(__name__)
+
+# Pattern for allowed SQL WHERE clause fragments (safe subset)
+ALLOWED_WHERE_PATTERN = re.compile(
+    r"^[\w\s><=!.\-\(\),\']+$"  # Only allow word chars, spaces, operators, parens
+)
+
+
+def _validate_filter_query(query: str) -> None:
+    """Validate filter query is safe for use in WHERE clause."""
+    if not ALLOWED_WHERE_PATTERN.match(query):
+        # Also check for dangerous patterns
+        dangerous = [
+            ";", "--", "/*", "*/", "DROP", "DELETE", "INSERT", "UPDATE", "UNION", "EXEC", "EXECUTE"
+        ]
+        upper_query = query.upper()
+        for pattern in dangerous:
+            if pattern in upper_query:
+                raise ValueError(f"Filter query contains disallowed pattern: {pattern}")
 
 
 class JSONLExporter:
@@ -33,6 +52,7 @@ class JSONLExporter:
         count = 0
 
         if filter_query:
+            _validate_filter_query(filter_query)
             query = f"""
                 SELECT s.raw_json
                 FROM samples s
