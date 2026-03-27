@@ -5,6 +5,11 @@ from enum import Enum
 from typing import Optional
 
 
+ALLOWED_FIELDS = frozenset(["progress_score", "overall_score", "tool_quality_score", "tool_success_rate", "task_type"])
+
+ALLOWED_TASK_TYPES = frozenset(["information_retrieval", "data_processing", "coding", "reasoning", "creative", "general"])
+
+
 class ComparisonOp(Enum):
     """SQL comparison operators."""
     EQ = "="
@@ -24,8 +29,11 @@ class FilterCondition:
 
     def to_sql(self) -> str:
         """Convert to SQL WHERE clause fragment."""
+        if self.field not in ALLOWED_FIELDS:
+            raise ValueError(f"Invalid field name: {self.field}")
         if isinstance(self.value, str):
-            return f"{self.field} {self.op.value} '{self.value}'"
+            escaped = self.value.replace("'", "''")  # SQL escape single quotes
+            return f"{self.field} {self.op.value} '{escaped}'"
         return f"{self.field} {self.op.value} {self.value}"
 
 
@@ -85,6 +93,8 @@ class FilterQueryBuilder:
             raise ValueError(f"Invalid filter expression: {expr}")
 
         field, op_str, value_str = match.groups()
+        if field not in ALLOWED_FIELDS:
+            raise ValueError(f"Invalid field name: {field}")
         value = float(value_str) if "." in value_str else int(value_str)
 
         return self.add_condition(field, ComparisonOp(op_str), value)
@@ -113,7 +123,10 @@ class FilterQueryBuilder:
             parts.append(cond.to_sql())
 
         if self.task_types:
-            types_str = ", ".join(f"'{t}'" for t in self.task_types)
+            for tt in self.task_types:
+                if tt not in ALLOWED_TASK_TYPES:
+                    raise ValueError(f"Invalid task type: {tt}")
+            types_str = ", ".join(f"'{t.replace('\'', '\'\'')}'" for t in self.task_types)
             parts.append(f"task_type IN ({types_str})")
 
         return " AND ".join(parts) if parts else "1=1"
