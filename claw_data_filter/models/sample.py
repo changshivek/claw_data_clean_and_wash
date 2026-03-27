@@ -2,7 +2,6 @@
 from typing import Optional, Any
 from datetime import datetime
 from pydantic import BaseModel, Field
-import json
 
 
 class Sample(BaseModel):
