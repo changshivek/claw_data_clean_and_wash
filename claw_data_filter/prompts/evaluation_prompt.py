@@ -26,7 +26,8 @@ Evaluate the conversation according to these criteria:
 2. **Progress Score** (0-5):
    - 0: Wrong direction or endless loop (no useful progress)
    - 1: Reasonable attempt but no significant progress
-   - 2: Correct direction, proper tool use, significant progress
+   - 2: Correct direction, significant progress but not completed
+   - 3: Completed with minor issues
    - 4: Successfully completed with trial-and-error in tool usage
    - 5: Successfully completed, all steps correct, no tool errors
 

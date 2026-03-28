@@ -5,9 +5,12 @@ Note: This test requires a running LLM server. Skip if SKIP_INTEGRATION=1.
 """
 import json
 import os
-import tempfile
 from pathlib import Path
 import pytest
+
+# Use data directory for tests
+TEST_DATA_DIR = Path(__file__).parent.parent / "data"
+TEST_DATA_DIR.mkdir(exist_ok=True)
 
 
 @pytest.mark.skipif(
@@ -16,52 +19,56 @@ import pytest
 )
 def test_import_evaluate_export_pipeline():
     """Test the complete import -> evaluate -> filter -> export pipeline."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        db_path = Path(tmpdir) / "test.duckdb"
-        input_file = Path(tmpdir) / "input.jsonl"
-        output_file = Path(tmpdir) / "output.jsonl"
-        report_file = Path(tmpdir) / "report.json"
+    db_path = TEST_DATA_DIR / "test_integration.duckdb"
+    input_file = TEST_DATA_DIR / "test_integration_input.jsonl"
+    output_file = TEST_DATA_DIR / "test_integration_output.jsonl"
+    report_file = TEST_DATA_DIR / "test_integration_report.json"
 
-        # Write test data
-        test_data = [
-            {
-                "messages": [
-                    {"role": "user", "content": "What's 2+2?"},
-                    {"role": "assistant", "content": "2+2 equals 4."},
-                ]
-            },
-            {
-                "messages": [
-                    {"role": "user", "content": "Hello"},
-                    {"role": "assistant", "content": "Hi there!"},
-                ]
-            },
-        ]
-        with open(input_file, "w") as f:
-            for record in test_data:
-                f.write(json.dumps(record) + "\n")
+    # Clean up
+    for f in [db_path, input_file, output_file, report_file]:
+        if f.exists():
+            f.unlink()
 
-        # Import
-        from claw_data_filter.importers.jsonl_importer import JSONLImporter
-        importer = JSONLImporter(db_path)
-        import_count = importer.import_file(input_file)
-        importer.close()
-        assert import_count == 2
+    # Write test data
+    test_data = [
+        {
+            "messages": [
+                {"role": "user", "content": "What's 2+2?"},
+                {"role": "assistant", "content": "2+2 equals 4."},
+            ]
+        },
+        {
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi there!"},
+            ]
+        },
+    ]
+    with open(input_file, "w") as f:
+        for record in test_data:
+            f.write(json.dumps(record) + "\n")
 
-        # Verify import
-        from claw_data_filter.storage.duckdb_store import DuckDBStore
-        store = DuckDBStore(db_path)
-        assert store.get_sample_count() == 2
-        store.close()
+    # Import
+    from claw_data_filter.importers.jsonl_importer import JSONLImporter
+    importer = JSONLImporter(db_path)
+    import_count = importer.import_file(input_file)
+    importer.close()
+    assert import_count == 2
 
-        # Verify unevaluated samples
-        store = DuckDBStore(db_path)
-        unevaluated = store.get_unevaluated_samples(limit=10)
-        assert len(unevaluated) == 2
-        store.close()
+    # Verify import
+    from claw_data_filter.storage.duckdb_store import DuckDBStore
+    store = DuckDBStore(db_path)
+    assert store.get_sample_count() == 2
+    store.close()
 
-        print("Integration test (import phase) passed")
-        print("Note: Skipping LLM evaluation and full pipeline (requires LLM server)")
+    # Verify unevaluated samples
+    store = DuckDBStore(db_path)
+    unevaluated = store.get_unevaluated_samples(limit=10)
+    assert len(unevaluated) == 2
+    store.close()
+
+    print("Integration test (import phase) passed")
+    print("Note: Skipping LLM evaluation and full pipeline (requires LLM server)")
 
 
 def test_all_imports_work():

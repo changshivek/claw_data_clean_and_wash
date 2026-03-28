@@ -9,6 +9,29 @@ from claw_data_filter.storage.duckdb_store import DuckDBStore
 
 logger = logging.getLogger(__name__)
 
+# Allowed directories for I/O
+ALLOWED_IO_DIRS = ["data", "."]
+
+
+def _validate_input_path(path: Path) -> None:
+    """Validate input path is within allowed directories.
+
+    Args:
+        path: Path to validate
+
+    Raises:
+        ValueError: If path is outside allowed directories
+    """
+    path = path.resolve()
+    allowed = [Path.cwd() / d for d in ALLOWED_IO_DIRS]
+    for allowed_dir in allowed:
+        try:
+            path.relative_to(allowed_dir.resolve())
+            return
+        except ValueError:
+            continue
+    raise ValueError(f"Input path must be within allowed directories: {ALLOWED_IO_DIRS}")
+
 
 class JSONLImporter:
     """Import JSONL files into DuckDB storage."""
@@ -26,6 +49,7 @@ class JSONLImporter:
         Returns:
             Number of successfully imported samples
         """
+        _validate_input_path(input_path)
         count = 0
         errors = 0
 

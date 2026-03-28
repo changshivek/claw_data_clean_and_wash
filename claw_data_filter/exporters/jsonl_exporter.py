@@ -13,6 +13,30 @@ ALLOWED_WHERE_PATTERN = re.compile(
     r"^[\w\s><=!.\-\(\),\']+$"  # Only allow word chars, spaces, operators, parens
 )
 
+# Allowed directories for I/O (relative to project root)
+ALLOWED_IO_DIRS = ["data", "."]
+
+
+def _validate_output_path(path: Path) -> None:
+    """Validate output path is within allowed directories.
+
+    Args:
+        path: Path to validate
+
+    Raises:
+        ValueError: If path is outside allowed directories
+    """
+    path = path.resolve()
+    # Check if path is within allowed directories
+    allowed = [Path.cwd() / d for d in ALLOWED_IO_DIRS]
+    for allowed_dir in allowed:
+        try:
+            path.relative_to(allowed_dir.resolve())
+            return  # Path is within allowed directory
+        except ValueError:
+            continue
+    raise ValueError(f"Output path must be within allowed directories: {ALLOWED_IO_DIRS}")
+
 
 def _validate_filter_query(query: str) -> None:
     """Validate filter query is safe for use in WHERE clause."""
@@ -49,6 +73,7 @@ class JSONLExporter:
         Returns:
             Number of records exported
         """
+        _validate_output_path(output_path)
         count = 0
 
         if filter_query:

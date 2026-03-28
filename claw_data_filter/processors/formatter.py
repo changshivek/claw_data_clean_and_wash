@@ -3,6 +3,29 @@ import json
 from typing import Any
 
 
+def _extract_text_content(content: Any) -> str:
+    """Extract text from content field.
+
+    Handles two formats:
+    - Plain string: "Hello"
+    - List of content parts: [{"type": "text", "text": "Hello"}, ...]
+    """
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, dict):
+                if part.get("type") == "text":
+                    parts.append(part.get("text", ""))
+                elif part.get("type") == "image_url":
+                    parts.append("[image]")
+        return "".join(parts)
+    return str(content)
+
+
 ROLE_LABELS = {
     "user": "User",
     "assistant": "Assistant",
@@ -37,7 +60,7 @@ class ConversationFormatter:
                 continue
 
             label = ROLE_LABELS.get(role, role.capitalize())
-            content = msg.get("content", "")
+            content = _extract_text_content(msg.get("content"))
 
             # Handle tool calls in assistant messages
             tool_calls = msg.get("tool_calls", [])

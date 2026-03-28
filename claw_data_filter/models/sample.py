@@ -4,6 +4,27 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 
 
+def _extract_text_content(content: Any) -> str:
+    """Extract text from content field.
+
+    Handles two formats:
+    - Plain string: "Hello"
+    - List of content parts: [{"type": "text", "text": "Hello"}, ...]
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, dict):
+                if part.get("type") == "text":
+                    parts.append(part.get("text", ""))
+                elif part.get("type") == "image_url":
+                    parts.append("[image]")
+        return "".join(parts)
+    return str(content) if content else ""
+
+
 class Sample(BaseModel):
     """Represents a single agent conversation sample."""
 
@@ -37,7 +58,7 @@ class Sample(BaseModel):
         user_query = ""
         for msg in reversed(messages):
             if msg.get("role") == "user":
-                user_query = msg.get("content", "")
+                user_query = _extract_text_content(msg.get("content"))
                 break
 
         # Extract formatted assistant response (concatenate all assistant messages)
@@ -45,7 +66,7 @@ class Sample(BaseModel):
         tool_calls = []
         for msg in messages:
             if msg.get("role") == "assistant":
-                content = msg.get("content", "")
+                content = _extract_text_content(msg.get("content"))
                 if content:
                     assistant_parts.append(content)
                 tc = msg.get("tool_calls", [])
@@ -63,7 +84,7 @@ class Sample(BaseModel):
         has_error = False
         for msg in messages:
             if msg.get("role") == "tool":
-                content = msg.get("content", "")
+                content = _extract_text_content(msg.get("content"))
                 if content and ("error" in content.lower() or "exception" in content.lower()):
                     has_error = True
                     break

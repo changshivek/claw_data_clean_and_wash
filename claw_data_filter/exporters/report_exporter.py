@@ -8,6 +8,29 @@ from claw_data_filter.storage.duckdb_store import DuckDBStore
 
 logger = logging.getLogger(__name__)
 
+# Allowed directories for I/O (relative to project root)
+ALLOWED_IO_DIRS = ["data", "."]
+
+
+def _validate_output_path(path: Path) -> None:
+    """Validate output path is within allowed directories.
+
+    Args:
+        path: Path to validate
+
+    Raises:
+        ValueError: If path is outside allowed directories
+    """
+    path = path.resolve()
+    allowed = [Path.cwd() / d for d in ALLOWED_IO_DIRS]
+    for allowed_dir in allowed:
+        try:
+            path.relative_to(allowed_dir.resolve())
+            return
+        except ValueError:
+            continue
+    raise ValueError(f"Output path must be within allowed directories: {ALLOWED_IO_DIRS}")
+
 
 class ReportExporter:
     """Generate and export statistical reports from evaluations."""
@@ -83,6 +106,7 @@ class ReportExporter:
         Args:
             output_path: Path to output JSON report file
         """
+        _validate_output_path(output_path)
         report = self.generate_report()
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(report, f, indent=2, ensure_ascii=False)
