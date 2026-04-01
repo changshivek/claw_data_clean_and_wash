@@ -12,6 +12,10 @@ class Config(BaseModel):
     worker_count: int = max(1, (os.cpu_count() or 1) // 2)
     batch_size: int = 10
     max_retries: int = 3
+    # Round feedback specific
+    max_concurrency: int = 10
+    llm_timeout: float = 60.0
+    context_window: int = 4096
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -22,4 +26,7 @@ class Config(BaseModel):
             worker_count=int(os.getenv("WORKER_COUNT", (os.cpu_count() or 1) // 2)),
             batch_size=int(os.getenv("BATCH_SIZE", 10)),
             max_retries=int(os.getenv("MAX_RETRIES", 3)),
+            max_concurrency=int(os.getenv("MAX_CONCURRENCY", 10)),
+            llm_timeout=float(os.getenv("LLM_TIMEOUT", 60.0)),
+            context_window=int(os.getenv("CONTEXT_WINDOW", 4096)),
         )

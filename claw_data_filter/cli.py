@@ -1,4 +1,5 @@
 """Click CLI for agent data filter tool."""
+import asyncio
 import logging
 import re
 import sys
@@ -155,6 +156,80 @@ def info(ctx):
         click.echo(f"Sample count: {store.get_sample_count()}")
         click.echo(f"Evaluation count: {store.get_evaluation_count()}")
     finally:
+        store.close()
+
+
+@cli.command()
+@click.pass_context
+def pressure_test(ctx):
+    """Run pressure test before starting round feedback processing."""
+    config = ctx.obj["config"]
+    click.echo(f"Running pressure test with concurrency={config.max_concurrency}...")
+
+    from claw_data_filter.llm.async_client import AsyncLLMClient
+    from claw_data_filter.processors.round_feedback import PressureTest
+
+    llm = AsyncLLMClient(
+        endpoint=config.llm_endpoint,
+        api_key=config.llm_api_key,
+        timeout=config.llm_timeout,
+    )
+
+    tester = PressureTest(llm)
+    try:
+        passed = asyncio.run(tester.run(config.max_concurrency))
+        if passed:
+            click.echo("Pressure test PASSED")
+        else:
+            click.echo("Pressure test FAILED")
+            sys.exit(1)
+    finally:
+        asyncio.run(llm.close())
+
+
+@cli.command()
+@click.option("--workers", type=int, default=None, help="Number of parallel workers")
+@click.option("--batch-size", type=int, default=None, help="Batch size per worker")
+@click.pass_context
+def round_feedback(ctx, workers, batch_size):
+    """Process round-level feedback judgments on samples."""
+    config = ctx.obj["config"]
+    if workers:
+        config.max_concurrency = workers
+
+    click.echo(f"Starting round feedback processing with concurrency={config.max_concurrency}...")
+
+    from claw_data_filter.llm.async_client import AsyncLLMClient
+    from claw_data_filter.processors.round_feedback import RoundFeedbackProcessor
+    from claw_data_filter.storage.duckdb_store import DuckDBStore
+
+    llm = AsyncLLMClient(
+        endpoint=config.llm_endpoint,
+        api_key=config.llm_api_key,
+        timeout=config.llm_timeout,
+    )
+
+    store = DuckDBStore(config.db_path)
+    processor = RoundFeedbackProcessor(store, llm, config.max_concurrency)
+
+    try:
+        total_success = 0
+        total_failures = 0
+
+        while True:
+            batch = store.get_unprocessed_samples(limit=config.batch_size)
+            if not batch:
+                break
+
+            success, failures = asyncio.run(processor.process_batch(batch))
+            total_success += success
+            total_failures += failures
+            click.echo(f"Processed batch: {success} success, {failures} failures")
+
+        click.echo(f"Round feedback processing complete: {total_success} success, {total_failures} failures")
+
+    finally:
+        asyncio.run(llm.close())
         store.close()
 
 
