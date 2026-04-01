@@ -111,18 +111,18 @@ class RoundJudgment(BaseModel):
     user_satisfied: Optional[str] = None  # yes/no/uncertain/neutral/null when error
     signal_from_users: list[str] = Field(default_factory=list)
     llm_error: bool = False
-    created_at: datetime = Field(default_factory=datetime.now)
+    created_at: datetime = Field(default_factory=lambda: datetime.now())
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `pytest tests/models/test_round_judgment.py -v`
+Run: `pytest tests/test_round_judgment.py -v`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add claw_data_filter/models/round_judgment.py tests/models/test_round_judgment.py
+git add claw_data_filter/models/round_judgment.py tests/test_round_judgment.py
 git commit -m "feat: add RoundJudgment model for turn-level judgments
 
 Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"
@@ -150,11 +150,7 @@ def test_turn_judgments_table_created():
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / "test.db"
         store = DuckDBStore(db_path)
-        # Check table exists
-        result = store.conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='turn_judgments'"
-        ).fetchone()
-        # For duckdb, check differently
+        # Check table exists (DuckDB uses SHOW TABLES)
         tables = store.conn.execute("SHOW TABLES").fetchall()
         table_names = [r[0] for r in tables]
         assert "turn_judgments" in table_names
@@ -186,16 +182,16 @@ def test_tool_stats_column_exists():
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / "test.db"
         store = DuckDBStore(db_path)
-        # Check tool_stats column exists in samples
-        columns = store.conn.execute("DESCRIBE samples").fetchall()
-        col_names = [c[0] for c in columns]
+        # Check tool_stats column exists in samples (DuckDB uses PRAGMA)
+        columns = store.conn.execute("PRAGMA table_info('samples')").fetchall()
+        col_names = [c[1] for c in columns]  # PRAGMA returns: cid, name, type, notnull, dflt_value, pk
         assert "tool_stats" in col_names
         store.close()
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `pytest tests/storage/test_duckdb_store.py -v`
+Run: `pytest tests/test_duckdb_store.py -v`
 Expected: FAIL - no round_judgment module, no insert_turn_judgment method
 
 - [ ] **Step 3: Write implementation**
@@ -204,6 +200,7 @@ Expected: FAIL - no round_judgment module, no insert_turn_judgment method
 
 1. 添加 import:
 ```python
+import json
 from claw_data_filter.models.round_judgment import RoundJudgment
 ```
 
@@ -769,7 +766,7 @@ Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"
 - [ ] **Step 1: Write failing test**
 
 ```python
-# tests/processors/test_round_judgment_processor.py
+# tests/test_round_feedback.py
 import pytest
 from unittest.mock import AsyncMock, patch
 from claw_data_filter.processors.round_feedback import (
@@ -813,7 +810,7 @@ async def test_parse_response_invalid():
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `pytest tests/processors/test_round_judgment_processor.py -v`
+Run: `pytest tests/test_round_feedback.py -v`
 Expected: FAIL - module not found or class not defined
 
 - [ ] **Step 3: Write implementation**
@@ -1093,13 +1090,13 @@ class RoundFeedbackProcessor:
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `pytest tests/processors/test_round_judgment_processor.py -v`
+Run: `pytest tests/test_round_feedback.py -v`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add claw_data_filter/processors/round_feedback.py tests/processors/test_round_judgment_processor.py
+git add claw_data_filter/processors/round_feedback.py tests/test_round_feedback.py
 git commit -m "feat: implement RoundJudgmentProcessor and RoundFeedbackProcessor
 
 Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"
@@ -1149,10 +1146,6 @@ class PressureTest:
     async def _send_request(self) -> tuple[bool, float]:
         """发送单个测试请求，返回 (success, latency)"""
         import time
-        start = time.perf_counter()
-
-    async def _send_request(self) -> tuple[bool, float]:
-        """发送单个测试请求，返回 (success, latency)"""
         start = time.perf_counter()
         try:
             response = await self.llm.chat(
