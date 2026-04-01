@@ -174,3 +174,15 @@ def test_tool_stats_aggregator():
 
     assert stats["tool_used"] == 2  # 2 turns with need_tool=yes
     assert stats["tool_success"] == 1  # 1 turn with tool_correct=yes
+
+
+@pytest.mark.asyncio
+async def test_pressure_test_initialization():
+    """Test PressureTest can be initialized"""
+    from unittest.mock import AsyncMock
+    from claw_data_filter.processors.round_feedback import PressureTest
+    from claw_data_filter.llm.async_client import AsyncLLMClient
+
+    mock_llm = AsyncMock(spec=AsyncLLMClient)
+    pt = PressureTest(mock_llm)
+    assert pt.llm is mock_llm

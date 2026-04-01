@@ -1,6 +1,8 @@
 """RoundFeedbackProcessor - 逐轮反馈判断处理器"""
+import asyncio
 import json
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -232,7 +234,6 @@ class TurnContextBuilder:
         return prompt
 
 
-import asyncio
 import re
 from concurrent.futures import ThreadPoolExecutor
 
@@ -495,3 +496,104 @@ class RoundFeedbackProcessor:
                 failures += 1
 
         return success, failures
+
+
+class PressureTest:
+    """启动前压力测试"""
+
+    def __init__(self, llm_client: "AsyncLLMClient"):
+        self.llm = llm_client
+
+    async def _send_request(self) -> tuple[bool, float]:
+        """发送单个测试请求，返回 (success, latency)"""
+        import time
+        start = time.perf_counter()
+        try:
+            response = await self.llm.chat(
+                [{"role": "user", "content": "判断：need_tool=yes; tool_correct=no 对应格式是否正确？"}],
+                max_tokens=20,
+            )
+            latency = time.perf_counter() - start
+            return "need_tool=yes" in response, latency
+        except Exception as e:
+            latency = time.perf_counter() - start
+            logger.error(f"Pressure test request failed: {e}")
+            return False, latency
+
+    async def run(
+        self,
+        max_concurrency: int,
+        duration: int = 30,
+        success_threshold: float = 0.95,
+        p95_latency_threshold: float = 10.0,
+        p99_latency_threshold: float = 30.0,
+    ) -> bool:
+        """运行压力测试
+
+        Args:
+            max_concurrency: 最大并发数
+            duration: 测试持续时间（秒）
+            success_threshold: 成功率阈值
+            p95_latency_threshold: P95延迟阈值（秒）
+            p99_latency_threshold: P99延迟阈值（秒）
+
+        Returns:
+            True if all metrics pass, False otherwise
+        """
+        logger.info(f"Starting pressure test: concurrency={max_concurrency}, duration={duration}s")
+
+        semaphore = asyncio.Semaphore(max_concurrency)
+        results: list[tuple[bool, float]] = []
+        start_time = time.perf_counter()
+
+        async def bounded_request():
+            async with semaphore:
+                return await self._send_request()
+
+        # Run requests until duration expires
+        tasks = []
+        while time.perf_counter() - start_time < duration:
+            task = asyncio.create_task(bounded_request())
+            tasks.append(task)
+            await asyncio.sleep(0.1)  # Small delay to avoid spawning too fast
+
+        # Wait for all tasks to complete
+        all_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        for r in all_results:
+            if isinstance(r, tuple):
+                results.append(r)
+            else:
+                results.append((False, 0))
+
+        # Calculate metrics
+        total = len(results)
+        successes = sum(1 for success, _ in results if success)
+        latencies = sorted([lat for _, lat in results])
+
+        success_rate = successes / total if total > 0 else 0
+        p50 = latencies[int(len(latencies) * 0.5)] if latencies else 0
+        p95 = latencies[int(len(latencies) * 0.95)] if latencies else 0
+        p99 = latencies[int(len(latencies) * 0.99)] if latencies else 0
+
+        logger.info(f"Pressure test results: success_rate={success_rate:.2%}, "
+                   f"p50={p50:.2f}s, p95={p95:.2f}s, p99={p99:.2f}s")
+
+        # Check thresholds
+        passed = True
+        if success_rate < success_threshold:
+            logger.error(f"Success rate {success_rate:.2%} < {success_threshold:.2%}")
+            passed = False
+        if p95 > p95_latency_threshold:
+            logger.error(f"P95 latency {p95:.2f}s > {p95_latency_threshold}s")
+            passed = False
+        if p99 > p99_latency_threshold:
+            logger.error(f"P99 latency {p99:.2f}s > {p99_latency_threshold}s")
+            passed = False
+
+        if passed:
+            logger.info("Pressure test PASSED")
+        else:
+            logger.error("Pressure test FAILED")
+
+        return passed
