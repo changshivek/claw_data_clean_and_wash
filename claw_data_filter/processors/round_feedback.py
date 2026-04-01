@@ -232,5 +232,266 @@ class TurnContextBuilder:
         return prompt
 
 
-# RoundJudgmentProcessor and RoundFeedbackProcessor will be added in Task 5
-# PressureTest will be added in Task 6
+import asyncio
+import re
+from concurrent.futures import ThreadPoolExecutor
+
+from claw_data_filter.models.round_judgment import RoundJudgment
+
+
+class RoundJudgmentProcessor:
+    """异步执行单轮4维度判断"""
+
+    def __init__(self, llm_client, max_retries: int = 2):
+        self.llm = llm_client
+        self.max_retries = max_retries
+
+    async def judge_group1(self, prompt: str) -> dict | None:
+        """执行工具相关判断"""
+        return await self._call_llm_with_retry(prompt, self._parse_group1_response)
+
+    async def judge_group2(self, prompt: str) -> dict | None:
+        """执行效果相关判断"""
+        return await self._call_llm_with_retry(prompt, self._parse_group2_response)
+
+    async def _call_llm_with_retry(self, prompt: str, parser) -> dict | None:
+        """带重试的LLM调用
+
+        Args:
+            prompt: 输入prompt
+            parser: 解析函数 (_parse_group1_response 或 _parse_group2_response)
+        """
+        for attempt in range(self.max_retries + 1):
+            try:
+                response = await self.llm.chat(
+                    [{"role": "user", "content": prompt}],
+                    max_tokens=50,
+                )
+
+                result = parser(response)
+
+                if result is not None:
+                    return result
+
+                logger.warning(f"Attempt {attempt + 1}: Failed to parse response")
+
+            except Exception as e:
+                logger.warning(f"Attempt {attempt + 1}: LLM call failed: {e}")
+                if attempt < self.max_retries:
+                    await asyncio.sleep(2 ** attempt)  # Exponential backoff
+                else:
+                    return None
+
+        return None
+
+    def _parse_group1_response(self, response: str) -> dict | None:
+        """解析 Group1 响应"""
+        response = response.strip()
+        result = {}
+
+        # Match need_tool=value
+        need_tool_match = re.search(r"need_tool\s*=\s*(yes|no|uncertain)", response, re.IGNORECASE)
+        if need_tool_match:
+            result["need_tool"] = need_tool_match.group(1).lower()
+        else:
+            return None
+
+        # Match tool_correct=value
+        tool_correct_match = re.search(r"tool_correct\s*=\s*(yes|no|uncertain)", response, re.IGNORECASE)
+        if tool_correct_match:
+            result["tool_correct"] = tool_correct_match.group(1).lower()
+        else:
+            return None
+
+        return result
+
+    def _parse_group2_response(self, response: str) -> dict | None:
+        """解析 Group2 响应"""
+        response = response.strip()
+        result = {}
+
+        # Match response_helpful=value
+        helpful_match = re.search(r"response_helpful\s*=\s*(yes|no|uncertain)", response, re.IGNORECASE)
+        if helpful_match:
+            result["response_helpful"] = helpful_match.group(1).lower()
+        else:
+            return None
+
+        # Match user_satisfied=value
+        satisfied_match = re.search(r"user_satisfied\s*=\s*(yes|no|uncertain|neutral)", response, re.IGNORECASE)
+        if satisfied_match:
+            result["user_satisfied"] = satisfied_match.group(1).lower()
+        else:
+            return None
+
+        return result
+
+    async def process_turn(self, turn: TurnContext, all_turns: list[TurnContext], builder: TurnContextBuilder) -> RoundJudgment:
+        """处理单个turn，返回判断结果"""
+        # Build prompts
+        group1_prompt = builder.build_group1_prompt(turn, all_turns)
+        group2_prompt = builder.build_group2_prompt(turn, all_turns)
+
+        # Execute both groups in parallel
+        group1_result, group2_result = await asyncio.gather(
+            self.judge_group1(group1_prompt),
+            self.judge_group2(group2_prompt),
+        )
+
+        # Merge results
+        need_tool = group1_result.get("need_tool") if group1_result else None
+        tool_correct = group1_result.get("tool_correct") if group1_result else None
+        response_helpful = group2_result.get("response_helpful") if group2_result else None
+        user_satisfied = group2_result.get("user_satisfied") if group2_result else None
+
+        # Determine if there's an LLM error
+        llm_error = group1_result is None or group2_result is None
+
+        return RoundJudgment(
+            sample_id=0,  # Will be set by caller
+            turn_index=turn.turn_index,
+            need_tool=need_tool or "uncertain",
+            tool_correct=tool_correct,
+            response_helpful=response_helpful,
+            user_satisfied=user_satisfied,
+            signal_from_users=turn.signal_users,
+            llm_error=llm_error,
+        )
+
+
+class ToolStatsAggregator:
+    """从逐轮判断结果汇总工具统计"""
+
+    @staticmethod
+    def aggregate(judgments: list[RoundJudgment]) -> dict:
+        """汇总判断结果，生成 tool_stats
+
+        Returns:
+            {
+                "tool_used": int,
+                "tool_success": int,
+                "tool_unnecessary": int,
+                "tool_missing": int,
+                "partial": bool,
+            }
+        """
+        if not judgments:
+            return {
+                "tool_used": 0,
+                "tool_success": 0,
+                "tool_unnecessary": 0,
+                "tool_missing": 0,
+                "partial": False,
+            }
+
+        tool_used = 0
+        tool_success = 0
+        tool_unnecessary = 0
+        tool_missing = 0
+        has_error = False
+
+        for j in judgments:
+            if j.llm_error:
+                has_error = True
+                continue
+
+            # Count based on need_tool and tool_correct
+            if j.need_tool == "yes":
+                if j.tool_correct == "yes":
+                    tool_used += 1
+                    tool_success += 1
+                elif j.tool_correct == "no":
+                    tool_used += 1  # Used but wrong tool
+                elif j.tool_correct is None:
+                    tool_missing += 1  # Needed but not used (or error)
+            elif j.need_tool == "no" and j.tool_correct == "no":
+                tool_unnecessary += 1  # Used when not needed
+
+        return {
+            "tool_used": tool_used,
+            "tool_success": tool_success,
+            "tool_unnecessary": tool_unnecessary,
+            "tool_missing": tool_missing,
+            "partial": has_error,
+        }
+
+
+class RoundFeedbackProcessor:
+    """主处理器：协调整个流程"""
+
+    def __init__(
+        self,
+        store: "DuckDBStore",
+        llm_client: "AsyncLLMClient",
+        max_concurrency: int = 10,
+    ):
+        self.store = store
+        self.llm = llm_client
+        self.semaphore = asyncio.Semaphore(max_concurrency)
+        self.context_builder = TurnContextBuilder()
+        self.judgment_processor = RoundJudgmentProcessor(llm_client)
+        self.stats_aggregator = ToolStatsAggregator()
+
+    async def process_sample(self, sample_id: int, raw_json: dict) -> list[RoundJudgment]:
+        """处理单条sample的所有turn"""
+        messages = raw_json.get("request", {}).get("bodyJson", {}).get("messages", [])
+        if not messages:
+            return []
+
+        # Extract turns
+        turns = self.context_builder.extract_turns(messages)
+        if not turns:
+            return []
+
+        # Process turns with concurrency control
+        tasks = []
+        for turn in turns:
+            task = self._process_turn_with_semaphore(sample_id, turn, turns)
+            tasks.append(task)
+
+        judgments = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Filter out exceptions, convert to RoundJudgment
+        valid_judgments = []
+        for j in judgments:
+            if isinstance(j, RoundJudgment):
+                valid_judgments.append(j)
+            else:
+                logger.error(f"Turn processing failed: {j}")
+
+        # Aggregate and update tool_stats
+        if valid_judgments:
+            tool_stats = self.stats_aggregator.aggregate(valid_judgments)
+            self.store.update_sample_tool_stats(sample_id, tool_stats)
+
+        # Insert judgments to DB
+        for j in valid_judgments:
+            j.sample_id = sample_id
+            self.store.insert_turn_judgment(j)
+
+        return valid_judgments
+
+    async def _process_turn_with_semaphore(
+        self, sample_id: int, turn: TurnContext, all_turns: list[TurnContext]
+    ) -> RoundJudgment:
+        """使用信号量控制并发处理单个turn"""
+        async with self.semaphore:
+            return await self.judgment_processor.process_turn(turn, all_turns, self.context_builder)
+
+    async def process_batch(self, sample_batch: list[tuple[int, dict]]) -> tuple[int, int]:
+        """批量处理多个sample"""
+        success = 0
+        failures = 0
+
+        for sample_id, raw_json in sample_batch:
+            try:
+                judgments = await self.process_sample(sample_id, raw_json)
+                if judgments:
+                    success += 1
+                else:
+                    failures += 1
+            except Exception as e:
+                logger.error(f"Failed to process sample {sample_id}: {e}")
+                failures += 1
+
+        return success, failures

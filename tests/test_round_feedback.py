@@ -1,4 +1,5 @@
 # Sample conversation data for testing
+import pytest
 SAMPLE_MESSAGES = [
     {"role": "system", "content": "You are a helpful assistant."},
     {"role": "user", "content": "What's the weather in Beijing?"},
@@ -71,3 +72,105 @@ def test_build_group2_prompt():
     assert "=== 后续用户信号" in prompt
     assert "response_helpful:" in prompt
     assert "user_satisfied:" in prompt
+
+
+@pytest.mark.asyncio
+async def test_judge_group1_success():
+    """Test Group1 judgment returns parsed result"""
+    from unittest.mock import AsyncMock, patch
+    from claw_data_filter.processors.round_feedback import RoundJudgmentProcessor
+    from claw_data_filter.llm.async_client import AsyncLLMClient
+
+    mock_llm = AsyncMock(spec=AsyncLLMClient)
+    mock_llm.chat = AsyncMock(return_value="need_tool=yes; tool_correct=yes")
+
+    processor = RoundJudgmentProcessor(mock_llm)
+    result = await processor.judge_group1("mock prompt")
+
+    assert result["need_tool"] == "yes"
+    assert result["tool_correct"] == "yes"
+
+@pytest.mark.asyncio
+async def test_judge_group2_success():
+    """Test Group2 judgment returns parsed result"""
+    from unittest.mock import AsyncMock
+    from claw_data_filter.processors.round_feedback import RoundJudgmentProcessor
+    from claw_data_filter.llm.async_client import AsyncLLMClient
+
+    mock_llm = AsyncMock(spec=AsyncLLMClient)
+    mock_llm.chat = AsyncMock(return_value="response_helpful=yes; user_satisfied=no")
+
+    processor = RoundJudgmentProcessor(mock_llm)
+    result = await processor.judge_group2("mock prompt")
+
+    assert result["response_helpful"] == "yes"
+    assert result["user_satisfied"] == "no"
+
+def test_parse_group1_response():
+    """Test Group1 response parsing"""
+    from unittest.mock import AsyncMock
+    from claw_data_filter.processors.round_feedback import RoundJudgmentProcessor
+    from claw_data_filter.llm.async_client import AsyncLLMClient
+
+    mock_llm = AsyncMock(spec=AsyncLLMClient)
+    processor = RoundJudgmentProcessor(mock_llm)
+
+    result = processor._parse_group1_response("need_tool=yes; tool_correct=no")
+    assert result["need_tool"] == "yes"
+    assert result["tool_correct"] == "no"
+
+def test_parse_group1_response_uncertain():
+    """Test Group1 response with uncertain value"""
+    from unittest.mock import AsyncMock
+    from claw_data_filter.processors.round_feedback import RoundJudgmentProcessor
+    from claw_data_filter.llm.async_client import AsyncLLMClient
+
+    mock_llm = AsyncMock(spec=AsyncLLMClient)
+    processor = RoundJudgmentProcessor(mock_llm)
+
+    result = processor._parse_group1_response("need_tool=uncertain; tool_correct=yes")
+    assert result["need_tool"] == "uncertain"
+    assert result["tool_correct"] == "yes"
+
+def test_parse_group2_response():
+    """Test Group2 response parsing"""
+    from unittest.mock import AsyncMock
+    from claw_data_filter.processors.round_feedback import RoundJudgmentProcessor
+    from claw_data_filter.llm.async_client import AsyncLLMClient
+
+    mock_llm = AsyncMock(spec=AsyncLLMClient)
+    processor = RoundJudgmentProcessor(mock_llm)
+
+    result = processor._parse_group2_response("response_helpful=no; user_satisfied=yes")
+    assert result["response_helpful"] == "no"
+    assert result["user_satisfied"] == "yes"
+
+def test_parse_response_invalid():
+    """Test invalid response returns None"""
+    from unittest.mock import AsyncMock
+    from claw_data_filter.processors.round_feedback import RoundJudgmentProcessor
+    from claw_data_filter.llm.async_client import AsyncLLMClient
+
+    mock_llm = AsyncMock(spec=AsyncLLMClient)
+    processor = RoundJudgmentProcessor(mock_llm)
+
+    result = processor._parse_group1_response("invalid response format")
+    assert result is None
+
+def test_tool_stats_aggregator():
+    """Test ToolStatsAggregator aggregates correctly"""
+    from claw_data_filter.processors.round_feedback import ToolStatsAggregator
+    from claw_data_filter.models.round_judgment import RoundJudgment
+
+    aggregator = ToolStatsAggregator()
+
+    judgments = [
+        RoundJudgment(sample_id=1, turn_index=0, need_tool="yes", tool_correct="yes", llm_error=False),
+        RoundJudgment(sample_id=1, turn_index=1, need_tool="yes", tool_correct="no", llm_error=False),
+        RoundJudgment(sample_id=1, turn_index=2, need_tool="no", llm_error=False),
+    ]
+
+    stats = aggregator.aggregate(judgments)
+
+    assert stats["tool_used"] == 2  # 2 turns with need_tool=yes
+    assert stats["tool_success"] == 1  # 1 turn with tool_correct=yes
