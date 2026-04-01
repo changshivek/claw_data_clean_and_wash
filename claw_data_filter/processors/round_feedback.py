@@ -480,20 +480,23 @@ class RoundFeedbackProcessor:
             return await self.judgment_processor.process_turn(turn, all_turns, self.context_builder)
 
     async def process_batch(self, sample_batch: list[tuple[int, dict]]) -> tuple[int, int]:
-        """批量处理多个sample"""
-        success = 0
-        failures = 0
-
-        for sample_id, raw_json in sample_batch:
+        """批量处理多个sample（并行）"""
+        async def process_one(sample_id: int, raw_json: dict) -> bool:
+            """处理单个sample，返回是否成功"""
             try:
                 judgments = await self.process_sample(sample_id, raw_json)
-                if judgments:
-                    success += 1
-                else:
-                    failures += 1
+                return len(judgments) > 0
             except Exception as e:
                 logger.error(f"Failed to process sample {sample_id}: {e}")
-                failures += 1
+                return False
+
+        # 并行处理所有samples
+        tasks = [process_one(sid, rj) for sid, rj in sample_batch]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # 统计结果
+        success = sum(1 for r in results if r is True)
+        failures = len(results) - success
 
         return success, failures
 
