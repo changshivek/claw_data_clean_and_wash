@@ -133,6 +133,108 @@ def test_get_stats():
         print("test_get_stats passed")
 
 
+def test_turn_judgments_table_created():
+    """Test that turn_judgments table is created on init"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test.db"
+        store = DuckDBStore(db_path)
+        # Check table exists (DuckDB uses SHOW TABLES)
+        tables = store.conn.execute("SHOW TABLES").fetchall()
+        table_names = [r[0] for r in tables]
+        assert "turn_judgments" in table_names
+        store.close()
+
+
+def test_insert_and_fetch_turn_judgment():
+    """Test inserting and fetching turn judgments"""
+    from claw_data_filter.models.round_judgment import RoundJudgment
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test.db"
+        store = DuckDBStore(db_path)
+
+        judgment = RoundJudgment(
+            sample_id=1,
+            turn_index=0,
+            need_tool="yes",
+            tool_correct="yes",
+            response_helpful="yes",
+            user_satisfied="yes",
+            signal_from_users=["谢谢"],
+        )
+        j_id = store.insert_turn_judgment(judgment)
+        assert j_id > 0
+
+        fetched = store.get_turn_judgments(1)
+        assert len(fetched) == 1
+        assert fetched[0].need_tool == "yes"
+        store.close()
+
+
+def test_tool_stats_column_exists():
+    """Test that tool_stats column exists in samples table"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test.db"
+        store = DuckDBStore(db_path)
+        # Check tool_stats column exists in samples (DuckDB uses PRAGMA)
+        columns = store.conn.execute("PRAGMA table_info('samples')").fetchall()
+        col_names = [c[1] for c in columns]  # PRAGMA returns: cid, name, type, notnull, dflt_value, pk
+        assert "tool_stats" in col_names
+        store.close()
+
+
+def test_update_sample_tool_stats():
+    """Test updating tool_stats for a sample"""
+    from claw_data_filter.models.sample import Sample
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test.db"
+        store = DuckDBStore(db_path)
+
+        # Insert a sample first
+        sample = Sample(
+            raw_json={"messages": []},
+            user_query="test",
+            assistant_response="test",
+        )
+        sample_id = store.insert_sample(sample)
+
+        # Update tool stats
+        tool_stats = {"tool_used": 5, "tool_success": 4, "tool_unnecessary": 1, "tool_missing": 0, "partial": False}
+        store.update_sample_tool_stats(sample_id, tool_stats)
+
+        # Verify
+        result = store.conn.execute("SELECT tool_stats FROM samples WHERE id = ?", [sample_id]).fetchone()
+        import json
+        assert result is not None
+        assert json.loads(result[0])["tool_used"] == 5
+        store.close()
+
+
+def test_get_unprocessed_samples():
+    """Test getting samples that haven't been processed"""
+    from claw_data_filter.models.sample import Sample
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test.db"
+        store = DuckDBStore(db_path)
+
+        # Insert a sample
+        sample = Sample(
+            raw_json={"request": {"bodyJson": {"messages": [{"role": "user", "content": "test"}]}}},
+            user_query="test",
+            assistant_response="test",
+        )
+        sample_id = store.insert_sample(sample)
+
+        # Should be unprocessed
+        unprocessed = store.get_unprocessed_samples(limit=10)
+        assert len(unprocessed) == 1
+        assert unprocessed[0][0] == sample_id
+
+        store.close()
+
+
 if __name__ == "__main__":
     test_store_and_retrieve_samples()
     test_insert_evaluation()

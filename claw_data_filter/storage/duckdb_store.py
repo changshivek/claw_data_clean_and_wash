@@ -7,6 +7,7 @@ from datetime import datetime
 
 from claw_data_filter.models.sample import Sample
 from claw_data_filter.models.evaluation import Evaluation
+from claw_data_filter.models.round_judgment import RoundJudgment
 
 
 class DuckDBStore:
@@ -19,7 +20,7 @@ class DuckDBStore:
 
     def init_schema(self):
         """Create tables and sequences if not exist."""
-        # Samples table
+        # Samples table - ensure tool_stats column exists (migration for existing DBs)
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS samples (
                 id INTEGER PRIMARY KEY,
@@ -29,9 +30,17 @@ class DuckDBStore:
                 num_turns INTEGER,
                 num_tool_calls INTEGER,
                 has_error BOOLEAN,
-                imported_at TIMESTAMP
+                imported_at TIMESTAMP,
+                tool_stats JSON
             )
         """)
+
+        # Migration: add tool_stats column if it doesn't exist (DuckDB)
+        try:
+            self.conn.execute("ALTER TABLE samples ADD COLUMN tool_stats JSON")
+        except:
+            pass  # Column may already exist (ignore error)
+
         # Evaluations table
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS evaluations (
@@ -46,9 +55,33 @@ class DuckDBStore:
                 evaluated_at TIMESTAMP
             )
         """)
+
+        # Turn judgments table
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS turn_judgments (
+                id INTEGER PRIMARY KEY,
+                sample_id INTEGER,
+                turn_index INTEGER,
+                need_tool TEXT,
+                tool_correct TEXT,
+                response_helpful TEXT,
+                user_satisfied TEXT,
+                signal_from_users JSON,
+                llm_error BOOLEAN,
+                created_at TIMESTAMP
+            )
+        """)
+
         # Sequences for auto-increment
         self.conn.execute("CREATE SEQUENCE IF NOT EXISTS sample_id_seq")
         self.conn.execute("CREATE SEQUENCE IF NOT EXISTS eval_id_seq")
+        self.conn.execute("CREATE SEQUENCE IF NOT EXISTS turn_judgment_id_seq")
+
+        # Create index
+        self.conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_turn_judgments_sample
+            ON turn_judgments(sample_id)
+        """)
 
     def insert_sample(self, sample: Sample) -> int:
         """Insert sample, return auto-generated id."""
@@ -148,6 +181,73 @@ class DuckDBStore:
             "avg_tool_success_rate": progress_stats[2] if progress_stats[2] is not None else 0,
             "avg_overall_score": progress_stats[3] if progress_stats[3] is not None else 0,
         }
+
+    def insert_turn_judgment(self, judgment: RoundJudgment) -> int:
+        """Insert turn judgment, return auto-generated id."""
+        result = self.conn.execute("SELECT nextval('turn_judgment_id_seq')").fetchone()
+        j_id = result[0]
+
+        self.conn.execute(
+            """
+            INSERT INTO turn_judgments (id, sample_id, turn_index, need_tool, tool_correct, response_helpful, user_satisfied, signal_from_users, llm_error, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                j_id,
+                judgment.sample_id,
+                judgment.turn_index,
+                judgment.need_tool,
+                judgment.tool_correct,
+                judgment.response_helpful,
+                judgment.user_satisfied,
+                json.dumps(judgment.signal_from_users),
+                judgment.llm_error,
+                datetime.now(),
+            ],
+        )
+        return j_id
+
+    def get_turn_judgments(self, sample_id: int) -> list[RoundJudgment]:
+        """Get all turn judgments for a sample."""
+        rows = self.conn.execute(
+            "SELECT sample_id, turn_index, need_tool, tool_correct, response_helpful, user_satisfied, signal_from_users, llm_error, created_at FROM turn_judgments WHERE sample_id = ? ORDER BY turn_index",
+            [sample_id],
+        ).fetchall()
+        return [
+            RoundJudgment(
+                sample_id=row[0],
+                turn_index=row[1],
+                need_tool=row[2],
+                tool_correct=row[3],
+                response_helpful=row[4],
+                user_satisfied=row[5],
+                signal_from_users=json.loads(row[6]) if row[6] else [],
+                llm_error=row[7],
+                created_at=row[8],
+            )
+            for row in rows
+        ]
+
+    def update_sample_tool_stats(self, sample_id: int, tool_stats: dict) -> None:
+        """Update tool_stats for a sample."""
+        self.conn.execute(
+            "UPDATE samples SET tool_stats = ? WHERE id = ?",
+            [json.dumps(tool_stats), sample_id],
+        )
+
+    def get_unprocessed_samples(self, limit: int = 100) -> list[tuple[int, dict]]:
+        """Get samples that haven't been processed for round judgments."""
+        rows = self.conn.execute(
+            """
+            SELECT s.id, s.raw_json
+            FROM samples s
+            LEFT JOIN turn_judgments tj ON s.id = tj.sample_id
+            WHERE tj.id IS NULL
+            LIMIT ?
+            """,
+            [limit],
+        ).fetchall()
+        return [(row[0], json.loads(row[1])) for row in rows]
 
     def close(self):
         """Close connection."""
