@@ -1,0 +1,35 @@
+import pytest
+from claw_data_filter.models.round_judgment import RoundJudgment, JudgmentValue
+
+def test_round_judgment_creation():
+    judgment = RoundJudgment(
+        sample_id=1,
+        turn_index=0,
+        need_tool="yes",
+        tool_correct="yes",
+        response_helpful="yes",
+        user_satisfied="yes",
+        signal_from_users=["谢谢"],
+        llm_error=False,
+    )
+    assert judgment.need_tool == "yes"
+    assert judgment.tool_correct == "yes"
+    assert judgment.llm_error is False
+
+def test_judgment_value_enum():
+    result = JudgmentValue.YES
+    assert result.value == "yes"
+
+def test_round_judgment_from_dict():
+    data = {
+        "sample_id": 1,
+        "turn_index": 0,
+        "need_tool": "no",
+        "tool_correct": "uncertain",
+        "response_helpful": "yes",
+        "user_satisfied": "no",
+        "signal_from_users": ["能具体说说吗？"],
+        "llm_error": False,
+    }
+    judgment = RoundJudgment(**data)
+    assert judgment.user_satisfied == "no"
