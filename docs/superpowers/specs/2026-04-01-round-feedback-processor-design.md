@@ -104,9 +104,12 @@
 ```
 
 **超出 context 时的处理**:
-- Token 预算：单次判断输入不超过 4096 tokens
+- Token 预算：单次判断输入不超过配置的 context_window（默认通过 API 获取或配置指定）
 - 截断策略：优先保留最新轮次，从最早期开始截断
 - 截断标记：被截断的轮次不参与判断，不影响结果
+
+**配置项**:
+- `context_window`: 小模型 context window 大小（默认 4096，支持 API 获取或手动配置）
 
 ## 数据模型
 
@@ -274,6 +277,17 @@ async def pressure_test(max_concurrency: int, duration: int = 30):
 | 用户消息在 tool_result 之前 | 按消息顺序处理，tool_result 视为紧跟前一个 assistant |
 | 信号窗口内无 user 消息 | user_satisfied 设为 uncertain |
 | 解析失败 | 标记 llm_error=True，字段值设为 null |
+
+## 配置项
+
+| 配置项 | 默认值 | 说明 |
+|-------|-------|------|
+| `context_window` | API获取或 4096 | 小模型 context window |
+| `max_concurrency` | 10 | 最大并发数 |
+| `llm_timeout` | 60s | LLM 调用超时 |
+| `max_retries` | 3 | 最大重试次数 |
+
+## 组件清单
 
 | 组件 | 文件 | 职责 |
 |-----|------|-----|
