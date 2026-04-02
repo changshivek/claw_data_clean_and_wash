@@ -102,6 +102,14 @@ def test_all_imports_work():
     print("test_all_imports_work passed")
 
 
+def test_evaluate_command_removed():
+    """Test that evaluate command is no longer available"""
+    from claw_data_filter.cli import cli
+
+    # Check that evaluate is NOT in the list of commands
+    assert 'evaluate' not in cli.commands, "evaluate command should be removed"
+
+
 if __name__ == "__main__":
     test_all_imports_work()
     print("Integration tests complete (skipping LLM-dependent tests)")

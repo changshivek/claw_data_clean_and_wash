@@ -12,7 +12,6 @@ from claw_data_filter.exporters.jsonl_exporter import JSONLExporter
 from claw_data_filter.exporters.report_exporter import ReportExporter
 from claw_data_filter.filters.query import FilterQueryBuilder
 from claw_data_filter.importers.jsonl_importer import JSONLImporter
-from claw_data_filter.processors.evaluator import Evaluator
 from claw_data_filter.storage.duckdb_store import DuckDBStore
 
 logging.basicConfig(
@@ -50,31 +49,6 @@ def import_cmd(ctx, input_file):
         click.echo(f"Successfully imported {count} samples.")
     finally:
         importer.close()
-
-
-@cli.command()
-@click.option("--workers", type=int, default=None, help="Number of parallel workers")
-@click.option("--batch-size", type=int, default=None, help="Batch size per worker")
-@click.pass_context
-def evaluate(ctx, workers, batch_size):
-    """Evaluate all unevaluated samples using LLM."""
-    config = ctx.obj["config"]
-    if workers:
-        config.worker_count = workers
-    if batch_size:
-        config.batch_size = batch_size
-
-    click.echo(f"Starting evaluation with {config.worker_count} workers...")
-
-    store = DuckDBStore(config.db_path)
-    evaluator = Evaluator(store, config)
-
-    try:
-        success, failures = evaluator.evaluate_batch(workers=config.worker_count)
-        click.echo(f"Evaluation complete: {success} success, {failures} failures")
-    finally:
-        evaluator.close()
-        store.close()
 
 
 @cli.command()
@@ -126,7 +100,7 @@ def filter_cmd(ctx, progress_score, overall_score, task_type, export, report, li
 @cli.command()
 @click.pass_context
 def stats(ctx):
-    """Show statistics about imported data and evaluations."""
+    """Show statistics about imported data and round judgments."""
     config = ctx.obj["config"]
     store = DuckDBStore(config.db_path)
 
@@ -134,12 +108,10 @@ def stats(ctx):
         stats_data = store.get_stats()
         click.echo("=== Statistics ===")
         click.echo(f"Total samples: {stats_data['total_samples']}")
-        click.echo(f"Total evaluations: {stats_data['total_evaluations']}")
-        if stats_data["total_evaluations"] > 0:
-            click.echo(f"Avg progress score: {stats_data['avg_progress_score']:.2f}")
-            click.echo(f"Avg tool quality: {stats_data['avg_tool_quality']:.2f}")
-            click.echo(f"Avg tool success rate: {stats_data['avg_tool_success_rate']:.2f}")
-            click.echo(f"Avg overall score: {stats_data['avg_overall_score']:.2f}")
+        if stats_data['total_samples'] > 0:
+            click.echo(f"Avg response helpful rate: {stats_data['avg_response_helpful_rate']:.2f}")
+            click.echo(f"Avg user satisfied rate: {stats_data['avg_user_satisfied_rate']:.2f}")
+            click.echo(f"Error count: {stats_data['error_count']}")
     finally:
         store.close()
 
@@ -154,7 +126,6 @@ def info(ctx):
     try:
         click.echo(f"Database path: {config.db_path}")
         click.echo(f"Sample count: {store.get_sample_count()}")
-        click.echo(f"Evaluation count: {store.get_evaluation_count()}")
     finally:
         store.close()
 
