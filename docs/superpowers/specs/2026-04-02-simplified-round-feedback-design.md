@@ -66,8 +66,9 @@ def anthropic_to_openai(messages: list) -> list:
 
 ### Samples Table (扩展)
 ```sql
+-- 新数据库直接创建，已有数据库需要迁移
 ALTER TABLE samples ADD COLUMN task_type TEXT;
-ALTER TABLE samples ADD COLUMN tool_stats JSON;  -- 已存在
+ALTER TABLE samples ADD COLUMN tool_stats JSON;  -- 如已存在则忽略
 ```
 
 `tool_stats` 结构:
@@ -89,12 +90,16 @@ CREATE TABLE turn_judgments (
     response_helpful TEXT,     -- yes/no/uncertain
     user_satisfied TEXT,       -- yes/no/uncertain
     signal_from_users JSON,    -- ["用户消息1", ...]
-    llm_error BOOLEAN,
+    llm_error BOOLEAN,         -- LLM调用是否失败
     created_at TIMESTAMP
 );
 ```
 
 **移除:** `need_tool`, `tool_correct`
+
+**llm_error 判定规则:**
+- `True`: LLM API 调用超时、返回非200状态码、响应格式解析失败
+- `False`: 成功获取有效响应
 
 ## Per-Turn Judgment
 
@@ -102,6 +107,8 @@ CREATE TABLE turn_judgments (
 ```
 轮次N: [user 或 tool_result] → [assistant] → 信号窗口(后续最多3个user消息)
 ```
+
+**信号窗口:** 固定为后续最多3个 user 消息，不作为可配置参数。
 
 ### 判断规则
 
@@ -131,8 +138,9 @@ CREATE TABLE turn_judgments (
 ```python
 def aggregate(judgments: list[RoundJudgment]) -> dict:
     total = len(judgments)
+    # response_helpful_rate: yes 占总轮次的比例
     helpful_yes = sum(1 for j in judgments if j.response_helpful == "yes")
-    # user_satisfied: yes=正面, neutral=新话题(不计入满意), uncertain=不确定
+    # user_satisfied_rate: yes 占总轮次的比例（neutral=新话题, uncertain=不确定，都不计入yes）
     satisfied_yes = sum(1 for j in judgments if j.user_satisfied == "yes")
 
     return {
@@ -142,6 +150,8 @@ def aggregate(judgments: list[RoundJudgment]) -> dict:
         "has_error": any(j.llm_error for j in judgments)
     }
 ```
+
+**说明:** `user_satisfied` 的 `neutral`（新话题）和 `uncertain`（不确定）不计入满意，也不计入不满。计算方式：只统计 `yes` 的比例作为满意度指标。
 
 ## Prompt Design (简化版)
 
