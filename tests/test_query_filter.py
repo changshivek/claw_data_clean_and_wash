@@ -77,6 +77,16 @@ def test_invalid_expression():
     print("test_invalid_expression passed")
 
 
+def test_filter_tool_stats_fields():
+    """Test filtering by tool_stats fields"""
+    from claw_data_filter.filters.query import FilterQueryBuilder, ComparisonOp
+
+    builder = FilterQueryBuilder()
+    builder.add_condition("response_helpful_rate", ComparisonOp(">="), 0.8)
+    sql = builder.build_where_clause()
+    assert "response_helpful_rate" in sql
+
+
 if __name__ == "__main__":
     test_filter_builder_basic()
     test_filter_builder_expression_parsing()
@@ -84,4 +94,5 @@ if __name__ == "__main__":
     test_filter_builder_chained()
     test_filtered_samples_query()
     test_invalid_expression()
+    test_filter_tool_stats_fields()
     print("All filter query tests passed!")

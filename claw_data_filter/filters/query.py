@@ -5,7 +5,14 @@ from enum import Enum
 from typing import Optional
 
 
-ALLOWED_FIELDS = frozenset(["progress_score", "overall_score", "tool_quality_score", "tool_success_rate", "task_type"])
+ALLOWED_FIELDS = frozenset([
+    "task_type",
+    "response_helpful_rate",
+    "user_satisfied_rate",
+    "has_error",
+    "num_turns",
+    "num_tool_calls",
+])
 
 ALLOWED_TASK_TYPES = frozenset(["information_retrieval", "data_processing", "coding", "reasoning", "creative", "general"])
 
@@ -134,19 +141,32 @@ class FilterQueryBuilder:
     def get_filtered_samples_query(self, limit: Optional[int] = None) -> str:
         """Build complete SELECT query with filters.
 
-        Args:
-            limit: Optional row limit
-
-        Returns:
-            Complete SQL query string
+        For tool_stats fields, extracts from JSON.
         """
         where = self.build_where_clause()
         limit_str = f"LIMIT {limit}" if limit else ""
 
-        return f"""
-            SELECT s.id, s.raw_json, e.*
-            FROM samples s
-            JOIN evaluations e ON s.id = e.sample_id
-            WHERE {where}
-            {limit_str}
-        """
+        # Check if any tool_stats fields are used
+        tool_stats_fields = ["response_helpful_rate", "user_satisfied_rate"]
+        uses_tool_stats = any(
+            cond.field in tool_stats_fields
+            for cond in self.conditions
+        )
+
+        if uses_tool_stats:
+            # Need to join samples with aggregated turn_judgments
+            return f"""
+                SELECT s.id, s.raw_json, s.tool_stats
+                FROM samples s
+                LEFT JOIN turn_judgments tj ON s.id = tj.sample_id
+                GROUP BY s.id, s.raw_json, s.tool_stats
+                HAVING {where}
+                {limit_str}
+            """
+        else:
+            return f"""
+                SELECT s.id, s.raw_json, s.tool_stats
+                FROM samples s
+                WHERE {where}
+                {limit_str}
+            """
