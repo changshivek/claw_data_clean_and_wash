@@ -4,6 +4,45 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 
 
+def _detect_format(messages: list) -> str:
+    """检测消息格式：返回 'openai' 或 'anthropic'"""
+    for msg in messages:
+        if msg.get("role") == "tool":
+            return "openai"
+        content = msg.get("content", [])
+        if isinstance(content, list):
+            for c in content:
+                if isinstance(c, dict) and c.get("type") == "tool_result":
+                    return "anthropic"
+    return "openai"
+
+
+def _anthropic_to_openai(messages: list) -> list:
+    """将 Anthropic 格式转换为 OpenAI 格式"""
+    result = []
+    for msg in messages:
+        role = msg.get("role")
+        content = msg.get("content", [])
+
+        if role == "user" and isinstance(content, list):
+            tool_results = [c for c in content if c.get("type") == "tool_result"]
+            text_parts = [c.get("text") for c in content if c.get("type") == "text" and c.get("text")]
+
+            # 先输出 tool 消息
+            for tr in tool_results:
+                result.append({
+                    "role": "tool",
+                    "tool_call_id": tr.get("tool_use_id"),
+                    "content": tr.get("content", "")
+                })
+            # 再输出 user 消息（只保留 text 部分）
+            if text_parts:
+                result.append({"role": "user", "content": "".join(text_parts)})
+        else:
+            result.append(msg)
+    return result
+
+
 def _extract_text_content(content: Any) -> str:
     """Extract text from content field.
 
@@ -39,8 +78,9 @@ class Sample(BaseModel):
 
     @classmethod
     def from_dict(cls, data: dict) -> "Sample":
-        """Parse from OpenAI format dict.
+        """Parse from OpenAI or Anthropic format dict.
 
+        Automatically detects and converts Anthropic format to OpenAI.
         Input format:
         {
             "messages": [
@@ -53,6 +93,10 @@ class Sample(BaseModel):
         }
         """
         messages = data.get("messages", [])
+
+        # Detect and convert format if needed
+        if _detect_format(messages) == "anthropic":
+            messages = _anthropic_to_openai(messages)
 
         # Extract user query (last user message)
         user_query = ""
@@ -77,8 +121,12 @@ class Sample(BaseModel):
         # Count turns (user-assistant pairs = number of user messages)
         num_turns = sum(1 for msg in messages if msg.get("role") == "user")
 
-        # Count tool calls
-        num_tool_calls = len(tool_calls)
+        # Count tool calls: use tool_calls from assistant if available, otherwise count tool role messages
+        # (tool role messages come from Anthropic format conversion or are OpenAI tool results)
+        if tool_calls:
+            num_tool_calls = len(tool_calls)
+        else:
+            num_tool_calls = sum(1 for msg in messages if msg.get("role") == "tool")
 
         # Check for errors (tool results that indicate errors)
         has_error = False

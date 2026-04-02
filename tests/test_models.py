@@ -109,6 +109,51 @@ def test_evaluation_progress_validation():
     print("test_evaluation_progress_validation passed")
 
 
+def test_sample_detect_anthropic_format():
+    """Test Sample.from_dict detects Anthropic format"""
+    from claw_data_filter.models.sample import Sample
+    anthropic_data = {
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "hello"}]},
+            {"role": "assistant", "content": "hi"},
+        ]
+    }
+    s = Sample.from_dict(anthropic_data)
+    assert s.num_turns == 1
+
+
+def test_sample_detect_openai_format():
+    """Test Sample.from_dict detects OpenAI format"""
+    from claw_data_filter.models.sample import Sample
+    openai_data = {
+        "messages": [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi"},
+        ]
+    }
+    s = Sample.from_dict(openai_data)
+    assert s.num_turns == 1
+
+
+def test_sample_anthropic_to_openai_conversion():
+    """Test Anthropic format with tool_result is converted to OpenAI"""
+    from claw_data_filter.models.sample import Sample
+    anthropic_data = {
+        "messages": [
+            {"role": "assistant", "content": [{"type": "text", "text": "Let me help"}]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "call123", "content": "file content"},
+                {"type": "text", "text": "Thanks"}
+            ]},
+        ]
+    }
+    s = Sample.from_dict(anthropic_data)
+    # After conversion, should have separate tool message with correct tool_call_id
+    # The tool_result should become a separate tool role message
+    assert s.num_tool_calls == 1, f"Expected 1 tool call, got {s.num_tool_calls}"
+    assert s.user_query == "Thanks", f"Expected 'Thanks', got '{s.user_query}'"
+
+
 if __name__ == "__main__":
     test_sample_from_dict_basic()
     test_sample_from_dict_with_tool_calls()
@@ -116,4 +161,7 @@ if __name__ == "__main__":
     test_sample_from_dict_multiple_turns()
     test_evaluation_model_basic()
     test_evaluation_progress_validation()
+    test_sample_detect_anthropic_format()
+    test_sample_detect_openai_format()
+    test_sample_anthropic_to_openai_conversion()
     print("All model tests passed!")
