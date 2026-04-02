@@ -17,7 +17,50 @@ Remove the `evaluate` command and Evaluation model entirely. Simplify RoundFeedb
 | `user {content: [tool_result, text]}` | `tool {role=tool, tool_call_id, content}` + `user {content}` |
 | `assistant {content: [text, tool_use]}` | `assistant {content, tool_calls}` |
 
-**实现位置:** `JSONLImporter` 或新建 `FormatNormalizer`
+**实现位置:** `Sample.from_dict()` 方法内增加格式检测和转换逻辑
+
+**检测逻辑:**
+```python
+def detect_format(messages: list) -> str:
+    """检测消息格式：返回 'openai' 或 'anthropic'"""
+    for msg in messages:
+        if msg.get("role") == "tool":
+            return "openai"
+        content = msg.get("content", [])
+        if isinstance(content, list):
+            for c in content:
+                if isinstance(c, dict) and c.get("type") == "tool_result":
+                    return "anthropic"
+    return "openai"  # 默认为 OpenAI 格式
+```
+
+**转换逻辑 (Anthropic → OpenAI):**
+```python
+def anthropic_to_openai(messages: list) -> list:
+    """将 Anthropic 格式转换为 OpenAI 格式"""
+    result = []
+    for msg in messages:
+        role = msg.get("role")
+        content = msg.get("content", [])
+
+        if role == "user" and isinstance(content, list):
+            tool_results = [c for c in content if c.get("type") == "tool_result"]
+            text_parts = [c.get("text") for c in content if c.get("type") == "text" and c.get("text")]
+
+            # 先输出 tool 消息
+            for tr in tool_results:
+                result.append({
+                    "role": "tool",
+                    "tool_call_id": tr.get("tool_use_id"),
+                    "content": tr.get("content", "")
+                })
+            # 再输出 user 消息（只保留 text 部分）
+            if text_parts:
+                result.append({"role": "user", "content": "".join(text_parts)})
+        else:
+            result.append(msg)
+    return result
+```
 
 ## Data Models
 
@@ -86,10 +129,11 @@ CREATE TABLE turn_judgments (
 从 Layer 3 聚合到 `samples.tool_stats`:
 
 ```python
-def aggregate(s judgments: list[RoundJudgment]) -> dict:
+def aggregate(judgments: list[RoundJudgment]) -> dict:
     total = len(judgments)
     helpful_yes = sum(1 for j in judgments if j.response_helpful == "yes")
-    satisfied_yes = sum(1 for j in judgments if j.user_satisfied in ["yes", "neutral"])
+    # user_satisfied: yes=正面, neutral=新话题(不计入满意), uncertain=不确定
+    satisfied_yes = sum(1 for j in judgments if j.user_satisfied == "yes")
 
     return {
         "response_helpful_rate": helpful_yes / total if total > 0 else 0,
@@ -125,7 +169,7 @@ def aggregate(s judgments: list[RoundJudgment]) -> dict:
 
 ### 修改
 - `claw-filter filter`: 基于 samples.tool_stats 和 samples.task_type 筛选
-- `claw-filter stats`: 显示 round feedback 统计
+- `claw-filter stats`: 显示 samples 统计（total, avg_response_helpful_rate, avg_user_satisfied_rate, error_count）
 
 ### 新增/保留
 - `claw-filter import` (增加格式转换)
@@ -172,4 +216,4 @@ claw-filter filter --response-helpful-rate ">=0.8" --user-satisfied-rate ">=0.5"
 
 1. 数据库 schema 迁移：新增 task_type 列
 2. 旧数据（无 turn_judgments）需要重新运行 round-feedback
-3. 移除 evaluations 表（或保留用于历史查询）
+3. 删除 evaluations 表及所有相关代码
