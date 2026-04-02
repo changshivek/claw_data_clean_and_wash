@@ -70,9 +70,8 @@ class AsyncLLMClient:
             payload["model"] = self.model
 
         # Disable thinking mode for Qwen models
-        payload["extra_body"] = {
-            "chat_template_kwargs": {"enable_thinking": False}
-        }
+        # chat_template_kwargs must be at top level, not in extra_body
+        payload["chat_template_kwargs"] = {"enable_thinking": False}
 
         response = await self.client.post(
             f"{self.endpoint}/chat/completions",

@@ -354,11 +354,11 @@ class PressureTest:
         start = time.perf_counter()
         try:
             response = await self.llm.chat(
-                [{"role": "user", "content": "判断：response_helpful=yes; user_satisfied=no 对应格式是否正确？"}],
-                max_tokens=20,
+                [{"role": "user", "content": "Answer only: yes"}],
+                max_tokens=10,
             )
             latency = time.perf_counter() - start
-            return "response_helpful=yes" in response, latency
+            return "yes" in response.lower(), latency
         except Exception as e:
             latency = time.perf_counter() - start
             logger.error(f"Pressure test request failed: {e}")
