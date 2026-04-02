@@ -175,9 +175,47 @@ def test_report_export():
     print("test_report_export passed")
 
 
+def test_jsonl_exporter_no_eval_join():
+    """Test exporter doesn't require evaluations table"""
+    db_path = TEST_DATA_DIR / "test_no_eval.duckdb"
+    output_path = TEST_DATA_DIR / "test_no_eval.jsonl"
+
+    if db_path.exists():
+        db_path.unlink()
+    if output_path.exists():
+        output_path.unlink()
+
+    store = DuckDBStore(db_path)
+
+    # Insert ONLY samples - no evaluations
+    for i in range(3):
+        raw = {"messages": [{"role": "user", "content": f"Test {i}"}]}
+        sample = Sample.from_dict(raw)
+        store.insert_sample(sample)
+
+    # Export without filter should work without evaluations
+    exporter = JSONLExporter(store)
+    count = exporter.export(output_path)
+
+    assert count == 3
+    with open(output_path) as f:
+        lines = f.readlines()
+        assert len(lines) == 3
+
+    # Export with filter should also work without evaluations
+    # (using id-based filter since samples don't have progress_score)
+    filter_path = TEST_DATA_DIR / "test_no_eval_filtered.jsonl"
+    count_filtered = exporter.export(filter_path, filter_query="id > 0")
+    assert count_filtered == 3
+
+    store.close()
+    print("test_jsonl_exporter_no_eval_join passed")
+
+
 if __name__ == "__main__":
     test_jsonl_export()
     test_jsonl_export_with_filter()
     test_report_generation()
     test_report_export()
+    test_jsonl_exporter_no_eval_join()
     print("All exporter tests passed!")

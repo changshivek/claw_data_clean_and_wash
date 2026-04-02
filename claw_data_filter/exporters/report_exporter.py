@@ -1,6 +1,7 @@
 """Statistical report generation."""
 import json
 import logging
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -100,14 +101,21 @@ class ReportExporter:
 
         return report
 
-    def export_report(self, output_path: Path) -> None:
-        """Generate and save report to JSON file.
-
-        Args:
-            output_path: Path to output JSON report file
-        """
+    def export_report(self, output_path: Path) -> dict:
+        """Export statistical report."""
         _validate_output_path(output_path)
-        report = self.generate_report()
+        stats = self.store.get_stats()
+
+        report = {
+            "total_samples": stats["total_samples"],
+            "avg_response_helpful_rate": stats["avg_response_helpful_rate"],
+            "avg_user_satisfied_rate": stats["avg_user_satisfied_rate"],
+            "error_count": stats["error_count"],
+            "generated_at": datetime.now().isoformat(),
+        }
+
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(report, f, indent=2, ensure_ascii=False)
-        logger.info(f"Report exported to {output_path}")
+
+        logger.info(f"Report saved to {output_path}")
+        return report

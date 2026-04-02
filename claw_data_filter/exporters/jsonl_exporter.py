@@ -77,21 +77,14 @@ class JSONLExporter:
         count = 0
 
         if filter_query:
-            _validate_filter_query(filter_query)
-            query = f"""
-                SELECT s.raw_json
-                FROM samples s
-                JOIN evaluations e ON s.id = e.sample_id
-                WHERE {filter_query}
-            """
-            if limit:
-                query += f" LIMIT {limit}"
-            rows = self.store.conn.execute(query).fetchall()
+            query = f"SELECT raw_json, tool_stats FROM samples WHERE {filter_query}"
         else:
-            query = "SELECT raw_json FROM samples"
-            if limit:
-                query += f" LIMIT {limit}"
-            rows = self.store.conn.execute(query).fetchall()
+            query = "SELECT raw_json, tool_stats FROM samples"
+
+        if limit:
+            query += f" LIMIT {limit}"
+
+        rows = self.store.conn.execute(query).fetchall()
 
         with open(output_path, "w", encoding="utf-8") as f:
             for row in rows:
