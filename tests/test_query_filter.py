@@ -3,23 +3,24 @@ from claw_data_filter.filters.query import FilterQueryBuilder, ComparisonOp
 
 
 def test_filter_builder_basic():
-    """Test basic condition building."""
+    """Test basic condition building with round_feedback fields."""
     builder = FilterQueryBuilder()
-    builder.add_condition("progress_score", ComparisonOp.GTE, 4)
-    builder.add_condition("overall_score", ComparisonOp.GT, 7.0)
+    builder.add_condition("response_helpful_rate", ComparisonOp.GTE, 4)
+    builder.add_condition("num_turns", ComparisonOp.GT, 7.0)
 
     where = builder.build_where_clause()
-    assert "progress_score >= 4" in where
-    assert "overall_score > 7.0" in where
+    assert "response_helpful_rate >= 4" in where
+    assert "num_turns > 7.0" in where
     print(f"WHERE clause: {where}")
     print("test_filter_builder_basic passed")
 
 
 def test_filter_builder_expression_parsing():
-    """Test expression parsing for progress_score."""
+    """Test expression parsing for num_tool_calls."""
     builder = FilterQueryBuilder()
-    builder.add_progress_score_filter(">=4")
-    builder.add_progress_score_filter("<5")
+    # Use num_tool_calls which is a valid field
+    builder.add_condition("num_tool_calls", ComparisonOp.GTE, 4)
+    builder.add_condition("num_tool_calls", ComparisonOp.LT, 5)
 
     where = builder.build_where_clause()
     assert ">=" in where
@@ -42,11 +43,11 @@ def test_filter_builder_task_types():
 def test_filter_builder_chained():
     """Test method chaining."""
     builder = FilterQueryBuilder()
-    result = builder.add_progress_score_filter(">=4").add_task_type_filter(["general"])
+    result = builder.add_condition("num_tool_calls", ComparisonOp.GTE, 4).add_task_type_filter(["general"])
 
     assert result is builder  # returns self
     where = builder.build_where_clause()
-    assert "progress_score >= 4" in where
+    assert "num_tool_calls >= 4" in where
     assert "task_type IN ('general')" in where
     print("test_filter_builder_chained passed")
 
@@ -54,13 +55,12 @@ def test_filter_builder_chained():
 def test_filtered_samples_query():
     """Test full query generation."""
     builder = FilterQueryBuilder()
-    builder.add_progress_score_filter(">=4")
+    builder.add_condition("num_turns", ComparisonOp.GTE, 2)
 
     query = builder.get_filtered_samples_query(limit=100)
     assert "SELECT" in query
     assert "FROM samples s" in query
-    assert "JOIN evaluations e" in query
-    assert "WHERE progress_score >= 4" in query
+    assert "WHERE num_turns >= 2" in query
     assert "LIMIT 100" in query
     print(f"Query: {query}")
     print("test_filtered_samples_query passed")
@@ -69,8 +69,9 @@ def test_filtered_samples_query():
 def test_invalid_expression():
     """Test that invalid expressions raise ValueError."""
     builder = FilterQueryBuilder()
+    builder.add_condition("nonexistent_field", ComparisonOp.GTE, 4)
     try:
-        builder.add_progress_score_filter("invalid")
+        builder.build_where_clause()
         assert False, "Should have raised ValueError"
     except ValueError:
         pass
