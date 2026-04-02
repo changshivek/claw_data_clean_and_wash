@@ -49,25 +49,13 @@ def test_signal_users_extraction():
     # Signal users are from subsequent turns
     assert "Thanks!" in turns[1].signal_users
 
-def test_build_group1_prompt():
-    """Test building Group1 prompt"""
+def test_build_judgment_prompt():
+    """Test building simplified judgment prompt"""
     from claw_data_filter.processors.round_feedback import TurnContextBuilder
 
     builder = TurnContextBuilder()
     turns = builder.extract_turns(SAMPLE_MESSAGES)
-    prompt = builder.build_group1_prompt(turns[1], turns)
-    assert "=== 当前轮 ===" in prompt
-    assert "=== 历史对话（仅user/assistant）===" in prompt
-    assert "need_tool:" in prompt
-    assert "tool_correct:" in prompt
-
-def test_build_group2_prompt():
-    """Test building Group2 prompt"""
-    from claw_data_filter.processors.round_feedback import TurnContextBuilder
-
-    builder = TurnContextBuilder()
-    turns = builder.extract_turns(SAMPLE_MESSAGES)
-    prompt = builder.build_group2_prompt(turns[2], turns)  # Turn with "Thanks!" signal
+    prompt = builder.build_judgment_prompt(turns[2], turns)  # Turn with "Thanks!" signal
     assert "=== 当前轮 ===" in prompt
     assert "=== 后续用户信号" in prompt
     assert "response_helpful:" in prompt
@@ -75,24 +63,8 @@ def test_build_group2_prompt():
 
 
 @pytest.mark.asyncio
-async def test_judge_group1_success():
-    """Test Group1 judgment returns parsed result"""
-    from unittest.mock import AsyncMock, patch
-    from claw_data_filter.processors.round_feedback import RoundJudgmentProcessor
-    from claw_data_filter.llm.async_client import AsyncLLMClient
-
-    mock_llm = AsyncMock(spec=AsyncLLMClient)
-    mock_llm.chat = AsyncMock(return_value="need_tool=yes; tool_correct=yes")
-
-    processor = RoundJudgmentProcessor(mock_llm)
-    result = await processor.judge_group1("mock prompt")
-
-    assert result["need_tool"] == "yes"
-    assert result["tool_correct"] == "yes"
-
-@pytest.mark.asyncio
-async def test_judge_group2_success():
-    """Test Group2 judgment returns parsed result"""
+async def test_judge_success():
+    """Test judgment returns parsed result"""
     from unittest.mock import AsyncMock
     from claw_data_filter.processors.round_feedback import RoundJudgmentProcessor
     from claw_data_filter.llm.async_client import AsyncLLMClient
@@ -101,13 +73,13 @@ async def test_judge_group2_success():
     mock_llm.chat = AsyncMock(return_value="response_helpful=yes; user_satisfied=no")
 
     processor = RoundJudgmentProcessor(mock_llm)
-    result = await processor.judge_group2("mock prompt")
+    result = await processor.judge("mock prompt")
 
     assert result["response_helpful"] == "yes"
     assert result["user_satisfied"] == "no"
 
-def test_parse_group1_response():
-    """Test Group1 response parsing"""
+def test_parse_response():
+    """Test simplified response parsing"""
     from unittest.mock import AsyncMock
     from claw_data_filter.processors.round_feedback import RoundJudgmentProcessor
     from claw_data_filter.llm.async_client import AsyncLLMClient
@@ -115,12 +87,12 @@ def test_parse_group1_response():
     mock_llm = AsyncMock(spec=AsyncLLMClient)
     processor = RoundJudgmentProcessor(mock_llm)
 
-    result = processor._parse_group1_response("need_tool=yes; tool_correct=no")
-    assert result["need_tool"] == "yes"
-    assert result["tool_correct"] == "no"
+    result = processor._parse_response("response_helpful=yes; user_satisfied=no")
+    assert result["response_helpful"] == "yes"
+    assert result["user_satisfied"] == "no"
 
-def test_parse_group1_response_uncertain():
-    """Test Group1 response with uncertain value"""
+def test_parse_response_uncertain():
+    """Test response parsing with uncertain value"""
     from unittest.mock import AsyncMock
     from claw_data_filter.processors.round_feedback import RoundJudgmentProcessor
     from claw_data_filter.llm.async_client import AsyncLLMClient
@@ -128,22 +100,22 @@ def test_parse_group1_response_uncertain():
     mock_llm = AsyncMock(spec=AsyncLLMClient)
     processor = RoundJudgmentProcessor(mock_llm)
 
-    result = processor._parse_group1_response("need_tool=uncertain; tool_correct=yes")
-    assert result["need_tool"] == "uncertain"
-    assert result["tool_correct"] == "yes"
-
-def test_parse_group2_response():
-    """Test Group2 response parsing"""
-    from unittest.mock import AsyncMock
-    from claw_data_filter.processors.round_feedback import RoundJudgmentProcessor
-    from claw_data_filter.llm.async_client import AsyncLLMClient
-
-    mock_llm = AsyncMock(spec=AsyncLLMClient)
-    processor = RoundJudgmentProcessor(mock_llm)
-
-    result = processor._parse_group2_response("response_helpful=no; user_satisfied=yes")
-    assert result["response_helpful"] == "no"
+    result = processor._parse_response("response_helpful=uncertain; user_satisfied=yes")
+    assert result["response_helpful"] == "uncertain"
     assert result["user_satisfied"] == "yes"
+
+def test_parse_response_neutral():
+    """Test response parsing with neutral satisfaction"""
+    from unittest.mock import AsyncMock
+    from claw_data_filter.processors.round_feedback import RoundJudgmentProcessor
+    from claw_data_filter.llm.async_client import AsyncLLMClient
+
+    mock_llm = AsyncMock(spec=AsyncLLMClient)
+    processor = RoundJudgmentProcessor(mock_llm)
+
+    result = processor._parse_response("response_helpful=yes; user_satisfied=neutral")
+    assert result["response_helpful"] == "yes"
+    assert result["user_satisfied"] == "neutral"
 
 def test_parse_response_invalid():
     """Test invalid response returns None"""
@@ -154,26 +126,28 @@ def test_parse_response_invalid():
     mock_llm = AsyncMock(spec=AsyncLLMClient)
     processor = RoundJudgmentProcessor(mock_llm)
 
-    result = processor._parse_group1_response("invalid response format")
+    result = processor._parse_response("invalid response format")
     assert result is None
 
 def test_tool_stats_aggregator():
-    """Test ToolStatsAggregator aggregates correctly"""
+    """Test ToolStatsAggregator aggregates correctly for simplified judgments"""
     from claw_data_filter.processors.round_feedback import ToolStatsAggregator
     from claw_data_filter.models.round_judgment import RoundJudgment
 
     aggregator = ToolStatsAggregator()
 
     judgments = [
-        RoundJudgment(sample_id=1, turn_index=0, need_tool="yes", tool_correct="yes", llm_error=False),
-        RoundJudgment(sample_id=1, turn_index=1, need_tool="yes", tool_correct="no", llm_error=False),
-        RoundJudgment(sample_id=1, turn_index=2, need_tool="no", llm_error=False),
+        RoundJudgment(sample_id=1, turn_index=0, response_helpful="yes", user_satisfied="yes", llm_error=False),
+        RoundJudgment(sample_id=1, turn_index=1, response_helpful="yes", user_satisfied="no", llm_error=False),
+        RoundJudgment(sample_id=1, turn_index=2, response_helpful="no", user_satisfied="yes", llm_error=False),
     ]
 
     stats = aggregator.aggregate(judgments)
 
-    assert stats["tool_used"] == 2  # 2 turns with need_tool=yes
-    assert stats["tool_success"] == 1  # 1 turn with tool_correct=yes
+    assert stats["response_helpful_rate"] == 2/3  # 2 out of 3 are helpful
+    assert stats["user_satisfied_rate"] == 2/3  # 2 out of 3 are satisfied
+    assert stats["total_turns"] == 3
+    assert stats["has_error"] is False
 
 
 @pytest.mark.asyncio
@@ -239,17 +213,18 @@ def test_tool_stats_aggregation_integration():
 
     # Simulate judgments as they would come from processing
     judgments = [
-        RoundJudgment(sample_id=1, turn_index=0, need_tool="no", response_helpful="yes", user_satisfied="yes", llm_error=False),
-        RoundJudgment(sample_id=1, turn_index=1, need_tool="yes", tool_correct="yes", response_helpful="yes", user_satisfied="yes", llm_error=False),
-        RoundJudgment(sample_id=1, turn_index=2, need_tool="yes", tool_correct="no", response_helpful="yes", user_satisfied="no", llm_error=False),
-        RoundJudgment(sample_id=1, turn_index=3, need_tool="no", response_helpful="yes", user_satisfied="yes", llm_error=False),
+        RoundJudgment(sample_id=1, turn_index=0, response_helpful="yes", user_satisfied="yes", llm_error=False),
+        RoundJudgment(sample_id=1, turn_index=1, response_helpful="yes", user_satisfied="yes", llm_error=False),
+        RoundJudgment(sample_id=1, turn_index=2, response_helpful="yes", user_satisfied="no", llm_error=False),
+        RoundJudgment(sample_id=1, turn_index=3, response_helpful="yes", user_satisfied="yes", llm_error=False),
     ]
 
     stats = aggregator.aggregate(judgments)
 
-    assert stats["tool_used"] == 2  # 2 turns with need_tool=yes
-    assert stats["tool_success"] == 1  # 1 turn with tool_correct=yes
-    assert stats["partial"] is False
+    assert stats["response_helpful_rate"] == 1.0  # All 4 are helpful
+    assert stats["user_satisfied_rate"] == 0.75  # 3 out of 4 are satisfied
+    assert stats["total_turns"] == 4
+    assert stats["has_error"] is False
 
 def test_empty_messages_handling():
     """Test handling of empty messages"""
@@ -267,3 +242,16 @@ def test_single_user_message():
     turns = builder.extract_turns([{"role": "user", "content": "Hello"}])
     # Single user with no assistant response should not create a turn
     assert len(turns) == 0
+
+
+def test_parse_simplified_response():
+    """Test parsing simplified response with only 2 judgments"""
+    from claw_data_filter.processors.round_feedback import RoundJudgmentProcessor
+
+    class MockLLM:
+        async def chat(self, messages, max_tokens=50):
+            return "response_helpful=yes; user_satisfied=no"
+
+    processor = RoundJudgmentProcessor(MockLLM())
+    result = processor._parse_response("response_helpful=yes; user_satisfied=no")
+    assert result == {"response_helpful": "yes", "user_satisfied": "no"}

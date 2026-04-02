@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 import time
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -17,7 +18,7 @@ class TurnContext:
     assistant_message: str
     tool_calls: list[dict]
     tool_result: str | None
-    signal_users: list[str]  # 后续最多3个user消息
+    signal_users: list[str]
 
 
 class TurnContextBuilder:
@@ -137,69 +138,8 @@ class TurnContextBuilder:
             content = content[:max_len] + "..."
         return f"[{role}]: {content}"
 
-    def build_group1_prompt(self, turn: TurnContext, all_turns: list[TurnContext]) -> str:
-        """构建工具相关判断的prompt
-
-        Args:
-            turn: 当前轮上下文
-            all_turns: 所有轮次（用于构建历史）
-
-        Returns:
-            格式化的 prompt 字符串
-        """
-        # Build history (only user + assistant, no tools)
-        history_parts = []
-        for i, t in enumerate(all_turns[:turn.turn_index]):
-            if t.user_message:
-                history_parts.append(self._format_message("user", t.user_message))
-            history_parts.append(self._format_message("assistant", t.assistant_message))
-
-        history_section = "\n".join(history_parts) if history_parts else "(无历史对话)"
-
-        # Build current turn
-        current_parts = []
-        if turn.user_message:
-            current_parts.append(self._format_message("user", turn.user_message))
-        if turn.tool_result:
-            current_parts.append(f"[tool_result]: {turn.tool_result}")
-        if turn.assistant_message:
-            current_parts.append(self._format_message("assistant", turn.assistant_message))
-        if turn.tool_calls:
-            tool_names = [tc.get("name", "unknown") for tc in turn.tool_calls]
-            current_parts.append(f"[工具调用]: {', '.join(tool_names)}")
-
-        current_section = "\n".join(current_parts)
-
-        prompt = f"""=== 历史对话（仅user/assistant）===
-{history_section}
-
-=== 当前轮 ===
-{current_section}
-
-请判断：
-1. need_tool: 当前问题是否需要工具调用？（yes/no/uncertain）
-2. tool_correct: 如果用了工具，工具选择正确吗？（yes/no/uncertain）
-
-答案格式：need_tool=yes; tool_correct=no
-
-注意：
-- need_tool=no 但实际用了工具 → tool_correct=no
-- need_tool=yes 但没用工具 → tool_correct=no
-- need_tool=uncertain 时 → tool_correct=uncertain"""
-
-        return prompt
-
-    def build_group2_prompt(self, turn: TurnContext, all_turns: list[TurnContext]) -> str:
-        """构建效果相关判断的prompt
-
-        Args:
-            turn: 当前轮上下文
-            all_turns: 所有轮次
-
-        Returns:
-            格式化的 prompt 字符串
-        """
-        # Build current turn
+    def build_judgment_prompt(self, turn: TurnContext, all_turns: list[TurnContext]) -> str:
+        """构建判断prompt（简化版：只判断 response_helpful 和 user_satisfied）"""
         current_parts = []
         if turn.user_message:
             current_parts.append(self._format_message("user", turn.user_message))
@@ -209,11 +149,9 @@ class TurnContextBuilder:
             current_parts.append(self._format_message("assistant", turn.assistant_message))
 
         current_section = "\n".join(current_parts)
-
-        # Build signal users
         signal_section = "\n".join([f"[user]: {u}" for u in turn.signal_users]) if turn.signal_users else "(无后续用户消息)"
 
-        prompt = f"""=== 当前轮 ===
+        return f"""=== 当前轮 ===
 {current_section}
 
 === 后续用户信号（最多3轮）===
@@ -221,7 +159,7 @@ class TurnContextBuilder:
 
 请判断：
 1. response_helpful: 这个回答对用户有帮助吗？（yes/no/uncertain）
-2. user_satisfied: 用户对这个回答满意吗？（yes/no/uncertain）
+2. user_satisfied: 用户对助手回复满意吗？（yes/no/uncertain/neutral）
 
 答案格式：response_helpful=yes; user_satisfied=no
 
@@ -231,94 +169,48 @@ class TurnContextBuilder:
 - 用户转向新话题 → user_satisfied=neutral
 - 无明确反馈 → user_satisfied=uncertain"""
 
-        return prompt
 
-
-import re
 from concurrent.futures import ThreadPoolExecutor
 
 from claw_data_filter.models.round_judgment import RoundJudgment
 
 
 class RoundJudgmentProcessor:
-    """异步执行单轮4维度判断"""
+    """异步执行单轮2维度判断（response_helpful, user_satisfied）"""
 
     def __init__(self, llm_client, max_retries: int = 2):
         self.llm = llm_client
         self.max_retries = max_retries
 
-    async def judge_group1(self, prompt: str) -> dict | None:
-        """执行工具相关判断"""
-        return await self._call_llm_with_retry(prompt, self._parse_group1_response)
-
-    async def judge_group2(self, prompt: str) -> dict | None:
-        """执行效果相关判断"""
-        return await self._call_llm_with_retry(prompt, self._parse_group2_response)
+    async def judge(self, prompt: str) -> dict | None:
+        return await self._call_llm_with_retry(prompt, self._parse_response)
 
     async def _call_llm_with_retry(self, prompt: str, parser) -> dict | None:
-        """带重试的LLM调用
-
-        Args:
-            prompt: 输入prompt
-            parser: 解析函数 (_parse_group1_response 或 _parse_group2_response)
-        """
         for attempt in range(self.max_retries + 1):
             try:
-                response = await self.llm.chat(
-                    [{"role": "user", "content": prompt}],
-                    max_tokens=50,
-                )
-
+                response = await self.llm.chat([{"role": "user", "content": prompt}], max_tokens=50)
                 result = parser(response)
-
                 if result is not None:
                     return result
-
                 logger.warning(f"Attempt {attempt + 1}: Failed to parse response")
-
             except Exception as e:
                 logger.warning(f"Attempt {attempt + 1}: LLM call failed: {e}")
                 if attempt < self.max_retries:
-                    await asyncio.sleep(2 ** attempt)  # Exponential backoff
+                    await asyncio.sleep(2 ** attempt)
                 else:
                     return None
-
         return None
 
-    def _parse_group1_response(self, response: str) -> dict | None:
-        """解析 Group1 响应"""
+    def _parse_response(self, response: str) -> dict | None:
         response = response.strip()
         result = {}
 
-        # Match need_tool=value
-        need_tool_match = re.search(r"need_tool\s*=\s*(yes|no|uncertain)", response, re.IGNORECASE)
-        if need_tool_match:
-            result["need_tool"] = need_tool_match.group(1).lower()
-        else:
-            return None
-
-        # Match tool_correct=value
-        tool_correct_match = re.search(r"tool_correct\s*=\s*(yes|no|uncertain)", response, re.IGNORECASE)
-        if tool_correct_match:
-            result["tool_correct"] = tool_correct_match.group(1).lower()
-        else:
-            return None
-
-        return result
-
-    def _parse_group2_response(self, response: str) -> dict | None:
-        """解析 Group2 响应"""
-        response = response.strip()
-        result = {}
-
-        # Match response_helpful=value
         helpful_match = re.search(r"response_helpful\s*=\s*(yes|no|uncertain)", response, re.IGNORECASE)
         if helpful_match:
             result["response_helpful"] = helpful_match.group(1).lower()
         else:
             return None
 
-        # Match user_satisfied=value
         satisfied_match = re.search(r"user_satisfied\s*=\s*(yes|no|uncertain|neutral)", response, re.IGNORECASE)
         if satisfied_match:
             result["user_satisfied"] = satisfied_match.group(1).lower()
@@ -327,96 +219,45 @@ class RoundJudgmentProcessor:
 
         return result
 
-    async def process_turn(self, turn: TurnContext, all_turns: list[TurnContext], builder: TurnContextBuilder) -> RoundJudgment:
-        """处理单个turn，返回判断结果"""
-        # Build prompts
-        group1_prompt = builder.build_group1_prompt(turn, all_turns)
-        group2_prompt = builder.build_group2_prompt(turn, all_turns)
+    async def process_turn(self, turn: TurnContext, all_turns: list[TurnContext], builder: TurnContextBuilder):
+        prompt = builder.build_judgment_prompt(turn, all_turns)
+        result = await self.judge(prompt)
 
-        # Execute both groups in parallel
-        group1_result, group2_result = await asyncio.gather(
-            self.judge_group1(group1_prompt),
-            self.judge_group2(group2_prompt),
-        )
-
-        # Merge results
-        need_tool = group1_result.get("need_tool") if group1_result else None
-        tool_correct = group1_result.get("tool_correct") if group1_result else None
-        response_helpful = group2_result.get("response_helpful") if group2_result else None
-        user_satisfied = group2_result.get("user_satisfied") if group2_result else None
-
-        # Determine if there's an LLM error
-        llm_error = group1_result is None or group2_result is None
-
+        from claw_data_filter.models.round_judgment import RoundJudgment
         return RoundJudgment(
-            sample_id=0,  # Will be set by caller
+            sample_id=0,
             turn_index=turn.turn_index,
-            need_tool=need_tool or "uncertain",
-            tool_correct=tool_correct,
-            response_helpful=response_helpful,
-            user_satisfied=user_satisfied,
+            response_helpful=result.get("response_helpful") if result else None,
+            user_satisfied=result.get("user_satisfied") if result else None,
             signal_from_users=turn.signal_users,
-            llm_error=llm_error,
+            llm_error=result is None,
         )
 
 
 class ToolStatsAggregator:
-    """从逐轮判断结果汇总工具统计"""
-
     @staticmethod
-    def aggregate(judgments: list[RoundJudgment]) -> dict:
-        """汇总判断结果，生成 tool_stats
-
-        Returns:
-            {
-                "tool_used": int,
-                "tool_success": int,
-                "tool_unnecessary": int,
-                "tool_missing": int,
-                "partial": bool,
-            }
-        """
+    def aggregate(judgments: list) -> dict:
         if not judgments:
             return {
-                "tool_used": 0,
-                "tool_success": 0,
-                "tool_unnecessary": 0,
-                "tool_missing": 0,
-                "partial": False,
+                "response_helpful_rate": 0,
+                "user_satisfied_rate": 0,
+                "total_turns": 0,
+                "has_error": False,
             }
 
-        tool_used = 0
-        tool_success = 0
-        tool_unnecessary = 0
-        tool_missing = 0
-        has_error = False
-
-        for j in judgments:
-            if j.llm_error:
-                has_error = True
-                continue
-
-            # Count based on need_tool and tool_correct
-            if j.need_tool == "yes":
-                if j.tool_correct == "yes":
-                    tool_used += 1
-                    tool_success += 1
-                elif j.tool_correct == "no":
-                    tool_used += 1  # Used but wrong tool
-                elif j.tool_correct is None:
-                    tool_missing += 1  # Needed but not used (or error)
-            elif j.need_tool == "no" and j.tool_correct == "no":
-                tool_unnecessary += 1  # Used when not needed
+        total = len(judgments)
+        helpful_yes = sum(1 for j in judgments if j.response_helpful == "yes")
+        satisfied_yes = sum(1 for j in judgments if j.user_satisfied == "yes")
 
         return {
-            "tool_used": tool_used,
-            "tool_success": tool_success,
-            "tool_unnecessary": tool_unnecessary,
-            "tool_missing": tool_missing,
-            "partial": has_error,
+            "response_helpful_rate": helpful_yes / total,
+            "user_satisfied_rate": satisfied_yes / total,
+            "total_turns": total,
+            "has_error": any(j.llm_error for j in judgments),
         }
 
 
+# Keep RoundFeedbackProcessor and PressureTest classes unchanged for now
 class RoundFeedbackProcessor:
     """主处理器：协调整个流程"""
 
