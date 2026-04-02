@@ -8,17 +8,16 @@ class JudgmentValue(str, Enum):
     YES = "yes"
     NO = "no"
     UNCERTAIN = "uncertain"
+    NEUTRAL = "neutral"  # For user_satisfied only
 
 
 class RoundJudgment(BaseModel):
-    """单轮判断结果"""
+    """单轮判断结果（简化版）"""
 
     sample_id: int
     turn_index: int
-    need_tool: str = Field(default="uncertain")  # yes/no/uncertain
-    tool_correct: Optional[str] = None  # yes/no/uncertain/null when error
-    response_helpful: Optional[str] = None  # yes/no/uncertain/null when error
-    user_satisfied: Optional[str] = None  # yes/no/uncertain/neutral/null when error
+    response_helpful: Optional[str] = None  # yes/no/uncertain
+    user_satisfied: Optional[str] = None    # yes/no/uncertain/neutral
     signal_from_users: list[str] = Field(default_factory=list)
     llm_error: bool = False
     created_at: datetime = Field(default_factory=lambda: datetime.now())

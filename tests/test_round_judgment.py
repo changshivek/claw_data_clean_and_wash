@@ -33,3 +33,22 @@ def test_round_judgment_from_dict():
     }
     judgment = RoundJudgment(**data)
     assert judgment.user_satisfied == "no"
+
+
+def test_round_judgment_simplified():
+    """Test RoundJudgment only has response_helpful and user_satisfied"""
+    from claw_data_filter.models.round_judgment import RoundJudgment
+
+    j = RoundJudgment(
+        sample_id=1,
+        turn_index=0,
+        response_helpful="yes",
+        user_satisfied="no",
+        signal_from_users=["用户确认"],
+        llm_error=False,
+    )
+    assert j.response_helpful == "yes"
+    assert j.user_satisfied == "no"
+    # These fields should not exist
+    assert not hasattr(j, 'need_tool')
+    assert not hasattr(j, 'tool_correct')
