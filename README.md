@@ -1,172 +1,121 @@
 # Claw Data Filter
 
-LLM-powered agent conversation data filtering tool. Import, filter, and analyze OpenAI-format (and Anthropic-format) agent interaction data using local LLM models.
+LLM-powered agent conversation data filtering tool. Import JSONL files, run round feedback judgments, filter and export high-quality data.
 
-## Features
-
-- **Import**: Load JSONL files with OpenAI-format or Anthropic-format conversations into DuckDB
-- **Round Feedback**: Per-turn quality judgments with 2-dimension analysis (response_helpful, user_satisfied)
-- **Filter**: Query by response_helpful_rate, user_satisfied_rate, task_type, etc.
-- **Export**: Export filtered data as JSONL with statistical reports
-
-## Installation
+## Quick Start
 
 ```bash
-pip install -e .
-```
-
-Requires Python 3.10+.
-
-## Configuration
-
-Environment variables:
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `LLM_ENDPOINT` | `http://localhost:8000/v1` | LLM API endpoint |
-| `LLM_API_KEY` | - | API key (optional) |
-| `DB_PATH` | `./data.duckdb` | Database path |
-| `WORKER_COUNT` | CPU cores / 2 | Parallel workers for round feedback |
-| `BATCH_SIZE` | 10 | Batch size per worker |
-| `MAX_RETRIES` | 3 | LLM API retry attempts |
-| `MAX_CONCURRENCY` | 10 | Max concurrent LLM calls for round feedback |
-| `LLM_TIMEOUT` | 60.0 | LLM API timeout (seconds) |
-| `CONTEXT_WINDOW` | 4096 | LLM context window size (tokens) |
-
-## Usage
-
-### 1. Import Data
-
-```bash
+# 1. 导入数据
 claw-filter import data.jsonl
-```
 
-### 2. Round Feedback (per-turn quality judgments)
+# 2. 运行 round feedback 评分（需要 LLM 服务器）
+claw-filter pressure-test  # 先测试稳定性
+claw-filter round-feedback --workers 32  # 并发32处理
 
-```bash
-# Run pressure test first to verify LLM stability
-claw-filter pressure-test
-
-# Process round-level feedback judgments
-claw-filter round-feedback --workers 10 --batch-size 5
-```
-
-### 3. Filter and Export
-
-```bash
-# Export high-quality conversations (response_helpful_rate >= 0.7)
-claw-filter filter --response-helpful-rate ">=0.7" --export filtered.jsonl
-
-# Filter by user satisfied rate and task type
-claw-filter filter --user-satisfied-rate ">=0.7" --task-type coding --export high-quality.jsonl --report report.json
-```
-
-### 4. View Statistics
-
-```bash
+# 3. 查看统计
 claw-filter stats
+
+# 4. 筛选导出
+claw-filter filter --response-helpful-rate ">=0.7" --export filtered.jsonl
 ```
 
-### 5. Database Info
+## 数据格式
 
-```bash
-claw-filter info
-```
-
-## Round Feedback Dimensions
-
-Each assistant turn is judged on 2 dimensions:
-
-| Dimension | Values | Description |
-|-----------|--------|-------------|
-| **response_helpful** | yes/no/uncertain | Was the response helpful to the user? |
-| **user_satisfied** | yes/no/uncertain/neutral | Is the user satisfied based on follow-up? |
-
-### Signal Attribution for user_satisfied
-
-User's subsequent messages (up to 3) are used to determine `user_satisfied`:
-- User follows up with clarification → satisfied=no
-- User confirms/continues → satisfied=yes
-- User switches to unrelated topic → satisfied=neutral
-- No clear signal → satisfied=uncertain
-
-### Aggregated Scores
-
-Per-sample aggregated scores are stored in `tool_stats` JSON:
-
-| Field | Type | Description |
-|-------|------|-------------|
-| **response_helpful_rate** | float | Ratio of "yes" responses among non-uncertain |
-| **user_satisfied_rate** | float | Ratio of "yes" responses among non-uncertain/neutral |
-| **total_turns** | int | Total assistant turns |
-| **has_error** | bool | Any LLM errors occurred |
-
-## Data Format
-
-### Standard OpenAI Format
-
-Input JSONL files should contain OpenAI chat format:
+支持 OpenAI 格式和 UniRouter 格式（自动转换）：
 
 ```json
 {"messages": [
-  {"role": "system", "content": "You are a helpful assistant..."},
-  {"role": "user", "content": "User query"},
-  {"role": "assistant", "content": "Response", "tool_calls": [...]},
-  {"role": "tool", "content": "Tool result", "tool_call_id": "..."}
+  {"role": "user", "content": "用户问题"},
+  {"role": "assistant", "content": "回复", "tool_calls": [...]},
+  {"role": "tool", "content": "工具结果", "tool_call_id": "..."}
 ]}
 ```
 
-The system prompt is automatically stripped during evaluation to prevent bias.
+UniRouter 格式自动从 `request.bodyJson.messages` 提取。
 
-### UniRouter Format (with request wrapper)
+## 评分维度
 
-For UniRouter format (`items.jsonl`), the messages are nested:
+每轮 assistant 回复判断两个指标：
 
-```json
-{
-  "log": {...},
-  "request": {
-    "bodyJson": {
-      "messages": [...]
-    }
-  },
-  "response": {...}
-}
+| 维度 | 值 | 说明 |
+|------|-----|------|
+| **response_helpful** | yes/no/uncertain | 回复对用户是否有帮助 |
+| **user_satisfied** | yes/no/uncertain/neutral | 基于后续用户行为判断满意度 |
+
+**user_satisfied 判定：**
+- 用户追问/澄清 → no
+- 用户确认/继续 → yes
+- 用户转新话题 → neutral
+- 无明确信号 → uncertain
+
+## 筛选字段
+
+| 字段 | 来源 | 说明 |
+|------|------|------|
+| response_helpful_rate | samples.tool_stats | helpful=yes 比例 |
+| user_satisfied_rate | samples.tool_stats | satisfied=yes 比例 |
+| task_type | samples | 任务类型 |
+| num_turns | samples | 轮次数 |
+
+## 环境变量
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `LLM_ENDPOINT` | http://localhost:8000/v1 | LLM API 地址 |
+| `LLM_API_KEY` | - | API 密钥 |
+| `DB_PATH` | ./data.duckdb | 数据库路径 |
+| `MAX_CONCURRENCY` | 10 | 最大并发数 |
+| `LLM_TIMEOUT` | 60.0 | 超时（秒） |
+
+## CLI 命令
+
+```bash
+claw-filter import <file>              # 导入 JSONL
+claw-filter pressure-test              # LLM 稳定性测试
+claw-filter round-feedback            # 运行 round feedback 评分
+claw-filter stats                     # 查看统计
+claw-filter filter [options] --export <file>  # 筛选导出
+claw-filter info                     # 数据库信息
 ```
 
-RoundFeedbackProcessor automatically extracts messages from `request.bodyJson.messages`.
+### Filter 选项
 
-## Architecture
+```bash
+# 按 response_helpful_rate 筛选
+claw-filter filter --response-helpful-rate ">=0.7" --export out.jsonl
+
+# 按 user_satisfied_rate 筛选
+claw-filter filter --user-satisfied-rate ">=0.7" --export out.jsonl
+
+# 按 task_type 筛选
+claw-filter filter --task-type coding --export out.jsonl
+
+# 组合筛选
+claw-filter filter --response-helpful-rate ">=0.7" --user-satisfied-rate ">=0.5" --task-type coding --export out.jsonl
+
+# 带统计报告
+claw-filter filter --response-helpful-rate ">=0.7" --export out.jsonl --report stats.json
+```
+
+## 目录结构
 
 ```
 claw_data_filter/
-├── cli.py              # Click CLI commands
-├── config.py          # Configuration
-├── models/            # Data models (Sample, RoundJudgment)
-├── importers/         # JSONL import
-├── processors/        # RoundFeedback processor
-│   └── round_feedback.py   # TurnContextBuilder, RoundJudgmentProcessor,
-│                           # ToolStatsAggregator, PressureTest
-├── storage/           # DuckDB operations (samples, turn_judgments)
-├── filters/           # Query builder
-├── exporters/         # JSONL & report export
-├── prompts/           # LLM evaluation prompts
-└── llm/               # LLM clients (sync & async)
+├── cli.py              # CLI 命令
+├── config.py           # 配置
+├── models/             # 数据模型
+├── importers/          # JSONL 导入
+├── processors/         # RoundFeedback 处理器
+├── storage/            # DuckDB 操作
+├── filters/            # 筛选查询
+├── exporters/          # 导出
+└── llm/                # LLM 客户端
 ```
 
-## Development
+## 开发
 
 ```bash
-# Install in dev mode
 pip install -e ".[dev]"
-
-# Run tests
-pytest tests/ -v
-
-# Skip integration tests (require LLM server)
-SKIP_INTEGRATION=1 pytest tests/ -v
+pytest tests/ -v           # 运行测试
+SKIP_INTEGRATION=1 pytest tests/ -v  # 跳过集成测试
 ```
-
-## License
-
-MIT
