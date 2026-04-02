@@ -235,6 +235,46 @@ def test_get_unprocessed_samples():
         store.close()
 
 
+def test_samples_has_task_type_column():
+    """Test samples table has task_type column"""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test.db"
+        store = DuckDBStore(db_path)
+        result = store.conn.execute("""
+            SELECT column_name FROM information_schema.columns
+            WHERE table_name = 'samples' AND column_name = 'task_type'
+        """).fetchone()
+        assert result is not None, "task_type column should exist"
+        store.close()
+
+
+def test_evaluations_table_dropped():
+    """Test evaluations table no longer exists"""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test.db"
+        store = DuckDBStore(db_path)
+        result = store.conn.execute("""
+            SELECT table_name FROM information_schema.tables WHERE table_name = 'evaluations'
+        """).fetchone()
+        assert result is None, "evaluations table should be dropped"
+        store.close()
+
+
+def test_get_stats_returns_new_fields():
+    """Test get_stats returns response_helpful_rate, user_satisfied_rate, error_count"""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test.db"
+        store = DuckDBStore(db_path)
+        stats = store.get_stats()
+        assert "avg_response_helpful_rate" in stats
+        assert "avg_user_satisfied_rate" in stats
+        assert "error_count" in stats
+        store.close()
+
+
 if __name__ == "__main__":
     test_store_and_retrieve_samples()
     test_insert_evaluation()

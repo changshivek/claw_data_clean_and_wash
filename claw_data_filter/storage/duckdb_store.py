@@ -20,7 +20,7 @@ class DuckDBStore:
 
     def init_schema(self):
         """Create tables and sequences if not exist."""
-        # Samples table - ensure tool_stats column exists (migration for existing DBs)
+        # Samples table - includes task_type column
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS samples (
                 id INTEGER PRIMARY KEY,
@@ -31,30 +31,23 @@ class DuckDBStore:
                 num_tool_calls INTEGER,
                 has_error BOOLEAN,
                 imported_at TIMESTAMP,
-                tool_stats JSON
+                tool_stats JSON,
+                task_type TEXT
             )
         """)
 
-        # Migration: add tool_stats column if it doesn't exist (DuckDB)
+        # Migration: add columns if they don't exist
         try:
             self.conn.execute("ALTER TABLE samples ADD COLUMN tool_stats JSON")
         except:
             pass  # Column may already exist (ignore error)
+        try:
+            self.conn.execute("ALTER TABLE samples ADD COLUMN task_type TEXT")
+        except:
+            pass  # Column may already exist (ignore error)
 
-        # Evaluations table
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS evaluations (
-                id INTEGER PRIMARY KEY,
-                sample_id INTEGER REFERENCES samples(id),
-                task_type TEXT,
-                progress_score INTEGER,
-                tool_quality_score DOUBLE,
-                tool_success_rate DOUBLE,
-                overall_score DOUBLE,
-                reasoning TEXT,
-                evaluated_at TIMESTAMP
-            )
-        """)
+        # Drop evaluations table completely
+        self.conn.execute("DROP TABLE IF EXISTS evaluations")
 
         # Turn judgments table
         self.conn.execute("""
@@ -165,21 +158,25 @@ class DuckDBStore:
         return result[0] if result else 0
 
     def get_stats(self) -> dict:
-        """Get statistics about samples and evaluations."""
+        """Get statistics about samples and turn judgments."""
         sample_count = self.get_sample_count()
-        eval_count = self.get_evaluation_count()
 
-        progress_stats = self.conn.execute(
-            "SELECT AVG(progress_score), AVG(tool_quality_score), AVG(tool_success_rate), AVG(overall_score) FROM evaluations"
-        ).fetchone()
+        # Aggregate from samples.tool_stats
+        stats = self.conn.execute("""
+            SELECT
+                COUNT(*) as total,
+                AVG(CAST(json_extract(tool_stats, '$.response_helpful_rate') AS DOUBLE)) as avg_helpful,
+                AVG(CAST(json_extract(tool_stats, '$.user_satisfied_rate') AS DOUBLE)) as avg_satisfied,
+                SUM(CASE WHEN CAST(json_extract(tool_stats, '$.has_error') AS BOOLEAN) = true THEN 1 ELSE 0 END) as error_count
+            FROM samples
+            WHERE tool_stats IS NOT NULL
+        """).fetchone()
 
         return {
             "total_samples": sample_count,
-            "total_evaluations": eval_count,
-            "avg_progress_score": progress_stats[0] if progress_stats[0] is not None else 0,
-            "avg_tool_quality": progress_stats[1] if progress_stats[1] is not None else 0,
-            "avg_tool_success_rate": progress_stats[2] if progress_stats[2] is not None else 0,
-            "avg_overall_score": progress_stats[3] if progress_stats[3] is not None else 0,
+            "avg_response_helpful_rate": stats[1] or 0,
+            "avg_user_satisfied_rate": stats[2] or 0,
+            "error_count": stats[3] or 0,
         }
 
     def insert_turn_judgment(self, judgment: RoundJudgment) -> int:
