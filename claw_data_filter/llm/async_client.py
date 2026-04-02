@@ -45,7 +45,7 @@ class AsyncLLMClient:
         messages: list[dict[str, str]],
         *,
         temperature: float = 0.1,
-        max_tokens: int = 50,
+        max_tokens: int = 1024,
     ) -> str:
         """Send chat request to LLM, return assistant message content.
 
@@ -69,13 +69,21 @@ class AsyncLLMClient:
         if self.model:
             payload["model"] = self.model
 
+        # Disable thinking mode for Qwen models
+        payload["extra_body"] = {
+            "chat_template_kwargs": {"enable_thinking": False}
+        }
+
         response = await self.client.post(
             f"{self.endpoint}/chat/completions",
             json=payload,
         )
         response.raise_for_status()
         data = response.json()
-        return data["choices"][0]["message"]["content"]
+        content = data["choices"][0]["message"].get("content")
+        if content is None:
+            raise ValueError("LLM returned empty content")
+        return content
 
     async def close(self):
         """Close async HTTP client."""

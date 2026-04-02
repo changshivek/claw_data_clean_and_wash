@@ -1,7 +1,6 @@
 """Tests for data models."""
 import json
 from claw_data_filter.models.sample import Sample
-from claw_data_filter.models.evaluation import Evaluation
 
 
 def test_sample_from_dict_basic():
@@ -73,42 +72,6 @@ def test_sample_from_dict_multiple_turns():
     print("test_sample_from_dict_multiple_turns passed")
 
 
-def test_evaluation_model_basic():
-    """Test creating an evaluation."""
-    eval = Evaluation(
-        sample_id=1,
-        task_type="information_retrieval",
-        progress_score=4,
-        tool_quality_score=0.9,
-        tool_success_rate=1.0,
-        overall_score=8.5,
-        reasoning="Good work"
-    )
-    assert eval.progress_score == 4
-    assert eval.tool_quality_score == 0.9
-    print("test_evaluation_model_basic passed")
-
-
-def test_evaluation_progress_validation():
-    """Test progress_score validation."""
-    # Valid scores 0-5 are accepted as-is
-    for score in (0, 1, 2, 3, 4, 5):
-        e = Evaluation(sample_id=1, progress_score=score, task_type="coding",
-                      tool_quality_score=1.0, tool_success_rate=1.0, overall_score=10.0)
-        assert e.progress_score == score
-
-    # Out-of-range scores are clamped
-    e_low = Evaluation(sample_id=1, progress_score=-1, task_type="coding",
-                       tool_quality_score=1.0, tool_success_rate=1.0, overall_score=10.0)
-    assert e_low.progress_score == 0
-
-    e_high = Evaluation(sample_id=1, progress_score=10, task_type="coding",
-                       tool_quality_score=1.0, tool_success_rate=1.0, overall_score=10.0)
-    assert e_high.progress_score == 5
-
-    print("test_evaluation_progress_validation passed")
-
-
 def test_sample_detect_anthropic_format():
     """Test Sample.from_dict detects Anthropic format"""
     from claw_data_filter.models.sample import Sample
@@ -178,8 +141,6 @@ if __name__ == "__main__":
     test_sample_from_dict_with_tool_calls()
     test_sample_from_dict_with_error()
     test_sample_from_dict_multiple_turns()
-    test_evaluation_model_basic()
-    test_evaluation_progress_validation()
     test_sample_detect_anthropic_format()
     test_sample_detect_openai_format()
     test_sample_anthropic_to_openai_conversion()

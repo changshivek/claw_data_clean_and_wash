@@ -3,13 +3,11 @@ from claw_data_filter.filters.query import FilterQueryBuilder, ComparisonOp
 
 
 def test_filter_builder_basic():
-    """Test basic condition building with round_feedback fields."""
+    """Test basic condition building with non-JSON fields."""
     builder = FilterQueryBuilder()
-    builder.add_condition("response_helpful_rate", ComparisonOp.GTE, 4)
     builder.add_condition("num_turns", ComparisonOp.GT, 7.0)
 
     where = builder.build_where_clause()
-    assert "response_helpful_rate >= 4" in where
     assert "num_turns > 7.0" in where
     print(f"WHERE clause: {where}")
     print("test_filter_builder_basic passed")

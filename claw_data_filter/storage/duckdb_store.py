@@ -48,14 +48,12 @@ class DuckDBStore:
         # Drop evaluations table completely
         self.conn.execute("DROP TABLE IF EXISTS evaluations")
 
-        # Turn judgments table
+        # Turn judgments table (simplified: only response_helpful and user_satisfied)
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS turn_judgments (
                 id INTEGER PRIMARY KEY,
                 sample_id INTEGER,
                 turn_index INTEGER,
-                need_tool TEXT,
-                tool_correct TEXT,
                 response_helpful TEXT,
                 user_satisfied TEXT,
                 signal_from_users JSON,
@@ -140,15 +138,13 @@ class DuckDBStore:
 
         self.conn.execute(
             """
-            INSERT INTO turn_judgments (id, sample_id, turn_index, need_tool, tool_correct, response_helpful, user_satisfied, signal_from_users, llm_error, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO turn_judgments (id, sample_id, turn_index, response_helpful, user_satisfied, signal_from_users, llm_error, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 j_id,
                 judgment.sample_id,
                 judgment.turn_index,
-                judgment.need_tool,
-                judgment.tool_correct,
                 judgment.response_helpful,
                 judgment.user_satisfied,
                 json.dumps(judgment.signal_from_users),
@@ -161,20 +157,18 @@ class DuckDBStore:
     def get_turn_judgments(self, sample_id: int) -> list[RoundJudgment]:
         """Get all turn judgments for a sample."""
         rows = self.conn.execute(
-            "SELECT sample_id, turn_index, need_tool, tool_correct, response_helpful, user_satisfied, signal_from_users, llm_error, created_at FROM turn_judgments WHERE sample_id = ? ORDER BY turn_index",
+            "SELECT sample_id, turn_index, response_helpful, user_satisfied, signal_from_users, llm_error, created_at FROM turn_judgments WHERE sample_id = ? ORDER BY turn_index",
             [sample_id],
         ).fetchall()
         return [
             RoundJudgment(
                 sample_id=row[0],
                 turn_index=row[1],
-                need_tool=row[2],
-                tool_correct=row[3],
-                response_helpful=row[4],
-                user_satisfied=row[5],
-                signal_from_users=json.loads(row[6]) if row[6] else [],
-                llm_error=row[7],
-                created_at=row[8],
+                response_helpful=row[2],
+                user_satisfied=row[3],
+                signal_from_users=json.loads(row[4]) if row[4] else [],
+                llm_error=row[5],
+                created_at=row[6],
             )
             for row in rows
         ]

@@ -40,62 +40,30 @@ class ReportExporter:
         self.store = store
 
     def generate_report(self) -> dict[str, Any]:
-        """Generate statistical report from evaluations.
+        """Generate statistical report from samples and turn judgments.
 
         Returns:
-            Dictionary containing summary statistics, distributions, and percentiles
+            Dictionary containing summary statistics
         """
         stats = self.store.get_stats()
 
-        # Distribution of progress scores
-        progress_dist = self.store.conn.execute("""
-            SELECT progress_score, COUNT(*)
-            FROM evaluations
-            GROUP BY progress_score
-            ORDER BY progress_score
-        """).fetchall()
-
-        # Task type distribution
+        # Task type distribution from samples
         task_dist = self.store.conn.execute("""
             SELECT task_type, COUNT(*)
-            FROM evaluations
+            FROM samples
+            WHERE task_type IS NOT NULL
             GROUP BY task_type
         """).fetchall()
-
-        # Score percentiles
-        percentiles = self.store.conn.execute("""
-            SELECT
-                PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY overall_score) as p25,
-                PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY overall_score) as p50,
-                PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY overall_score) as p75
-            FROM evaluations
-        """).fetchone()
 
         report: dict[str, Any] = {
             "summary": {
                 "total_samples": stats["total_samples"],
-                "total_evaluations": stats["total_evaluations"],
-                "evaluation_rate": (
-                    stats["total_evaluations"] / stats["total_samples"]
-                    if stats["total_samples"] > 0 else 0
-                ),
-            },
-            "averages": {
-                "progress_score": round(stats["avg_progress_score"], 2),
-                "tool_quality": round(stats["avg_tool_quality"], 2),
-                "tool_success_rate": round(stats["avg_tool_success_rate"], 2),
-                "overall_score": round(stats["avg_overall_score"], 2),
-            },
-            "progress_score_distribution": {
-                str(row[0]): row[1] for row in progress_dist
+                "avg_response_helpful_rate": round(stats["avg_response_helpful_rate"], 2),
+                "avg_user_satisfied_rate": round(stats["avg_user_satisfied_rate"], 2),
+                "error_count": stats["error_count"],
             },
             "task_type_distribution": {
                 row[0]: row[1] for row in task_dist
-            },
-            "overall_score_percentiles": {
-                "p25": round(percentiles[0], 2) if percentiles[0] else 0,
-                "p50": round(percentiles[1], 2) if percentiles[1] else 0,
-                "p75": round(percentiles[2], 2) if percentiles[2] else 0,
             },
         }
 

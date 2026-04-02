@@ -5,7 +5,6 @@ from claw_data_filter.exporters.jsonl_exporter import JSONLExporter
 from claw_data_filter.exporters.report_exporter import ReportExporter
 from claw_data_filter.storage.duckdb_store import DuckDBStore
 from claw_data_filter.models.sample import Sample
-from claw_data_filter.models.evaluation import Evaluation
 
 # Use data directory for tests
 TEST_DATA_DIR = Path(__file__).parent.parent / "data"
@@ -25,21 +24,10 @@ def test_jsonl_export():
 
     store = DuckDBStore(db_path)
 
-    # Insert sample and evaluation
+    # Insert sample
     raw = {"messages": [{"role": "user", "content": "Test"}]}
     sample = Sample.from_dict(raw)
-    sample_id = store.insert_sample(sample)
-
-    evaluation = Evaluation(
-        sample_id=sample_id,
-        task_type="coding",
-        progress_score=4,
-        tool_quality_score=1.0,
-        tool_success_rate=1.0,
-        overall_score=8.0,
-        reasoning="Good"
-    )
-    store.insert_evaluation(evaluation)
+    store.insert_sample(sample)
 
     # Export
     exporter = JSONLExporter(store)
@@ -68,27 +56,20 @@ def test_jsonl_export_with_filter():
 
     store = DuckDBStore(db_path)
 
-    # Insert 3 samples with different scores
-    for i, score in enumerate([2, 4, 5]):
+    # Insert 3 samples with tool_stats
+    for i in range(3):
         raw = {"messages": [{"role": "user", "content": f"Test {i}"}]}
         sample = Sample.from_dict(raw)
         sample_id = store.insert_sample(sample)
-        evaluation = Evaluation(
-            sample_id=sample_id,
-            task_type="coding",
-            progress_score=score,
-            tool_quality_score=1.0,
-            tool_success_rate=1.0,
-            overall_score=8.0,
-            reasoning="Good"
-        )
-        store.insert_evaluation(evaluation)
+        # Different response_helpful_rate for each
+        tool_stats = {"response_helpful_rate": 0.5 + i * 0.2, "user_satisfied_rate": 0.8, "total_turns": 1, "has_error": False}
+        store.update_sample_tool_stats(sample_id, tool_stats)
 
     # Export with filter
     exporter = JSONLExporter(store)
-    count = exporter.export(output_path, filter_query="progress_score >= 4")
+    count = exporter.export(output_path, filter_query="json_extract(samples.tool_stats, '$.response_helpful_rate') >= 0.7")
 
-    assert count == 2  # Only scores 4 and 5
+    assert count == 2  # rates 0.9 and 0.7
 
     store.close()
     print("test_jsonl_export_with_filter passed")
@@ -103,21 +84,12 @@ def test_report_generation():
 
     store = DuckDBStore(db_path)
 
-    # Insert sample and evaluation
+    # Insert sample with tool_stats
     raw = {"messages": [{"role": "user", "content": "Test"}]}
     sample = Sample.from_dict(raw)
     sample_id = store.insert_sample(sample)
-
-    evaluation = Evaluation(
-        sample_id=sample_id,
-        task_type="coding",
-        progress_score=5,
-        tool_quality_score=0.9,
-        tool_success_rate=1.0,
-        overall_score=9.5,
-        reasoning="Excellent"
-    )
-    store.insert_evaluation(evaluation)
+    tool_stats = {"response_helpful_rate": 0.9, "user_satisfied_rate": 0.85, "total_turns": 2, "has_error": False}
+    store.update_sample_tool_stats(sample_id, tool_stats)
 
     # Generate report
     exporter = ReportExporter(store)
@@ -125,9 +97,6 @@ def test_report_generation():
 
     assert "summary" in report
     assert report["summary"]["total_samples"] == 1
-    assert report["summary"]["total_evaluations"] == 1
-    assert report["averages"]["progress_score"] == 5.0
-    assert report["averages"]["tool_quality"] == 0.9
 
     store.close()
     print("test_report_generation passed")
@@ -145,21 +114,10 @@ def test_report_export():
 
     store = DuckDBStore(db_path)
 
-    # Insert sample and evaluation
+    # Insert sample
     raw = {"messages": [{"role": "user", "content": "Test"}]}
     sample = Sample.from_dict(raw)
-    sample_id = store.insert_sample(sample)
-
-    evaluation = Evaluation(
-        sample_id=sample_id,
-        task_type="general",
-        progress_score=4,
-        tool_quality_score=1.0,
-        tool_success_rate=1.0,
-        overall_score=8.0,
-        reasoning="Good"
-    )
-    store.insert_evaluation(evaluation)
+    store.insert_sample(sample)
 
     # Export report
     exporter = ReportExporter(store)
@@ -168,15 +126,15 @@ def test_report_export():
     assert report_path.exists()
     with open(report_path) as f:
         report = json.load(f)
-        assert "summary" in report
-        assert "averages" in report
+        assert "total_samples" in report
+        assert "avg_response_helpful_rate" in report
 
     store.close()
     print("test_report_export passed")
 
 
-def test_jsonl_exporter_no_eval_join():
-    """Test exporter doesn't require evaluations table"""
+def test_jsonl_exporter_no_filter():
+    """Test exporter works without evaluations table"""
     db_path = TEST_DATA_DIR / "test_no_eval.duckdb"
     output_path = TEST_DATA_DIR / "test_no_eval.jsonl"
 
@@ -193,7 +151,7 @@ def test_jsonl_exporter_no_eval_join():
         sample = Sample.from_dict(raw)
         store.insert_sample(sample)
 
-    # Export without filter should work without evaluations
+    # Export without filter should work
     exporter = JSONLExporter(store)
     count = exporter.export(output_path)
 
@@ -202,14 +160,13 @@ def test_jsonl_exporter_no_eval_join():
         lines = f.readlines()
         assert len(lines) == 3
 
-    # Export with filter should also work without evaluations
-    # (using id-based filter since samples don't have progress_score)
+    # Export with id-based filter should also work
     filter_path = TEST_DATA_DIR / "test_no_eval_filtered.jsonl"
     count_filtered = exporter.export(filter_path, filter_query="id > 0")
     assert count_filtered == 3
 
     store.close()
-    print("test_jsonl_exporter_no_eval_join passed")
+    print("test_jsonl_exporter_no_filter passed")
 
 
 if __name__ == "__main__":
@@ -217,5 +174,5 @@ if __name__ == "__main__":
     test_jsonl_export_with_filter()
     test_report_generation()
     test_report_export()
-    test_jsonl_exporter_no_eval_join()
+    test_jsonl_exporter_no_filter()
     print("All exporter tests passed!")

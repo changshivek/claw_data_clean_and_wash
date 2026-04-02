@@ -27,6 +27,15 @@ class ComparisonOp(Enum):
     LTE = "<="
 
 
+# JSON fields stored in tool_stats column
+JSON_FIELDS = frozenset([
+    "response_helpful_rate",
+    "user_satisfied_rate",
+    "has_error",
+    "total_turns",
+])
+
+
 @dataclass
 class FilterCondition:
     """A single filter condition."""
@@ -34,14 +43,19 @@ class FilterCondition:
     op: ComparisonOp
     value: float | int | str
 
-    def to_sql(self) -> str:
+    def to_sql(self, table_name: str = "samples") -> str:
         """Convert to SQL WHERE clause fragment."""
         if self.field not in ALLOWED_FIELDS:
             raise ValueError(f"Invalid field name: {self.field}")
+        # For JSON fields, use json_extract
+        if self.field in JSON_FIELDS:
+            field_ref = f"json_extract({table_name}.tool_stats, '$.{self.field}')"
+        else:
+            field_ref = self.field
         if isinstance(self.value, str):
             escaped = self.value.replace("'", "''")  # SQL escape single quotes
-            return f"{self.field} {self.op.value} '{escaped}'"
-        return f"{self.field} {self.op.value} {self.value}"
+            return f"{field_ref} {self.op.value} '{escaped}'"
+        return f"{field_ref} {self.op.value} {self.value}"
 
 
 class FilterQueryBuilder:
@@ -118,8 +132,11 @@ class FilterQueryBuilder:
         self.task_types.extend(task_types)
         return self
 
-    def build_where_clause(self) -> str:
+    def build_where_clause(self, table_name: str = "samples") -> str:
         """Build WHERE clause SQL fragment.
+
+        Args:
+            table_name: Table name for JSON field references
 
         Returns:
             SQL WHERE clause string (e.g., "progress_score >= 4 AND task_type IN ('coding')")
@@ -127,7 +144,7 @@ class FilterQueryBuilder:
         parts = []
 
         for cond in self.conditions:
-            parts.append(cond.to_sql())
+            parts.append(cond.to_sql(table_name))
 
         if self.task_types:
             for tt in self.task_types:
@@ -141,32 +158,14 @@ class FilterQueryBuilder:
     def get_filtered_samples_query(self, limit: Optional[int] = None) -> str:
         """Build complete SELECT query with filters.
 
-        For tool_stats fields, extracts from JSON.
+        For tool_stats fields, extracts from JSON using json_extract.
         """
-        where = self.build_where_clause()
+        where = self.build_where_clause(table_name="s")
         limit_str = f"LIMIT {limit}" if limit else ""
 
-        # Check if any tool_stats fields are used
-        tool_stats_fields = ["response_helpful_rate", "user_satisfied_rate"]
-        uses_tool_stats = any(
-            cond.field in tool_stats_fields
-            for cond in self.conditions
-        )
-
-        if uses_tool_stats:
-            # Need to join samples with aggregated turn_judgments
-            return f"""
-                SELECT s.id, s.raw_json, s.tool_stats
-                FROM samples s
-                LEFT JOIN turn_judgments tj ON s.id = tj.sample_id
-                GROUP BY s.id, s.raw_json, s.tool_stats
-                HAVING {where}
-                {limit_str}
-            """
-        else:
-            return f"""
-                SELECT s.id, s.raw_json, s.tool_stats
-                FROM samples s
-                WHERE {where}
-                {limit_str}
-            """
+        return f"""
+            SELECT s.id, s.raw_json, s.tool_stats
+            FROM samples s
+            WHERE {where}
+            {limit_str}
+        """

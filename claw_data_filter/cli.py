@@ -52,34 +52,45 @@ def import_cmd(ctx, input_file):
 
 
 @cli.command()
-@click.option("--progress-score", type=str, help="Filter by progress score (e.g., '>=4')")
-@click.option("--overall-score", type=str, help="Filter by overall score (e.g., '>7')")
+@click.option("--response-helpful-rate", type=str, help="Filter by response helpful rate (e.g., '>=0.7')")
+@click.option("--user-satisfied-rate", type=str, help="Filter by user satisfied rate (e.g., '>=0.7')")
 @click.option("--task-type", type=str, multiple=True, help="Filter by task type")
+@click.option("--has-error", type=bool, help="Filter by has error (true/false)")
 @click.option("--export", type=click.Path(), required=True, help="Output JSONL file")
 @click.option("--report", type=click.Path(), help="Output report JSON file")
 @click.option("--limit", type=int, help="Limit number of results")
 @click.pass_context
-def filter_cmd(ctx, progress_score, overall_score, task_type, export, report, limit):
+def filter_cmd(ctx, response_helpful_rate, user_satisfied_rate, task_type, has_error, export, report, limit):
     """Filter samples and export to JSONL with optional report."""
     config = ctx.obj["config"]
 
-    OVERALL_SCORE_PATTERN = re.compile(r"^(>=|<=|>|<|!=|=)\s*([\d.]+)$")
+    RATE_PATTERN = re.compile(r"^(>=|<=|>|<|!=|=)\s*([\d.]+)$")
 
     builder = FilterQueryBuilder()
-    if progress_score:
-        builder.add_progress_score_filter(progress_score)
-    if overall_score:
-        match = OVERALL_SCORE_PATTERN.match(overall_score.strip())
+    if response_helpful_rate:
+        match = RATE_PATTERN.match(response_helpful_rate.strip())
         if match:
             op_str, value_str = match.groups()
             from claw_data_filter.filters.query import ComparisonOp
             op = ComparisonOp(op_str)
-            value = float(value_str) if "." in value_str else int(value_str)
-            builder.add_condition("overall_score", op, value)
+            value = float(value_str)
+            builder.add_condition("response_helpful_rate", op, value)
         else:
-            raise ValueError(f"Invalid overall-score expression: {overall_score}")
+            raise ValueError(f"Invalid response-helpful-rate expression: {response_helpful_rate}")
+    if user_satisfied_rate:
+        match = RATE_PATTERN.match(user_satisfied_rate.strip())
+        if match:
+            op_str, value_str = match.groups()
+            from claw_data_filter.filters.query import ComparisonOp
+            op = ComparisonOp(op_str)
+            value = float(value_str)
+            builder.add_condition("user_satisfied_rate", op, value)
+        else:
+            raise ValueError(f"Invalid user-satisfied-rate expression: {user_satisfied_rate}")
     if task_type:
         builder.add_task_type_filter(list(task_type))
+    if has_error is not None:
+        builder.add_condition("has_error", ComparisonOp("="), has_error)
 
     where_clause = builder.build_where_clause()
 

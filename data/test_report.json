@@ -1,24 +1,7 @@
 {
-  "summary": {
-    "total_samples": 1,
-    "total_evaluations": 1,
-    "evaluation_rate": 1.0
-  },
-  "averages": {
-    "progress_score": 4.0,
-    "tool_quality": 1.0,
-    "tool_success_rate": 1.0,
-    "overall_score": 8.0
-  },
-  "progress_score_distribution": {
-    "4": 1
-  },
-  "task_type_distribution": {
-    "general": 1
-  },
-  "overall_score_percentiles": {
-    "p25": 8.0,
-    "p50": 8.0,
-    "p75": 8.0
-  }
+  "total_samples": 1,
+  "avg_response_helpful_rate": 0,
+  "avg_user_satisfied_rate": 0,
+  "error_count": 0,
+  "generated_at": "2026-04-02T19:12:26.597852"
 }
