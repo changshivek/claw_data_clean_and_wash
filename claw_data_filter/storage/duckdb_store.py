@@ -6,7 +6,6 @@ import duckdb
 from datetime import datetime
 
 from claw_data_filter.models.sample import Sample
-from claw_data_filter.models.evaluation import Evaluation
 from claw_data_filter.models.round_judgment import RoundJudgment
 
 
@@ -99,62 +98,17 @@ class DuckDBStore:
         )
         return sample_id
 
-    def get_samples(self, limit: int = 100, offset: int = 0, evaluated_only: bool = False) -> list[Sample]:
-        """Get samples with optional evaluation filter."""
-        query = "SELECT raw_json FROM samples"
-        if evaluated_only:
-            query += " WHERE id IN (SELECT sample_id FROM evaluations)"
-        query += " LIMIT ? OFFSET ?"
-
-        rows = self.conn.execute(query, [limit, offset]).fetchall()
-        return [Sample.from_dict(json.loads(row[0])) for row in rows]
-
-    def get_unevaluated_samples(self, limit: int = 100) -> list[tuple[int, Sample]]:
-        """Get samples that haven't been evaluated yet. Returns (id, sample) tuples."""
+    def get_samples(self, limit: int = 100, offset: int = 0) -> list[Sample]:
+        """Get samples."""
         rows = self.conn.execute(
-            """
-            SELECT s.id, s.raw_json
-            FROM samples s
-            LEFT JOIN evaluations e ON s.id = e.sample_id
-            WHERE e.id IS NULL
-            LIMIT ?
-            """,
-            [limit],
+            "SELECT raw_json FROM samples LIMIT ? OFFSET ?",
+            [limit, offset]
         ).fetchall()
-        return [(row[0], Sample.from_dict(json.loads(row[1]))) for row in rows]
-
-    def insert_evaluation(self, evaluation: Evaluation) -> int:
-        """Insert evaluation, return auto-generated id."""
-        result = self.conn.execute("SELECT nextval('eval_id_seq')").fetchone()
-        eval_id = result[0]
-
-        self.conn.execute(
-            """
-            INSERT INTO evaluations (id, sample_id, task_type, progress_score, tool_quality_score, tool_success_rate, overall_score, reasoning, evaluated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            [
-                eval_id,
-                evaluation.sample_id,
-                evaluation.task_type,
-                evaluation.progress_score,
-                evaluation.tool_quality_score,
-                evaluation.tool_success_rate,
-                evaluation.overall_score,
-                evaluation.reasoning,
-                datetime.now(),
-            ],
-        )
-        return eval_id
+        return [Sample.from_dict(json.loads(row[0])) for row in rows]
 
     def get_sample_count(self) -> int:
         """Get total sample count."""
         result = self.conn.execute("SELECT COUNT(*) FROM samples").fetchone()
-        return result[0] if result else 0
-
-    def get_evaluation_count(self) -> int:
-        """Get total evaluation count."""
-        result = self.conn.execute("SELECT COUNT(*) FROM evaluations").fetchone()
         return result[0] if result else 0
 
     def get_stats(self) -> dict:
