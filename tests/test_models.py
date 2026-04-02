@@ -154,6 +154,25 @@ def test_sample_anthropic_to_openai_conversion():
     assert s.user_query == "Thanks", f"Expected 'Thanks', got '{s.user_query}'"
 
 
+def test_sample_anthropic_assistant_tool_use_conversion():
+    """Test Anthropic assistant with tool_use blocks is converted to OpenAI"""
+    from claw_data_filter.models.sample import Sample
+    import json
+
+    anthropic_data = {
+        "messages": [
+            {"role": "user", "content": "What files are there?"},
+            {"role": "assistant", "content": [
+                {"type": "text", "text": "Let me check..."},
+                {"type": "tool_use", "id": "call123", "name": "bash", "input": {"cmd": "ls"}}
+            ]},
+        ]
+    }
+    s = Sample.from_dict(anthropic_data)
+    # Verify conversion happened
+    assert s.num_tool_calls >= 1, f"Expected >= 1 tool call, got {s.num_tool_calls}"
+
+
 if __name__ == "__main__":
     test_sample_from_dict_basic()
     test_sample_from_dict_with_tool_calls()
@@ -164,4 +183,5 @@ if __name__ == "__main__":
     test_sample_detect_anthropic_format()
     test_sample_detect_openai_format()
     test_sample_anthropic_to_openai_conversion()
+    test_sample_anthropic_assistant_tool_use_conversion()
     print("All model tests passed!")

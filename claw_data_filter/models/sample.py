@@ -12,13 +12,17 @@ def _detect_format(messages: list) -> str:
         content = msg.get("content", [])
         if isinstance(content, list):
             for c in content:
-                if isinstance(c, dict) and c.get("type") == "tool_result":
-                    return "anthropic"
+                if isinstance(c, dict):
+                    if c.get("type") == "tool_result":
+                        return "anthropic"
+                    if c.get("type") == "tool_use":
+                        return "anthropic"
     return "openai"
 
 
 def _anthropic_to_openai(messages: list) -> list:
     """将 Anthropic 格式转换为 OpenAI 格式"""
+    import json
     result = []
     for msg in messages:
         role = msg.get("role")
@@ -38,6 +42,34 @@ def _anthropic_to_openai(messages: list) -> list:
             # 再输出 user 消息（只保留 text 部分）
             if text_parts:
                 result.append({"role": "user", "content": "".join(text_parts)})
+        elif role == "assistant" and isinstance(content, list):
+            # Handle assistant with tool_use blocks
+            tool_uses = [c for c in content if c.get("type") == "tool_use"]
+            text_parts = [c.get("text") for c in content if c.get("type") == "text" and c.get("text")]
+
+            if tool_uses:
+                # Convert tool_use to OpenAI tool_calls format
+                tool_calls = []
+                for tu in tool_uses:
+                    tool_calls.append({
+                        "id": tu.get("id"),
+                        "type": "function",
+                        "function": {
+                            "name": tu.get("name"),
+                            "arguments": json.dumps(tu.get("input", {}))
+                        }
+                    })
+                result.append({
+                    "role": "assistant",
+                    "content": "".join(text_parts) if text_parts else None,
+                    "tool_calls": tool_calls
+                })
+            else:
+                # No tool_use, just pass through as text
+                result.append({
+                    "role": "assistant",
+                    "content": "".join(text_parts)
+                })
         else:
             result.append(msg)
     return result
