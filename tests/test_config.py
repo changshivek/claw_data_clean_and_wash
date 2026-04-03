@@ -9,6 +9,7 @@ def test_config_defaults():
     config = Config()
     assert config.llm_endpoint == "http://localhost:8000/v1"
     assert config.llm_api_key is None
+    assert config.llm_model_id is None
     assert config.db_path == Path("./data.duckdb")
     assert config.worker_count > 0
     assert config.batch_size == 10
@@ -20,6 +21,7 @@ def test_config_custom_values():
     config = Config(
         llm_endpoint="http://custom:8000/v1",
         llm_api_key="test-key",
+        llm_model_id="qwen35",
         db_path=Path("/tmp/test.duckdb"),
         worker_count=4,
         batch_size=20,
@@ -27,6 +29,7 @@ def test_config_custom_values():
     )
     assert config.llm_endpoint == "http://custom:8000/v1"
     assert config.llm_api_key == "test-key"
+    assert config.llm_model_id == "qwen35"
     assert config.db_path == Path("/tmp/test.duckdb")
     assert config.worker_count == 4
     assert config.batch_size == 20
@@ -38,6 +41,7 @@ def test_config_from_env():
     import os
     os.environ["LLM_ENDPOINT"] = "http://custom:8000/v1"
     os.environ["LLM_API_KEY"] = "test-key"
+    os.environ["LLM_MODEL_ID"] = "qwen35"
     os.environ["DB_PATH"] = "/tmp/test.duckdb"
     os.environ["WORKER_COUNT"] = "4"
     os.environ["BATCH_SIZE"] = "20"
@@ -46,6 +50,7 @@ def test_config_from_env():
     config = Config.from_env()
     assert config.llm_endpoint == "http://custom:8000/v1"
     assert config.llm_api_key == "test-key"
+    assert config.llm_model_id == "qwen35"
     assert config.db_path == Path("/tmp/test.duckdb")
     assert config.worker_count == 4
     assert config.batch_size == 20
@@ -54,6 +59,7 @@ def test_config_from_env():
     # Cleanup
     del os.environ["LLM_ENDPOINT"]
     del os.environ["LLM_API_KEY"]
+    del os.environ["LLM_MODEL_ID"]
     del os.environ["DB_PATH"]
     del os.environ["WORKER_COUNT"]
     del os.environ["BATCH_SIZE"]

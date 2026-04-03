@@ -36,6 +36,31 @@ def test_store_and_retrieve_samples():
         print("test_store_and_retrieve_samples passed")
 
 
+def test_insert_sample_deduplicates_by_sample_uid():
+    """Test duplicate raw payloads reuse the same internal sample id."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "dedupe.duckdb"
+        store = DuckDBStore(db_path)
+
+        raw = {
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi there!"},
+            ]
+        }
+        sample = Sample.from_dict(raw)
+
+        first_id = store.insert_sample(sample)
+        second_id = store.insert_sample(Sample.from_dict(raw))
+
+        assert first_id == second_id
+        assert store.get_sample_count() == 1
+        row = store.conn.execute("SELECT sample_uid FROM samples WHERE id = ?", [first_id]).fetchone()
+        assert row is not None and row[0]
+
+        store.close()
+
+
 def test_turn_judgments_table_created():
     """Test that turn_judgments table is created on init"""
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -136,17 +161,159 @@ def test_get_unprocessed_samples():
         store.close()
 
 
-def test_samples_has_task_type_column():
-    """Test samples table has task_type column"""
-    import tempfile
+def test_claim_unprocessed_samples_marks_processing():
+    """Test claiming samples moves them to processing state."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "claim.db"
+        store = DuckDBStore(db_path)
+        sample = Sample.from_dict({
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi"},
+            ]
+        })
+        sample_id = store.insert_sample(sample)
+
+        claimed = store.claim_unprocessed_samples(limit=10)
+
+        assert len(claimed) == 1
+        assert claimed[0][0] == sample_id
+        row = store.conn.execute("SELECT processing_status FROM samples WHERE id = ?", [sample_id]).fetchone()
+        assert row[0] == "processing"
+        store.close()
+
+
+def test_partially_processed_sample_remains_unprocessed():
+    """Test samples with missing judgments are still returned for processing."""
+    from claw_data_filter.models.round_judgment import RoundJudgment
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test_partial.db"
+        store = DuckDBStore(db_path)
+
+        sample = Sample.from_dict({
+            "messages": [
+                {"role": "user", "content": "Question"},
+                {"role": "assistant", "content": "First"},
+                {"role": "user", "content": "Follow up"},
+                {"role": "assistant", "content": "Second"},
+            ]
+        })
+        sample_id = store.insert_sample(sample)
+        store.insert_turn_judgment(
+            RoundJudgment(sample_id=sample_id, turn_index=0, response_helpful="yes", user_satisfied="yes")
+        )
+
+        unprocessed = store.get_unprocessed_samples(limit=10)
+        assert len(unprocessed) == 1
+        assert unprocessed[0][0] == sample_id
+
+        store.close()
+
+
+def test_replace_round_feedback_results_replaces_old_judgments():
+    """Test replacing round feedback results clears stale partial judgments."""
+    from claw_data_filter.models.round_judgment import RoundJudgment
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test_replace.db"
+        store = DuckDBStore(db_path)
+
+        sample = Sample.from_dict({
+            "messages": [
+                {"role": "user", "content": "Question"},
+                {"role": "assistant", "content": "First"},
+                {"role": "assistant", "content": "Second"},
+            ]
+        })
+        sample_id = store.insert_sample(sample)
+        store.insert_turn_judgment(
+            RoundJudgment(sample_id=sample_id, turn_index=0, response_helpful="no", user_satisfied="no")
+        )
+
+        judgments = [
+            RoundJudgment(sample_id=sample_id, turn_index=0, response_helpful="yes", user_satisfied="yes"),
+            RoundJudgment(sample_id=sample_id, turn_index=1, response_helpful="yes", user_satisfied="uncertain"),
+        ]
+        tool_stats = {
+            "response_helpful_rate": 1.0,
+            "user_satisfied_rate": 0.5,
+            "total_turns": 2,
+            "has_error": False,
+        }
+
+        store.replace_round_feedback_results(sample_id, 2, judgments, tool_stats)
+
+        rows = store.get_turn_judgments(sample_id)
+        assert len(rows) == 2
+        assert [row.turn_index for row in rows] == [0, 1]
+        sample_row = store.conn.execute(
+            "SELECT processing_status FROM samples WHERE id = ?",
+            [sample_id],
+        ).fetchone()
+        assert sample_row[0] == "completed"
+
+        store.close()
+
+
+def test_mark_sample_processing_failed_sets_failed_status():
+    """Test failed status is persisted for later retry."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "failed.db"
+        store = DuckDBStore(db_path)
+        sample_id = store.insert_sample(Sample.from_dict({
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi"},
+            ]
+        }))
+
+        store.mark_sample_processing_failed(sample_id, "boom")
+
+        row = store.conn.execute(
+            "SELECT processing_status, tool_stats FROM samples WHERE id = ?",
+            [sample_id],
+        ).fetchone()
+        assert row[0] == "failed"
+        assert "boom" in row[1]
+        store.close()
+
+
+def test_filter_samples_returns_sample_dicts():
+    """Test filter_samples returns parsed records and count."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "filter.db"
+        store = DuckDBStore(db_path)
+        sample_id = store.insert_sample(Sample.from_dict({
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi"},
+            ]
+        }))
+        store.update_sample_tool_stats(
+            sample_id,
+            {"response_helpful_rate": 0.9, "user_satisfied_rate": 0.8, "total_turns": 1, "has_error": False},
+        )
+
+        samples, total = store.filter_samples(helpful_rate_val=0.8, limit=10, offset=0)
+
+        assert total == 1
+        assert len(samples) == 1
+        assert samples[0]["id"] == sample_id
+        assert samples[0]["helpful_rate"] == 0.9
+        store.close()
+
+
+def test_samples_schema_removed_unused_columns_and_added_uid():
+    """Test samples schema removes dead columns and keeps stable import uid."""
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / "test.db"
         store = DuckDBStore(db_path)
-        result = store.conn.execute("""
-            SELECT column_name FROM information_schema.columns
-            WHERE table_name = 'samples' AND column_name = 'task_type'
-        """).fetchone()
-        assert result is not None, "task_type column should exist"
+        columns = store.conn.execute("PRAGMA table_info('samples')").fetchall()
+        column_names = {column[1] for column in columns}
+        assert "sample_uid" in column_names
+        assert "task_type" not in column_names
+        assert "has_error" not in column_names
         store.close()
 
 
@@ -176,13 +343,66 @@ def test_get_stats_returns_new_fields():
         store.close()
 
 
+def test_init_schema_backfills_num_turns_from_expected_judgment_count():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "backfill.db"
+        conn = __import__("duckdb").connect(str(db_path))
+        conn.execute(
+            """
+            CREATE TABLE samples (
+                id INTEGER PRIMARY KEY,
+                sample_uid TEXT,
+                raw_json JSON,
+                user_query TEXT,
+                assistant_response TEXT,
+                num_turns INTEGER,
+                expected_judgment_count INTEGER,
+                num_tool_calls INTEGER,
+                imported_at TIMESTAMP,
+                tool_stats JSON,
+                processing_status TEXT,
+                processing_updated_at TIMESTAMP
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO samples (id, sample_uid, raw_json, user_query, assistant_response, num_turns, expected_judgment_count) VALUES (1, 'u', '{\"messages\":[]}', '', '', 15, 1)"
+        )
+        conn.execute(
+            """
+            CREATE TABLE turn_judgments (
+                id INTEGER PRIMARY KEY,
+                sample_id INTEGER,
+                turn_index INTEGER,
+                response_helpful TEXT,
+                user_satisfied TEXT,
+                signal_from_users JSON,
+                llm_error BOOLEAN,
+                created_at TIMESTAMP
+            )
+            """
+        )
+        conn.close()
+
+        store = DuckDBStore(db_path)
+        row = store.conn.execute("SELECT num_turns, expected_judgment_count FROM samples WHERE id = 1").fetchone()
+        assert row == (1, 1)
+        store.close()
+
+
 if __name__ == "__main__":
     test_store_and_retrieve_samples()
+    test_insert_sample_deduplicates_by_sample_uid()
     test_insert_and_fetch_turn_judgment()
     test_tool_stats_column_exists()
     test_update_sample_tool_stats()
     test_get_unprocessed_samples()
-    test_samples_has_task_type_column()
+    test_claim_unprocessed_samples_marks_processing()
+    test_partially_processed_sample_remains_unprocessed()
+    test_replace_round_feedback_results_replaces_old_judgments()
+    test_mark_sample_processing_failed_sets_failed_status()
+    test_filter_samples_returns_sample_dicts()
+    test_samples_schema_removed_unused_columns_and_added_uid()
     test_evaluations_table_dropped()
     test_get_stats_returns_new_fields()
     print("All DuckDB store tests passed!")

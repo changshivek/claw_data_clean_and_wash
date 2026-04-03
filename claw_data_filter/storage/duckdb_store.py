@@ -1,11 +1,12 @@
 """DuckDB storage layer for samples and evaluations."""
 import json
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 import duckdb
 from datetime import datetime
 
-from claw_data_filter.models.sample import Sample
+from claw_data_filter.filters.query import ComparisonOp, FilterQueryBuilder
+from claw_data_filter.models.sample import Sample, generate_sample_uid
 from claw_data_filter.models.round_judgment import RoundJudgment
 
 
@@ -19,19 +20,21 @@ class DuckDBStore:
 
     def init_schema(self):
         """Create tables and sequences if not exist."""
-        # Samples table - includes task_type column
+        # Samples table keeps only actively maintained sample-level fields.
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS samples (
                 id INTEGER PRIMARY KEY,
+                sample_uid TEXT,
                 raw_json JSON,
                 user_query TEXT,
                 assistant_response TEXT,
                 num_turns INTEGER,
+                expected_judgment_count INTEGER,
                 num_tool_calls INTEGER,
-                has_error BOOLEAN,
                 imported_at TIMESTAMP,
                 tool_stats JSON,
-                task_type TEXT
+                processing_status TEXT,
+                processing_updated_at TIMESTAMP
             )
         """)
 
@@ -41,9 +44,36 @@ class DuckDBStore:
         except:
             pass  # Column may already exist (ignore error)
         try:
-            self.conn.execute("ALTER TABLE samples ADD COLUMN task_type TEXT")
+            self.conn.execute("ALTER TABLE samples ADD COLUMN sample_uid TEXT")
         except:
             pass  # Column may already exist (ignore error)
+        try:
+            self.conn.execute("ALTER TABLE samples ADD COLUMN expected_judgment_count INTEGER")
+        except:
+            pass  # Column may already exist (ignore error)
+        try:
+            self.conn.execute("ALTER TABLE samples ADD COLUMN processing_status TEXT")
+        except:
+            pass  # Column may already exist (ignore error)
+        try:
+            self.conn.execute("ALTER TABLE samples ADD COLUMN processing_updated_at TIMESTAMP")
+        except:
+            pass  # Column may already exist (ignore error)
+
+        self.conn.execute(
+            "UPDATE samples SET processing_status = COALESCE(processing_status, 'pending'), processing_updated_at = COALESCE(processing_updated_at, imported_at, CURRENT_TIMESTAMP)"
+        )
+        self.conn.execute("UPDATE samples SET sample_uid = COALESCE(sample_uid, sha256(CAST(raw_json AS VARCHAR)))")
+        self.conn.execute("UPDATE samples SET num_turns = COALESCE(expected_judgment_count, num_turns)")
+
+        try:
+            self.conn.execute("ALTER TABLE samples DROP COLUMN task_type")
+        except:
+            pass
+        try:
+            self.conn.execute("ALTER TABLE samples DROP COLUMN has_error")
+        except:
+            pass
 
         # Drop evaluations table completely
         self.conn.execute("DROP TABLE IF EXISTS evaluations")
@@ -64,8 +94,9 @@ class DuckDBStore:
 
         # Sequences for auto-increment
         self.conn.execute("CREATE SEQUENCE IF NOT EXISTS sample_id_seq")
-        self.conn.execute("CREATE SEQUENCE IF NOT EXISTS eval_id_seq")
         self.conn.execute("CREATE SEQUENCE IF NOT EXISTS turn_judgment_id_seq")
+
+        self.conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_samples_uid ON samples(sample_uid)")
 
         # Create index
         self.conn.execute("""
@@ -75,26 +106,53 @@ class DuckDBStore:
 
     def insert_sample(self, sample: Sample) -> int:
         """Insert sample, return auto-generated id."""
+        sample_uid = sample.sample_uid or generate_sample_uid(sample.raw_json)
+        existing = self.conn.execute("SELECT id FROM samples WHERE sample_uid = ?", [sample_uid]).fetchone()
+        if existing:
+            return existing[0]
+
         result = self.conn.execute("SELECT nextval('sample_id_seq')").fetchone()
         sample_id = result[0]
 
         self.conn.execute(
             """
-            INSERT INTO samples (id, raw_json, user_query, assistant_response, num_turns, num_tool_calls, has_error, imported_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO samples (id, sample_uid, raw_json, user_query, assistant_response, num_turns, expected_judgment_count, num_tool_calls, imported_at, processing_status, processing_updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 sample_id,
+                sample_uid,
                 json.dumps(sample.raw_json),
                 sample.user_query,
                 sample.assistant_response,
                 sample.num_turns,
+                sample.expected_judgment_count,
                 sample.num_tool_calls,
-                sample.has_error,
+                datetime.now(),
+                "pending",
                 datetime.now(),
             ],
         )
         return sample_id
+
+    def _build_sample_record(self, row: tuple[Any, ...]) -> dict[str, Any]:
+        tool_stats = json.loads(row[8]) if row[8] else None
+        return {
+            "id": row[0],
+            "sample_uid": row[1],
+            "raw_json": json.loads(row[2]) if row[2] else {},
+            "user_query": row[3],
+            "assistant_response": row[4],
+            "num_turns": row[5] or 0,
+            "expected_judgment_count": row[6] or 0,
+            "num_tool_calls": row[7] or 0,
+            "has_error": (tool_stats or {}).get("has_error", False),
+            "tool_stats": tool_stats,
+            "processing_status": row[9] or "pending",
+            "processing_updated_at": row[10],
+            "helpful_rate": (tool_stats or {}).get("response_helpful_rate", 0),
+            "satisfied_rate": (tool_stats or {}).get("user_satisfied_rate", 0),
+        }
 
     def get_samples(self, limit: int = 100, offset: int = 0) -> list[Sample]:
         """Get samples."""
@@ -130,6 +188,13 @@ class DuckDBStore:
             "avg_user_satisfied_rate": stats[2] or 0,
             "error_count": stats[3] or 0,
         }
+
+    def get_processed_count(self) -> int:
+        """Count samples that finished round feedback processing."""
+        result = self.conn.execute(
+            "SELECT COUNT(*) FROM samples WHERE COALESCE(processing_status, 'pending') = 'completed'"
+        ).fetchone()
+        return result[0] if result else 0
 
     def insert_turn_judgment(self, judgment: RoundJudgment) -> int:
         """Insert turn judgment, return auto-generated id."""
@@ -176,9 +241,72 @@ class DuckDBStore:
     def update_sample_tool_stats(self, sample_id: int, tool_stats: dict) -> None:
         """Update tool_stats for a sample."""
         self.conn.execute(
-            "UPDATE samples SET tool_stats = ? WHERE id = ?",
-            [json.dumps(tool_stats), sample_id],
+            "UPDATE samples SET tool_stats = ?, processing_updated_at = ? WHERE id = ?",
+            [json.dumps(tool_stats), datetime.now(), sample_id],
         )
+
+    def mark_sample_processing_failed(self, sample_id: int, error_reason: str | None = None) -> None:
+        """Mark sample as failed and persist error reason in tool_stats."""
+        existing = self.conn.execute("SELECT tool_stats FROM samples WHERE id = ?", [sample_id]).fetchone()
+        tool_stats = json.loads(existing[0]) if existing and existing[0] else {}
+        tool_stats["has_error"] = True
+        if error_reason:
+            tool_stats["error_reason"] = error_reason
+        self.conn.execute(
+            "UPDATE samples SET tool_stats = ?, processing_status = 'failed', processing_updated_at = ? WHERE id = ?",
+            [json.dumps(tool_stats), datetime.now(), sample_id],
+        )
+
+    def replace_round_feedback_results(
+        self,
+        sample_id: int,
+        expected_judgment_count: int,
+        judgments: list[RoundJudgment],
+        tool_stats: dict,
+    ) -> None:
+        """Atomically replace a sample's round feedback results."""
+        self.conn.execute("BEGIN TRANSACTION")
+        try:
+            self.conn.execute("DELETE FROM turn_judgments WHERE sample_id = ?", [sample_id])
+            self.conn.execute(
+                "UPDATE samples SET tool_stats = ?, num_turns = ?, expected_judgment_count = ?, processing_status = 'completed', processing_updated_at = ? WHERE id = ?",
+                [json.dumps(tool_stats), expected_judgment_count, expected_judgment_count, datetime.now(), sample_id],
+            )
+            for judgment in judgments:
+                self.insert_turn_judgment(judgment)
+            self.conn.execute("COMMIT")
+        except Exception:
+            self.conn.execute("ROLLBACK")
+            raise
+
+    def claim_unprocessed_samples(self, limit: int = 100) -> list[tuple[int, dict]]:
+        """Claim pending or failed samples for round feedback processing."""
+        self.conn.execute("BEGIN TRANSACTION")
+        try:
+            rows = self.conn.execute(
+                """
+                SELECT id, raw_json
+                FROM samples
+                WHERE COALESCE(processing_status, 'pending') IN ('pending', 'failed')
+                ORDER BY id
+                LIMIT ?
+                """,
+                [limit],
+            ).fetchall()
+            sample_ids = [row[0] for row in rows]
+            if sample_ids:
+                placeholders = ", ".join(["?"] * len(sample_ids))
+                params = [datetime.now(), *sample_ids]
+                self.conn.execute(
+                    f"UPDATE samples SET processing_status = 'processing', processing_updated_at = ? WHERE id IN ({placeholders})",
+                    params,
+                )
+            self.conn.execute("COMMIT")
+        except Exception:
+            self.conn.execute("ROLLBACK")
+            raise
+
+        return [(row[0], json.loads(row[1])) for row in rows]
 
     def get_unprocessed_samples(self, limit: int = 100) -> list[tuple[int, dict]]:
         """Get samples that haven't been processed for round judgments."""
@@ -186,13 +314,92 @@ class DuckDBStore:
             """
             SELECT s.id, s.raw_json
             FROM samples s
-            LEFT JOIN turn_judgments tj ON s.id = tj.sample_id
-            WHERE tj.id IS NULL
+            WHERE COALESCE(s.processing_status, 'pending') IN ('pending', 'failed')
+            ORDER BY s.id
             LIMIT ?
             """,
             [limit],
         ).fetchall()
         return [(row[0], json.loads(row[1])) for row in rows]
+
+    def get_sample_by_id(self, sample_id: int) -> dict[str, Any] | None:
+        """Get a sample record with parsed JSON fields."""
+        row = self.conn.execute(
+            """
+             SELECT id, sample_uid, raw_json, user_query, assistant_response, num_turns, expected_judgment_count,
+                 num_tool_calls, tool_stats, processing_status, processing_updated_at
+            FROM samples
+            WHERE id = ?
+            """,
+            [sample_id],
+        ).fetchone()
+        return self._build_sample_record(row) if row else None
+
+    def filter_samples(
+        self,
+        helpful_rate_op: str = ">=",
+        helpful_rate_val: float | None = None,
+        satisfied_rate_op: str = ">=",
+        satisfied_rate_val: float | None = None,
+        has_error: bool | None = None,
+        num_turns_min: int | None = None,
+        num_turns_max: int | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Filter samples with parameterized query building."""
+        builder = FilterQueryBuilder()
+
+        if helpful_rate_val is not None:
+            builder.add_condition("response_helpful_rate", ComparisonOp(helpful_rate_op), helpful_rate_val)
+        if satisfied_rate_val is not None:
+            builder.add_condition("user_satisfied_rate", ComparisonOp(satisfied_rate_op), satisfied_rate_val)
+        if has_error is not None:
+            builder.add_condition("has_error", ComparisonOp.EQ, has_error)
+        if num_turns_min is not None:
+            builder.add_condition("num_turns", ComparisonOp.GTE, num_turns_min)
+        if num_turns_max is not None:
+            builder.add_condition("num_turns", ComparisonOp.LTE, num_turns_max)
+
+        where_clause, params = builder.build_parameterized_where_clause("s")
+        extra_clauses: list[str] = []
+        if date_from:
+            extra_clauses.append("s.imported_at >= ?")
+            params.append(date_from)
+        if date_to:
+            extra_clauses.append("s.imported_at <= ?")
+            params.append(date_to)
+
+        combined_where = where_clause
+        if extra_clauses:
+            combined_where = " AND ".join([where_clause, *extra_clauses]) if where_clause != "1=1" else " AND ".join(extra_clauses)
+
+        count_query = f"SELECT COUNT(*) FROM samples s WHERE {combined_where}"
+        total_row = self.conn.execute(count_query, params).fetchone()
+        total = total_row[0] if total_row else 0
+
+        query = f"""
+             SELECT id, sample_uid, raw_json, user_query, assistant_response, num_turns, expected_judgment_count,
+                 num_tool_calls, tool_stats, processing_status, processing_updated_at
+            FROM samples s
+            WHERE {combined_where}
+            ORDER BY id
+            LIMIT ? OFFSET ?
+        """
+        rows = self.conn.execute(query, [*params, limit, offset]).fetchall()
+        return [self._build_sample_record(row) for row in rows], total
+
+    def get_table_list(self) -> list[str]:
+        """List available tables."""
+        rows = self.conn.execute("SHOW TABLES").fetchall()
+        return [row[0] for row in rows]
+
+    def get_table_schema(self, table_name: str) -> list[dict[str, Any]]:
+        """Get schema for a table."""
+        rows = self.conn.execute(f"PRAGMA table_info('{table_name}')").fetchall()
+        return [{"name": row[1], "type": row[2]} for row in rows]
 
     def close(self):
         """Close connection."""

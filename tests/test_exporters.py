@@ -169,10 +169,70 @@ def test_jsonl_exporter_no_filter():
     print("test_jsonl_exporter_no_filter passed")
 
 
+def test_jsonl_export_with_parameterized_filter():
+    """Test exporter accepts parameterized WHERE clause and params."""
+    db_path = TEST_DATA_DIR / "test_export_params.duckdb"
+    output_path = TEST_DATA_DIR / "test_output_params.jsonl"
+
+    if db_path.exists():
+        db_path.unlink()
+    if output_path.exists():
+        output_path.unlink()
+
+    store = DuckDBStore(db_path)
+
+    for i in range(2):
+        raw = {"messages": [{"role": "user", "content": f"Test {i}"}]}
+        sample = Sample.from_dict(raw)
+        sample_id = store.insert_sample(sample)
+        tool_stats = {
+            "response_helpful_rate": 0.6 + i * 0.3,
+            "user_satisfied_rate": 0.8,
+            "total_turns": 1,
+            "has_error": False,
+        }
+        store.update_sample_tool_stats(sample_id, tool_stats)
+
+    exporter = JSONLExporter(store)
+    count = exporter.export(
+        output_path,
+        filter_query="CAST(json_extract(samples.tool_stats, '$.response_helpful_rate') AS DOUBLE) >= ?",
+        filter_params=[0.8],
+    )
+
+    assert count == 1
+    store.close()
+
+
+def test_jsonl_export_rejects_injection_like_filter():
+    """Test raw string filters with dangerous tokens are rejected."""
+    db_path = TEST_DATA_DIR / "test_export_injection.duckdb"
+    output_path = TEST_DATA_DIR / "test_output_injection.jsonl"
+
+    if db_path.exists():
+        db_path.unlink()
+    if output_path.exists():
+        output_path.unlink()
+
+    store = DuckDBStore(db_path)
+    store.insert_sample(Sample.from_dict({"messages": [{"role": "user", "content": "Hi"}]}))
+    exporter = JSONLExporter(store)
+
+    try:
+        exporter.export(output_path, filter_query="1=1; DROP TABLE samples")
+        assert False, "Should have rejected dangerous filter query"
+    except ValueError:
+        pass
+
+    store.close()
+
+
 if __name__ == "__main__":
     test_jsonl_export()
     test_jsonl_export_with_filter()
     test_report_generation()
     test_report_export()
     test_jsonl_exporter_no_filter()
+    test_jsonl_export_with_parameterized_filter()
+    test_jsonl_export_rejects_injection_like_filter()
     print("All exporter tests passed!")

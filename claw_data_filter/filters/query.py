@@ -2,19 +2,16 @@
 import re
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional
+from typing import Any, Optional
 
 
 ALLOWED_FIELDS = frozenset([
-    "task_type",
     "response_helpful_rate",
     "user_satisfied_rate",
     "has_error",
     "num_turns",
     "num_tool_calls",
 ])
-
-ALLOWED_TASK_TYPES = frozenset(["information_retrieval", "data_processing", "coding", "reasoning", "creative", "general"])
 
 
 class ComparisonOp(Enum):
@@ -36,6 +33,20 @@ JSON_FIELDS = frozenset([
 ])
 
 
+def _field_sql_expression(field: str, table_name: str = "samples") -> str:
+    """Return SQL expression for a supported filter field."""
+    if field not in ALLOWED_FIELDS:
+        raise ValueError(f"Invalid field name: {field}")
+
+    if field == "response_helpful_rate":
+        return f"CAST(json_extract({table_name}.tool_stats, '$.response_helpful_rate') AS DOUBLE)"
+    if field == "user_satisfied_rate":
+        return f"CAST(json_extract({table_name}.tool_stats, '$.user_satisfied_rate') AS DOUBLE)"
+    if field == "has_error":
+        return f"CAST(json_extract({table_name}.tool_stats, '$.has_error') AS BOOLEAN)"
+    return f"{table_name}.{field}"
+
+
 @dataclass
 class FilterCondition:
     """A single filter condition."""
@@ -43,15 +54,14 @@ class FilterCondition:
     op: ComparisonOp
     value: float | int | str
 
+    def to_sql_clause(self, table_name: str = "samples") -> tuple[str, list[Any]]:
+        """Convert to parameterized SQL fragment and params."""
+        field_ref = _field_sql_expression(self.field, table_name)
+        return f"{field_ref} {self.op.value} ?", [self.value]
+
     def to_sql(self, table_name: str = "samples") -> str:
         """Convert to SQL WHERE clause fragment."""
-        if self.field not in ALLOWED_FIELDS:
-            raise ValueError(f"Invalid field name: {self.field}")
-        # For JSON fields, use json_extract
-        if self.field in JSON_FIELDS:
-            field_ref = f"json_extract({table_name}.tool_stats, '$.{self.field}')"
-        else:
-            field_ref = self.field
+        field_ref = _field_sql_expression(self.field, table_name)
         if isinstance(self.value, str):
             escaped = self.value.replace("'", "''")  # SQL escape single quotes
             return f"{field_ref} {self.op.value} '{escaped}'"
@@ -71,7 +81,6 @@ class FilterQueryBuilder:
 
     def __init__(self):
         self.conditions: list[FilterCondition] = []
-        self.task_types: list[str] = []
 
     def add_condition(self, field: str, op: ComparisonOp, value: float | int | str) -> "FilterQueryBuilder":
         """Add a filter condition.
@@ -120,18 +129,6 @@ class FilterQueryBuilder:
 
         return self.add_condition(field, ComparisonOp(op_str), value)
 
-    def add_task_type_filter(self, task_types: list[str]) -> "FilterQueryBuilder":
-        """Filter by task type(s).
-
-        Args:
-            task_types: List of task types to include
-
-        Returns:
-            self for chaining
-        """
-        self.task_types.extend(task_types)
-        return self
-
     def build_where_clause(self, table_name: str = "samples") -> str:
         """Build WHERE clause SQL fragment.
 
@@ -139,21 +136,26 @@ class FilterQueryBuilder:
             table_name: Table name for JSON field references
 
         Returns:
-            SQL WHERE clause string (e.g., "progress_score >= 4 AND task_type IN ('coding')")
+            SQL WHERE clause string (e.g., "progress_score >= 4 AND num_turns >= 2")
         """
         parts = []
 
         for cond in self.conditions:
             parts.append(cond.to_sql(table_name))
 
-        if self.task_types:
-            for tt in self.task_types:
-                if tt not in ALLOWED_TASK_TYPES:
-                    raise ValueError(f"Invalid task type: {tt}")
-            types_str = ", ".join(f"'{t.replace('\'', '\'\'')}'" for t in self.task_types)
-            parts.append(f"task_type IN ({types_str})")
-
         return " AND ".join(parts) if parts else "1=1"
+
+    def build_parameterized_where_clause(self, table_name: str = "samples") -> tuple[str, list[Any]]:
+        """Build a parameterized WHERE clause and corresponding params."""
+        parts: list[str] = []
+        params: list[Any] = []
+
+        for cond in self.conditions:
+            clause, clause_params = cond.to_sql_clause(table_name)
+            parts.append(clause)
+            params.extend(clause_params)
+
+        return (" AND ".join(parts) if parts else "1=1", params)
 
     def get_filtered_samples_query(self, limit: Optional[int] = None) -> str:
         """Build complete SELECT query with filters.
@@ -169,3 +171,16 @@ class FilterQueryBuilder:
             WHERE {where}
             {limit_str}
         """
+
+    def get_parameterized_query(self, limit: Optional[int] = None) -> tuple[str, list[Any]]:
+        """Build complete SELECT query with placeholders and params."""
+        where, params = self.build_parameterized_where_clause(table_name="s")
+        query = """
+            SELECT s.id, s.raw_json, s.tool_stats
+            FROM samples s
+            WHERE {where}
+        """.format(where=where)
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(limit)
+        return query, params

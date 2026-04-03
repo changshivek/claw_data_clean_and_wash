@@ -1,3 +1,5 @@
+import json
+
 # Sample conversation data for testing
 import pytest
 SAMPLE_MESSAGES = [
@@ -16,8 +18,8 @@ def test_extract_turns():
 
     builder = TurnContextBuilder()
     turns = builder.extract_turns(SAMPLE_MESSAGES)
-    # Should have 3 turns (3 assistant messages after removing system)
-    assert len(turns) == 3
+    # Tool-call assistant and final answer are grouped into one turn.
+    assert len(turns) == 2
 
 def test_extract_turns_no_system():
     """Test that system messages are skipped"""
@@ -34,10 +36,11 @@ def test_turn_has_tool_calls():
 
     builder = TurnContextBuilder()
     turns = builder.extract_turns(SAMPLE_MESSAGES)
-    # Turn 0 (weather check) should have tool calls
-    turn_with_tool = turns[0]  # "Let me check..." turn
+    # Turn 0 (weather question) should include the tool call in the same turn.
+    turn_with_tool = turns[0]
     assert len(turn_with_tool.tool_calls) == 1
     assert turn_with_tool.tool_calls[0]["name"] == "web_search"
+    assert "Beijing is sunny today" in turn_with_tool.assistant_message
 
 def test_signal_users_extraction():
     """Test that signal users are extracted for each turn"""
@@ -45,9 +48,8 @@ def test_signal_users_extraction():
 
     builder = TurnContextBuilder()
     turns = builder.extract_turns(SAMPLE_MESSAGES)
-    # Turn 1 (answer about weather) should have "Thanks!" as signal
-    # Signal users are from subsequent turns
-    assert "Thanks!" in turns[1].signal_users
+    # Turn 0 (answer about weather) should have "Thanks!" as signal.
+    assert "Thanks!" in turns[0].signal_users
 
 def test_build_judgment_prompt():
     """Test building simplified judgment prompt"""
@@ -55,7 +57,7 @@ def test_build_judgment_prompt():
 
     builder = TurnContextBuilder()
     turns = builder.extract_turns(SAMPLE_MESSAGES)
-    prompt = builder.build_judgment_prompt(turns[2], turns)  # Turn with "Thanks!" signal
+    prompt = builder.build_judgment_prompt(turns[0], turns)
     assert "=== 当前轮 ===" in prompt
     assert "=== 后续用户信号" in prompt
     assert "response_helpful:" in prompt
@@ -187,22 +189,17 @@ def test_end_to_end_turn_extraction():
     builder = TurnContextBuilder()
     turns = builder.extract_turns(REAL_CONVERSATION["request"]["bodyJson"]["messages"])
 
-    # Should have 4 turns (4 assistant messages)
-    assert len(turns) == 4
+    # Consecutive assistant/tool/assistant messages are grouped into one judged turn.
+    assert len(turns) == 3
 
-    # Check turn 1 has the tool_call (the assistant "Let me check..." turn)
-    # Note: Due to how consecutive assistants are handled, this turn has empty user_message
-    assert turns[1].tool_calls  # Has tool call
-    assert turns[1].assistant_message == "Let me check..."
+    # Check turn 1 keeps the weather question and merged assistant/tool response.
+    assert turns[1].tool_calls
+    assert turns[1].user_message == "What's the weather in Beijing?"
+    assert "Let me check..." in turns[1].assistant_message
+    assert "Beijing is sunny today, 25 degrees." in turns[1].assistant_message
 
-    # Check turn 2 (the weather answer with user message "What's the weather...")
-    # The user_message is correctly associated here
-    assert turns[2].user_message == "What's the weather in Beijing?"
-    assert turns[2].assistant_message == "Beijing is sunny today, 25 degrees."
-
-    # Check signal users for turn 2
-    # After turn 2 (answer about weather), user says "Thanks!" which is signal
-    assert "Thanks!" in turns[2].signal_users
+    # Check signal users for the weather turn.
+    assert "Thanks!" in turns[1].signal_users
 
 def test_tool_stats_aggregation_integration():
     """Test tool stats aggregation from judgments"""
@@ -255,3 +252,54 @@ def test_parse_simplified_response():
     processor = RoundJudgmentProcessor(MockLLM())
     result = processor._parse_response("response_helpful=yes; user_satisfied=no")
     assert result == {"response_helpful": "yes", "user_satisfied": "no"}
+
+
+@pytest.mark.asyncio
+async def test_process_sample_marks_unirouter_sample_complete(tmp_path):
+    """Test process_sample handles UniRouter payload and writes full results atomically."""
+    from claw_data_filter.processors.round_feedback import RoundFeedbackProcessor
+    from claw_data_filter.storage.duckdb_store import DuckDBStore
+
+    class MockLLM:
+        async def chat(self, messages, max_tokens=50):
+            return "response_helpful=yes; user_satisfied=yes"
+
+    store = DuckDBStore(tmp_path / "round_feedback.duckdb")
+    raw_json = {
+        "request": {
+            "bodyJson": {
+                "messages": [
+                    {"role": "user", "content": "Hi"},
+                    {"role": "assistant", "content": "Hello"},
+                    {"role": "tool", "content": "tool ok"},
+                    {"role": "assistant", "content": "Anything else?"},
+                ]
+            }
+        }
+    }
+
+    sample_id = store.insert_sample(__import__("claw_data_filter.models.sample", fromlist=["Sample"]).Sample.from_dict(raw_json))
+    processor = RoundFeedbackProcessor(store, MockLLM(), max_concurrency=2)
+
+    judgments = await processor.process_sample(sample_id, raw_json)
+
+    assert len(judgments) == 1
+    persisted = store.get_turn_judgments(sample_id)
+    assert len(persisted) == 1
+    row = store.conn.execute(
+        "SELECT expected_judgment_count, tool_stats FROM samples WHERE id = ?",
+        [sample_id],
+    ).fetchone()
+    assert row[0] == 1
+    assert json.loads(row[1])["response_helpful_rate"] == 1.0
+    store.close()
+
+
+def test_count_expected_turns_matches_extraction():
+    """Test expected turn counting matches actual extracted turns."""
+    from claw_data_filter.processors.round_feedback import TurnContextBuilder
+
+    builder = TurnContextBuilder()
+    turns = builder.extract_turns(REAL_CONVERSATION["request"]["bodyJson"]["messages"])
+
+    assert builder.count_expected_turns(REAL_CONVERSATION["request"]["bodyJson"]["messages"]) == len(turns)

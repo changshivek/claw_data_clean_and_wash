@@ -47,23 +47,12 @@ class ReportExporter:
         """
         stats = self.store.get_stats()
 
-        # Task type distribution from samples
-        task_dist = self.store.conn.execute("""
-            SELECT task_type, COUNT(*)
-            FROM samples
-            WHERE task_type IS NOT NULL
-            GROUP BY task_type
-        """).fetchall()
-
         report: dict[str, Any] = {
             "summary": {
                 "total_samples": stats["total_samples"],
                 "avg_response_helpful_rate": round(stats["avg_response_helpful_rate"], 2),
                 "avg_user_satisfied_rate": round(stats["avg_user_satisfied_rate"], 2),
                 "error_count": stats["error_count"],
-            },
-            "task_type_distribution": {
-                row[0]: row[1] for row in task_dist
             },
         }
 

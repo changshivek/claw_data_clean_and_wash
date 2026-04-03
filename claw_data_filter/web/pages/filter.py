@@ -1,0 +1,176 @@
+"""Data filter page."""
+from datetime import date
+import streamlit as st
+from pathlib import Path
+
+from claw_data_filter.exporters.jsonl_exporter import JSONLExporter
+from claw_data_filter.storage.duckdb_store import DuckDBStore
+from claw_data_filter.web.services.sample_query_service import get_filtered_samples
+from claw_data_filter.web.state.models import RouteState
+from claw_data_filter.web.state.router import go_to_detail
+from claw_data_filter.web.view_models.filter_list_view import (
+    FilterCriteria,
+    load_filter_list_view,
+    save_filter_list_view,
+)
+from claw_data_filter.web.config import DB_PATH
+from claw_data_filter.web.components.sample_table import render_samples_table
+
+
+def _parse_date(value: str | None) -> date | None:
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def render(route: RouteState):
+    st.title("数据筛选")
+
+    view = load_filter_list_view(st.session_state)
+    criteria = view.criteria
+
+    # Filter controls
+    with st.form("filter_form"):
+        col1, col2 = st.columns(2)
+
+        helpful_ops = [">=", "<=", "=", "!="]
+        helpful_op = col1.selectbox(
+            "Helpful Rate",
+            helpful_ops,
+            index=helpful_ops.index(criteria.helpful_op),
+        )
+        helpful_val = col1.number_input(
+            "值",
+            min_value=0.0,
+            max_value=1.0,
+            value=float(criteria.helpful_val or 0.0),
+            step=0.1,
+        )
+
+        satisfied_ops = [">=", "<=", "=", "!="]
+        satisfied_op = col2.selectbox(
+            "Satisfied Rate",
+            satisfied_ops,
+            index=satisfied_ops.index(criteria.satisfied_op),
+        )
+        satisfied_val = col2.number_input(
+            "值",
+            min_value=0.0,
+            max_value=1.0,
+            value=float(criteria.satisfied_val or 0.0),
+            step=0.1,
+        )
+
+        col4, col5, col6 = st.columns(3)
+        num_turns_min = col4.number_input("最小轮次", min_value=0, value=int(criteria.num_turns_min or 0))
+        num_turns_max = col5.number_input("最大轮次", min_value=0, value=int(criteria.num_turns_max or 100))
+        date_defaults = []
+        parsed_date_from = _parse_date(criteria.date_from)
+        parsed_date_to = _parse_date(criteria.date_to)
+        if parsed_date_from:
+            date_defaults.append(parsed_date_from)
+        if parsed_date_to:
+            date_defaults.append(parsed_date_to)
+        date_range = col6.date_input("日期范围", value=date_defaults)
+
+        col_btn1, col_btn2 = st.columns([1, 1])
+        submitted = col_btn1.form_submit_button("应用筛选")
+        reset = col_btn2.form_submit_button("重置")
+
+    # Handle form submission
+    if submitted:
+        date_from_val = str(date_range[0]) if len(date_range) > 0 and date_range[0] else None
+        date_to_val = str(date_range[1]) if len(date_range) > 1 and date_range[1] else None
+        view.criteria = FilterCriteria(
+            helpful_op=helpful_op,
+            helpful_val=helpful_val,
+            satisfied_op=satisfied_op,
+            satisfied_val=satisfied_val,
+            num_turns_min=num_turns_min,
+            num_turns_max=num_turns_max,
+            date_from=date_from_val,
+            date_to=date_to_val,
+        )
+        view.page_index = 1
+        view.selected_ids = set()
+        save_filter_list_view(st.session_state, view)
+
+    if reset:
+        view.criteria = FilterCriteria()
+        view.page_index = 1
+        view.selected_ids = set()
+        save_filter_list_view(st.session_state, view)
+
+    selection_enabled = st.checkbox("选择模式", value=view.selection_enabled, key="filter.selection_enabled")
+    if selection_enabled != view.selection_enabled:
+        view.selection_enabled = selection_enabled
+        if not selection_enabled:
+            view.selected_ids = set()
+        save_filter_list_view(st.session_state, view)
+
+    # Query data
+    store = DuckDBStore(DB_PATH)
+    with st.spinner("加载数据中..."):
+        samples, total = get_filtered_samples(store, view.criteria, view.page_index, view.page_size)
+
+    total_pages = max(1, (total + view.page_size - 1) // view.page_size)
+    if view.page_index > total_pages:
+        view.page_index = total_pages
+        save_filter_list_view(st.session_state, view)
+        st.rerun()
+
+    st.divider()
+    col_count, col_export = st.columns([3, 1])
+    col_count.markdown(f"**共 {total} 条结果**")
+
+    # Export selected button
+    if view.selection_enabled:
+        if col_export.button("导出选中"):
+            selected_ids = sorted(view.selected_ids)
+            if selected_ids:
+                with st.spinner("导出中..."):
+                    try:
+                        placeholders = ", ".join(["?"] * len(selected_ids))
+                        output_path = "data/exported_selected.jsonl"
+                        exporter = JSONLExporter(store)
+                        count = exporter.export(
+                            Path(output_path),
+                            filter_query=f"id IN ({placeholders})",
+                            filter_params=selected_ids,
+                        )
+
+                        st.success(f"成功导出 {count} 条数据到 {output_path}")
+                    except Exception as e:
+                        st.error(f"导出失败: {str(e)}")
+            else:
+                st.warning("请先选择要导出的记录")
+
+    # Render table
+    def on_detail(sample_id: int) -> None:
+        go_to_detail(st.query_params, sample_id, route.active_main_page)
+        st.rerun()
+
+    def on_page_change(page_index: int) -> None:
+        view.page_index = page_index
+        save_filter_list_view(st.session_state, view)
+        st.rerun()
+
+    def on_selection_change(selected_ids: set[int]) -> None:
+        view.selected_ids = selected_ids
+        save_filter_list_view(st.session_state, view)
+
+    render_samples_table(
+        samples,
+        view.page_index,
+        total_pages,
+        on_detail,
+        on_page_change=on_page_change,
+        on_selection_change=on_selection_change,
+        selected_ids=view.selected_ids,
+        show_checkboxes=view.selection_enabled,
+    )
+
+    store.close()

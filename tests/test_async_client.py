@@ -7,9 +7,11 @@ async def test_async_client_initialization():
     """Test AsyncLLMClient can be initialized"""
     client = AsyncLLMClient(
         endpoint="http://localhost:8000/v1",
+        model="qwen35",
         timeout=60.0,
     )
     assert client.endpoint == "http://localhost:8000/v1"
+    assert client.model == "qwen35"
     assert client.timeout == 60.0
     await client.close()
 
@@ -28,5 +30,23 @@ async def test_chat_returns_content():
     with patch.object(client.client, 'post', return_value=mock_response):
         result = await client.chat([{"role": "user", "content": "test"}])
         assert result == "need_tool=yes; tool_correct=no"
+
+
+@pytest.mark.asyncio
+async def test_chat_includes_model_when_configured():
+    client = AsyncLLMClient(endpoint="http://localhost:8000/v1", model="qwen35")
+
+    mock_response = MagicMock()
+    mock_response.raise_for_status = MagicMock()
+    mock_response.json.return_value = {
+        "choices": [{"message": {"content": "response_helpful=yes; user_satisfied=yes"}}]
+    }
+
+    with patch.object(client.client, 'post', return_value=mock_response) as post_mock:
+        await client.chat([{"role": "user", "content": "test"}])
+        payload = post_mock.call_args.kwargs["json"]
+        assert payload["model"] == "qwen35"
+
+    await client.close()
 
     await client.close()

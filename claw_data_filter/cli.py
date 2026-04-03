@@ -10,7 +10,7 @@ import click
 from claw_data_filter.config import Config
 from claw_data_filter.exporters.jsonl_exporter import JSONLExporter
 from claw_data_filter.exporters.report_exporter import ReportExporter
-from claw_data_filter.filters.query import FilterQueryBuilder
+from claw_data_filter.filters.query import ComparisonOp, FilterQueryBuilder
 from claw_data_filter.importers.jsonl_importer import JSONLImporter
 from claw_data_filter.storage.duckdb_store import DuckDBStore
 
@@ -24,14 +24,17 @@ logger = logging.getLogger(__name__)
 @click.group()
 @click.option("--db-path", type=click.Path(), default="./data.duckdb", help="DuckDB database path")
 @click.option("--llm-endpoint", type=str, default=None, help="LLM API endpoint")
+@click.option("--llm-model-id", type=str, default=None, help="LLM model id")
 @click.pass_context
-def cli(ctx, db_path, llm_endpoint):
+def cli(ctx, db_path, llm_endpoint, llm_model_id):
     """Agent Data Filter - LLM-powered agent conversation filtering."""
     config = Config.from_env()
     if db_path:
         config.db_path = Path(db_path)
     if llm_endpoint:
         config.llm_endpoint = llm_endpoint
+    if llm_model_id:
+        config.llm_model_id = llm_model_id
     ctx.obj["config"] = config
 
 
@@ -54,13 +57,12 @@ def import_cmd(ctx, input_file):
 @cli.command()
 @click.option("--response-helpful-rate", type=str, help="Filter by response helpful rate (e.g., '>=0.7')")
 @click.option("--user-satisfied-rate", type=str, help="Filter by user satisfied rate (e.g., '>=0.7')")
-@click.option("--task-type", type=str, multiple=True, help="Filter by task type")
 @click.option("--has-error", type=bool, help="Filter by has error (true/false)")
 @click.option("--export", type=click.Path(), required=True, help="Output JSONL file")
 @click.option("--report", type=click.Path(), help="Output report JSON file")
 @click.option("--limit", type=int, help="Limit number of results")
 @click.pass_context
-def filter_cmd(ctx, response_helpful_rate, user_satisfied_rate, task_type, has_error, export, report, limit):
+def filter_cmd(ctx, response_helpful_rate, user_satisfied_rate, has_error, export, report, limit):
     """Filter samples and export to JSONL with optional report."""
     config = ctx.obj["config"]
 
@@ -71,7 +73,6 @@ def filter_cmd(ctx, response_helpful_rate, user_satisfied_rate, task_type, has_e
         match = RATE_PATTERN.match(response_helpful_rate.strip())
         if match:
             op_str, value_str = match.groups()
-            from claw_data_filter.filters.query import ComparisonOp
             op = ComparisonOp(op_str)
             value = float(value_str)
             builder.add_condition("response_helpful_rate", op, value)
@@ -81,23 +82,20 @@ def filter_cmd(ctx, response_helpful_rate, user_satisfied_rate, task_type, has_e
         match = RATE_PATTERN.match(user_satisfied_rate.strip())
         if match:
             op_str, value_str = match.groups()
-            from claw_data_filter.filters.query import ComparisonOp
             op = ComparisonOp(op_str)
             value = float(value_str)
             builder.add_condition("user_satisfied_rate", op, value)
         else:
             raise ValueError(f"Invalid user-satisfied-rate expression: {user_satisfied_rate}")
-    if task_type:
-        builder.add_task_type_filter(list(task_type))
     if has_error is not None:
         builder.add_condition("has_error", ComparisonOp("="), has_error)
 
-    where_clause = builder.build_where_clause()
+    where_clause, where_params = builder.build_parameterized_where_clause()
 
     store = DuckDBStore(config.db_path)
     try:
         exporter = JSONLExporter(store)
-        count = exporter.export(Path(export), filter_query=where_clause, limit=limit)
+        count = exporter.export(Path(export), filter_query=where_clause, filter_params=where_params, limit=limit)
         click.echo(f"Exported {count} samples to {export}")
 
         if report:
@@ -155,6 +153,7 @@ def pressure_test(ctx):
         llm = AsyncLLMClient(
             endpoint=config.llm_endpoint,
             api_key=config.llm_api_key,
+            model=config.llm_model_id,
             timeout=config.llm_timeout,
         )
         try:
@@ -180,6 +179,8 @@ def round_feedback(ctx, workers, batch_size):
     config = ctx.obj["config"]
     if workers:
         config.max_concurrency = workers
+    if batch_size is not None:
+        config.batch_size = batch_size
 
     click.echo(f"Starting round feedback processing with concurrency={config.max_concurrency}...")
 
@@ -191,6 +192,7 @@ def round_feedback(ctx, workers, batch_size):
         llm = AsyncLLMClient(
             endpoint=config.llm_endpoint,
             api_key=config.llm_api_key,
+            model=config.llm_model_id,
             timeout=config.llm_timeout,
         )
 
@@ -202,7 +204,7 @@ def round_feedback(ctx, workers, batch_size):
             total_failures = 0
 
             while True:
-                batch = store.get_unprocessed_samples(limit=config.batch_size)
+                batch = store.claim_unprocessed_samples(limit=config.batch_size)
                 if not batch:
                     break
 

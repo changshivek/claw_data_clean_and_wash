@@ -1,7 +1,57 @@
 """Sample model for raw conversation data."""
+import hashlib
+import json
 from typing import Optional, Any
 from datetime import datetime
 from pydantic import BaseModel, Field
+
+
+def extract_messages_from_payload(data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Extract conversation messages from supported payload formats."""
+    messages = data.get("messages")
+    if isinstance(messages, list):
+        return messages
+
+    request = data.get("request")
+    if isinstance(request, dict):
+        body_json = request.get("bodyJson")
+        if isinstance(body_json, dict):
+            nested_messages = body_json.get("messages")
+            if isinstance(nested_messages, list):
+                return nested_messages
+
+    return []
+
+
+def generate_sample_uid(data: dict[str, Any]) -> str:
+    """Generate a stable, collision-resistant sample uid from raw payload."""
+    canonical = json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def count_expected_judgments(messages: list[dict[str, Any]]) -> int:
+    """Count expected judged turns by grouping assistant/tool replies until next user."""
+    turn_count = 0
+    current_has_response = False
+    current_user_active = False
+
+    for message in messages:
+        role = message.get("role")
+        if role == "system":
+            continue
+        if role == "user":
+            if current_user_active and current_has_response:
+                turn_count += 1
+            current_user_active = True
+            current_has_response = False
+            continue
+        if role in {"assistant", "tool"} and current_user_active:
+            current_has_response = True
+
+    if current_user_active and current_has_response:
+        turn_count += 1
+
+    return turn_count
 
 
 def _detect_format(messages: list) -> str:
@@ -100,10 +150,12 @@ class Sample(BaseModel):
     """Represents a single agent conversation sample."""
 
     id: Optional[int] = None
+    sample_uid: str = ""
     raw_json: dict[str, Any] = Field(default_factory=dict)
     user_query: str = ""
     assistant_response: str = ""
     num_turns: int = 0
+    expected_judgment_count: int = 0
     num_tool_calls: int = 0
     has_error: bool = False
     imported_at: datetime = Field(default_factory=datetime.now)
@@ -124,7 +176,7 @@ class Sample(BaseModel):
             ]
         }
         """
-        messages = data.get("messages", [])
+        messages = extract_messages_from_payload(data)
 
         # Detect and convert format if needed
         if _detect_format(messages) == "anthropic":
@@ -150,8 +202,9 @@ class Sample(BaseModel):
 
         assistant_response = "\n".join(assistant_parts)
 
-        # Count turns (user-assistant pairs = number of user messages)
-        num_turns = sum(1 for msg in messages if msg.get("role") == "user")
+        # Keep num_turns aligned with judged-turn semantics used by round feedback.
+        expected_judgment_count = count_expected_judgments(messages)
+        num_turns = expected_judgment_count
 
         # Count tool calls: use tool_calls from assistant if available, otherwise count tool role messages
         # (tool role messages come from Anthropic format conversion or are OpenAI tool results)
@@ -170,10 +223,12 @@ class Sample(BaseModel):
                     break
 
         return cls(
+            sample_uid=generate_sample_uid(data),
             raw_json=data,
             user_query=user_query,
             assistant_response=assistant_response,
             num_turns=num_turns,
+            expected_judgment_count=expected_judgment_count,
             num_tool_calls=num_tool_calls,
             has_error=has_error,
         )

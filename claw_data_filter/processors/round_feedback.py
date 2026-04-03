@@ -35,11 +35,25 @@ class TurnContextBuilder:
         """
         turns = []
         current_user = None
-        current_assistant = None
-        current_tool_calls = []
-        current_tool_result = None
+        assistant_parts: list[str] = []
+        current_tool_calls: list[dict] = []
+        tool_results: list[str] = []
 
-        for i, msg in enumerate(messages):
+        def flush_turn() -> None:
+            if current_user is None:
+                return
+            if not assistant_parts and not current_tool_calls and not tool_results:
+                return
+            turns.append(TurnContext(
+                turn_index=len(turns),
+                user_message=current_user,
+                assistant_message="\n".join(part for part in assistant_parts if part),
+                tool_calls=list(current_tool_calls),
+                tool_result="\n".join(tool_results) if tool_results else None,
+                signal_users=[],
+            ))
+
+        for msg in messages:
             role = msg.get("role")
             content = self._extract_text_content(msg.get("content"))
 
@@ -48,58 +62,30 @@ class TurnContextBuilder:
                 continue
 
             elif role == "user":
-                # If we have a complete turn, save it
-                if current_assistant is not None:
-                    turns.append(TurnContext(
-                        turn_index=len(turns),
-                        user_message=current_user or "",
-                        assistant_message=current_assistant,
-                        tool_calls=current_tool_calls,
-                        tool_result=current_tool_result,
-                        signal_users=[],
-                    ))
-                    current_user = None
-                    current_assistant = None
-                    current_tool_calls = []
-                    current_tool_result = None
-                # Start new turn with this user
+                flush_turn()
                 current_user = content
+                assistant_parts = []
+                current_tool_calls = []
+                tool_results = []
 
             elif role == "assistant":
-                # If there's already an assistant (consecutive assistants),
-                # save the previous one first
-                if current_assistant is not None:
-                    turns.append(TurnContext(
-                        turn_index=len(turns),
-                        user_message="",
-                        assistant_message=current_assistant,
-                        tool_calls=current_tool_calls,
-                        tool_result=current_tool_result,
-                        signal_users=[],
-                    ))
-                    current_tool_calls = []
-                    current_tool_result = None
-                # This is the assistant response for current user (or pending)
-                current_assistant = content
+                if current_user is None:
+                    continue
+                if content:
+                    assistant_parts.append(content)
                 # Extract tool calls
                 for tc in msg.get("tool_calls", []):
                     if isinstance(tc, dict) and "function" in tc:
                         current_tool_calls.append(tc["function"])
 
             elif role == "tool":
-                # Tool result - belongs to current assistant
-                current_tool_result = content
+                if current_user is None:
+                    continue
+                if content:
+                    tool_results.append(content)
 
         # Don't forget last turn
-        if current_assistant is not None:
-            turns.append(TurnContext(
-                turn_index=len(turns),
-                user_message=current_user or "",
-                assistant_message=current_assistant,
-                tool_calls=current_tool_calls,
-                tool_result=current_tool_result,
-                signal_users=[],
-            ))
+        flush_turn()
 
         # Now extract signal users for each turn
         turns = self._extract_signal_users(turns)
@@ -138,6 +124,10 @@ class TurnContextBuilder:
             content = content[:max_len] + "..."
         return f"[{role}]: {content}"
 
+    def count_expected_turns(self, messages: list[dict]) -> int:
+        """Count judged turns using the same grouping logic as extract_turns."""
+        return len(self.extract_turns(messages))
+
     def build_judgment_prompt(self, turn: TurnContext, all_turns: list[TurnContext]) -> str:
         """构建判断prompt（简化版：只判断 response_helpful 和 user_satisfied）"""
         current_parts = []
@@ -173,6 +163,7 @@ class TurnContextBuilder:
 from concurrent.futures import ThreadPoolExecutor
 
 from claw_data_filter.models.round_judgment import RoundJudgment
+from claw_data_filter.models.sample import extract_messages_from_payload
 
 
 class RoundJudgmentProcessor:
@@ -270,19 +261,28 @@ class RoundFeedbackProcessor:
         self.store = store
         self.llm = llm_client
         self.semaphore = asyncio.Semaphore(max_concurrency)
+        self.write_lock = asyncio.Lock()
         self.context_builder = TurnContextBuilder()
         self.judgment_processor = RoundJudgmentProcessor(llm_client)
         self.stats_aggregator = ToolStatsAggregator()
 
     async def process_sample(self, sample_id: int, raw_json: dict) -> list[RoundJudgment]:
         """处理单条sample的所有turn"""
-        messages = raw_json.get("request", {}).get("bodyJson", {}).get("messages", [])
+        messages = extract_messages_from_payload(raw_json)
         if not messages:
+            tool_stats = self.stats_aggregator.aggregate([])
+            tool_stats["has_error"] = True
+            tool_stats["error_reason"] = "no_messages"
+            async with self.write_lock:
+                self.store.replace_round_feedback_results(sample_id, 0, [], tool_stats)
             return []
 
         # Extract turns
         turns = self.context_builder.extract_turns(messages)
         if not turns:
+            tool_stats = self.stats_aggregator.aggregate([])
+            async with self.write_lock:
+                self.store.replace_round_feedback_results(sample_id, 0, [], tool_stats)
             return []
 
         # Process turns with concurrency control
@@ -301,15 +301,16 @@ class RoundFeedbackProcessor:
             else:
                 logger.error(f"Turn processing failed: {j}")
 
-        # Aggregate and update tool_stats
-        if valid_judgments:
-            tool_stats = self.stats_aggregator.aggregate(valid_judgments)
-            self.store.update_sample_tool_stats(sample_id, tool_stats)
-
-        # Insert judgments to DB
         for j in valid_judgments:
             j.sample_id = sample_id
-            self.store.insert_turn_judgment(j)
+
+        tool_stats = self.stats_aggregator.aggregate(valid_judgments)
+        if len(valid_judgments) != len(turns):
+            tool_stats["has_error"] = True
+            tool_stats["error_reason"] = "incomplete_turn_processing"
+
+        async with self.write_lock:
+            self.store.replace_round_feedback_results(sample_id, len(turns), valid_judgments, tool_stats)
 
         return valid_judgments
 
@@ -325,10 +326,12 @@ class RoundFeedbackProcessor:
         async def process_one(sample_id: int, raw_json: dict) -> bool:
             """处理单个sample，返回是否成功"""
             try:
-                judgments = await self.process_sample(sample_id, raw_json)
-                return len(judgments) > 0
+                await self.process_sample(sample_id, raw_json)
+                return True
             except Exception as e:
                 logger.error(f"Failed to process sample {sample_id}: {e}")
+                async with self.write_lock:
+                    self.store.mark_sample_processing_failed(sample_id, str(e))
                 return False
 
         # 并行处理所有samples

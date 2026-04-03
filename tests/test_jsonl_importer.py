@@ -121,9 +121,45 @@ def test_import_closes_on_error():
     print("test_import_closes_on_error passed")
 
 
+def test_import_unirouter_payload_populates_derived_fields():
+    """Test UniRouter payload import populates user and assistant derived fields."""
+    db_path = TEST_DATA_DIR / "test_import_unirouter.duckdb"
+    input_file = TEST_DATA_DIR / "test_input_unirouter.jsonl"
+
+    if db_path.exists():
+        db_path.unlink()
+    if input_file.exists():
+        input_file.unlink()
+
+    with open(input_file, "w") as f:
+        f.write(json.dumps({
+            "request": {
+                "bodyJson": {
+                    "messages": [
+                        {"role": "user", "content": "Hello"},
+                        {"role": "assistant", "content": "Hi there"},
+                    ]
+                }
+            }
+        }) + "\n")
+
+    importer = JSONLImporter(db_path)
+    count = importer.import_file(input_file)
+
+    assert count == 1
+    row = importer.store.conn.execute(
+        "SELECT user_query, assistant_response, expected_judgment_count FROM samples LIMIT 1"
+    ).fetchone()
+    assert row == ("Hello", "Hi there", 1)
+
+    importer.close()
+    print("test_import_unirouter_payload_populates_derived_fields passed")
+
+
 if __name__ == "__main__":
     test_import_single_line()
     test_import_multiple_lines()
     test_import_skips_malformed_lines()
     test_import_closes_on_error()
+    test_import_unirouter_payload_populates_derived_fields()
     print("All JSONL importer tests passed!")

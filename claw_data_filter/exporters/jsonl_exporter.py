@@ -1,7 +1,9 @@
 """JSONL export functionality."""
 import json
 import logging
+import os
 import re
+import tempfile
 from pathlib import Path
 
 from claw_data_filter.storage.duckdb_store import DuckDBStore
@@ -61,6 +63,7 @@ class JSONLExporter:
         self,
         output_path: Path,
         filter_query: str | None = None,
+        filter_params: list | tuple | None = None,
         limit: int | None = None,
     ) -> int:
         """Export filtered samples to JSONL file.
@@ -75,22 +78,37 @@ class JSONLExporter:
         """
         _validate_output_path(output_path)
         count = 0
+        params = list(filter_params or [])
 
         if filter_query:
-            query = f"SELECT raw_json, tool_stats FROM samples WHERE {filter_query}"
+            if not params:
+                _validate_filter_query(filter_query)
+            query = f"SELECT raw_json FROM samples WHERE {filter_query}"
         else:
-            query = "SELECT raw_json, tool_stats FROM samples"
+            query = "SELECT raw_json FROM samples"
 
-        if limit:
-            query += f" LIMIT {limit}"
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(limit)
 
-        rows = self.store.conn.execute(query).fetchall()
+        rows = self.store.conn.execute(query, params).fetchall()
 
-        with open(output_path, "w", encoding="utf-8") as f:
-            for row in rows:
-                raw_json = json.loads(row[0])
-                f.write(json.dumps(raw_json, ensure_ascii=False) + "\n")
-                count += 1
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = None
+
+        try:
+            with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=output_path.parent, delete=False) as temp_file:
+                temp_path = Path(temp_file.name)
+                for row in rows:
+                    raw_json = json.loads(row[0])
+                    temp_file.write(json.dumps(raw_json, ensure_ascii=False) + "\n")
+                    count += 1
+
+            os.replace(temp_path, output_path)
+        except Exception:
+            if temp_path and temp_path.exists():
+                temp_path.unlink()
+            raise
 
         logger.info(f"Exported {count} samples to {output_path}")
         return count

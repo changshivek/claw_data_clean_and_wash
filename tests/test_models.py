@@ -136,6 +136,44 @@ def test_sample_anthropic_assistant_tool_use_conversion():
     assert s.num_tool_calls >= 1, f"Expected >= 1 tool call, got {s.num_tool_calls}"
 
 
+def test_sample_from_unirouter_payload():
+    """Test parsing UniRouter payload from request.bodyJson.messages."""
+    raw = {
+        "request": {
+            "bodyJson": {
+                "messages": [
+                    {"role": "user", "content": "What is 2+2?"},
+                    {"role": "assistant", "content": "2+2 is 4."},
+                ]
+            }
+        }
+    }
+
+    sample = Sample.from_dict(raw)
+
+    assert sample.user_query == "What is 2+2?"
+    assert sample.assistant_response == "2+2 is 4."
+    assert sample.num_turns == 1
+    assert sample.expected_judgment_count == 1
+
+
+def test_sample_num_turns_ignores_unanswered_user_messages():
+    raw = {
+        "messages": [
+            {"role": "user", "content": "u1"},
+            {"role": "user", "content": "u2"},
+            {"role": "user", "content": "u3"},
+            {"role": "assistant", "content": "a1"},
+            {"role": "user", "content": "u4"},
+        ]
+    }
+
+    sample = Sample.from_dict(raw)
+
+    assert sample.num_turns == 1
+    assert sample.expected_judgment_count == 1
+
+
 if __name__ == "__main__":
     test_sample_from_dict_basic()
     test_sample_from_dict_with_tool_calls()
@@ -145,4 +183,5 @@ if __name__ == "__main__":
     test_sample_detect_openai_format()
     test_sample_anthropic_to_openai_conversion()
     test_sample_anthropic_assistant_tool_use_conversion()
+    test_sample_from_unirouter_payload()
     print("All model tests passed!")

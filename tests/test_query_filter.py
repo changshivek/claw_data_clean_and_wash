@@ -27,26 +27,15 @@ def test_filter_builder_expression_parsing():
     print("test_filter_builder_expression_parsing passed")
 
 
-def test_filter_builder_task_types():
-    """Test task type filtering."""
-    builder = FilterQueryBuilder()
-    builder.add_task_type_filter(["coding", "reasoning"])
-
-    where = builder.build_where_clause()
-    assert "task_type IN ('coding', 'reasoning')" in where
-    print(f"WHERE clause: {where}")
-    print("test_filter_builder_task_types passed")
-
-
 def test_filter_builder_chained():
     """Test method chaining."""
     builder = FilterQueryBuilder()
-    result = builder.add_condition("num_tool_calls", ComparisonOp.GTE, 4).add_task_type_filter(["general"])
+    result = builder.add_condition("num_tool_calls", ComparisonOp.GTE, 4).add_condition("num_turns", ComparisonOp.GTE, 2)
 
     assert result is builder  # returns self
     where = builder.build_where_clause()
     assert "num_tool_calls >= 4" in where
-    assert "task_type IN ('general')" in where
+    assert "num_turns >= 2" in where
     print("test_filter_builder_chained passed")
 
 
@@ -58,7 +47,7 @@ def test_filtered_samples_query():
     query = builder.get_filtered_samples_query(limit=100)
     assert "SELECT" in query
     assert "FROM samples s" in query
-    assert "WHERE num_turns >= 2" in query
+    assert "WHERE s.num_turns >= 2" in query
     assert "LIMIT 100" in query
     print(f"Query: {query}")
     print("test_filtered_samples_query passed")
@@ -86,12 +75,36 @@ def test_filter_tool_stats_fields():
     assert "response_helpful_rate" in sql
 
 
+def test_filter_builder_parameterized_clause():
+    """Test parameterized clause generation keeps values out of SQL text."""
+    builder = FilterQueryBuilder()
+    builder.add_condition("response_helpful_rate", ComparisonOp.GTE, 0.8)
+    builder.add_condition("num_turns", ComparisonOp.GTE, 2)
+
+    sql, params = builder.build_parameterized_where_clause("s")
+
+    assert "?" in sql
+    assert params == [0.8, 2]
+
+
+def test_filter_builder_parameterized_query_limit():
+    """Test full parameterized query appends limit placeholder."""
+    builder = FilterQueryBuilder()
+    builder.add_condition("num_turns", ComparisonOp.GTE, 2)
+
+    query, params = builder.get_parameterized_query(limit=10)
+
+    assert "LIMIT ?" in query
+    assert params == [2, 10]
+
+
 if __name__ == "__main__":
     test_filter_builder_basic()
     test_filter_builder_expression_parsing()
-    test_filter_builder_task_types()
     test_filter_builder_chained()
     test_filtered_samples_query()
     test_invalid_expression()
     test_filter_tool_stats_fields()
+    test_filter_builder_parameterized_clause()
+    test_filter_builder_parameterized_query_limit()
     print("All filter query tests passed!")
