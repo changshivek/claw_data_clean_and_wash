@@ -12,6 +12,15 @@ def get_filtered_samples(
     page_size: int,
 ) -> tuple[list[dict[str, Any]], int]:
     """Fetch a single page of filtered sample records."""
+    session_merge_keep: bool | None = None
+    session_merge_status: str | None = None
+    if criteria.session_merge_scope == "keep":
+        session_merge_keep = True
+    elif criteria.session_merge_scope == "merged":
+        session_merge_keep = False
+    if criteria.session_merge_status != "all":
+        session_merge_status = criteria.session_merge_status
+
     return store.filter_samples(
         helpful_rate_op=criteria.helpful_op,
         helpful_rate_val=criteria.helpful_val,
@@ -19,6 +28,8 @@ def get_filtered_samples(
         satisfied_rate_val=criteria.satisfied_val,
         negative_feedback_rate_op=criteria.negative_feedback_op,
         negative_feedback_rate_val=criteria.negative_feedback_val,
+        session_merge_keep=session_merge_keep,
+        session_merge_status=session_merge_status,
         num_turns_min=criteria.num_turns_min,
         num_turns_max=criteria.num_turns_max,
         date_from=criteria.date_from,
@@ -53,9 +64,10 @@ def get_table_preview(
     if table_name == "samples":
         query = """
             SELECT id, num_turns, expected_judgment_count, num_tool_calls,
-                   processing_status, imported_at,
-                   json_extract(tool_stats, '$.response_helpful_rate') AS helpful_rate,
-                   json_extract(tool_stats, '$.user_satisfied_rate') AS satisfied_rate
+                   processing_status, session_merge_status, session_merge_keep,
+                   session_merge_reason, imported_at,
+                   response_helpful_rate AS helpful_rate,
+                   user_satisfied_rate AS satisfied_rate
             FROM samples
             ORDER BY id
             LIMIT ? OFFSET ?
@@ -68,6 +80,9 @@ def get_table_preview(
             "expected_judgment_count",
             "num_tool_calls",
             "processing_status",
+            "session_merge_status",
+            "session_merge_keep",
+            "session_merge_reason",
             "imported_at",
             "helpful_rate",
             "satisfied_rate",

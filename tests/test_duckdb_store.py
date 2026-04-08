@@ -327,6 +327,76 @@ def test_filter_samples_returns_sample_dicts():
         store.close()
 
 
+def test_filter_samples_supports_session_merge_scope_and_status():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "filter_session_merge.db"
+        store = DuckDBStore(db_path)
+        first_id = store.insert_sample(Sample.from_dict({
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi"},
+            ]
+        }))
+        second_id = store.insert_sample(Sample.from_dict({
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi again"},
+            ]
+        }))
+        store.conn.execute(
+            "UPDATE samples SET session_merge_status = 'keep', session_merge_keep = TRUE WHERE id = ?",
+            [first_id],
+        )
+        store.conn.execute(
+            "UPDATE samples SET session_merge_status = 'merged', session_merge_keep = FALSE, session_merge_reason = 'exact_duplicate_sequence' WHERE id = ?",
+            [second_id],
+        )
+
+        keep_rows, keep_total = store.filter_samples(session_merge_keep=True, limit=10, offset=0)
+        merged_rows, merged_total = store.filter_samples(session_merge_keep=False, limit=10, offset=0)
+        merged_status_rows, merged_status_total = store.filter_samples(session_merge_status="merged", limit=10, offset=0)
+
+        assert keep_total == 1
+        assert keep_rows[0]["id"] == first_id
+        assert merged_total == 1
+        assert merged_rows[0]["id"] == second_id
+        assert merged_status_total == 1
+        assert merged_status_rows[0]["session_merge_reason"] == "exact_duplicate_sequence"
+        store.close()
+
+
+def test_get_session_merge_counts_returns_summary():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "merge_counts.db"
+        store = DuckDBStore(db_path)
+        keep_id = store.insert_sample(Sample.from_dict({
+            "messages": [
+                {"role": "user", "content": "keep"},
+                {"role": "assistant", "content": "ok"},
+            ]
+        }))
+        merged_id = store.insert_sample(Sample.from_dict({
+            "messages": [
+                {"role": "user", "content": "merged"},
+                {"role": "assistant", "content": "ok"},
+            ]
+        }))
+        skipped_id = store.insert_sample(Sample.from_dict({
+            "messages": [
+                {"role": "user", "content": "skipped"},
+                {"role": "assistant", "content": "ok"},
+            ]
+        }))
+        store.conn.execute("UPDATE samples SET session_merge_status = 'keep', session_merge_keep = TRUE WHERE id = ?", [keep_id])
+        store.conn.execute("UPDATE samples SET session_merge_status = 'merged', session_merge_keep = FALSE WHERE id = ?", [merged_id])
+        store.conn.execute("UPDATE samples SET session_merge_status = 'skipped', session_merge_keep = TRUE WHERE id = ?", [skipped_id])
+
+        counts = store.get_session_merge_counts()
+
+        assert counts == {"total": 3, "keep": 2, "merged": 1, "skipped": 1, "unmarked": 0}
+        store.close()
+
+
 def test_samples_schema_removed_unused_columns_and_added_uid():
     """Test samples schema removes dead columns and keeps stable import uid."""
     with tempfile.TemporaryDirectory() as tmpdir:

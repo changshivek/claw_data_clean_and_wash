@@ -20,6 +20,8 @@ def test_build_export_where_clause_includes_dates_and_tool_stats():
         satisfied_val=0.5,
         negative_feedback_op=">=",
         negative_feedback_val=0.2,
+        session_merge_scope="keep",
+        session_merge_status="keep",
         date_from="2026-04-01",
         date_to="2026-04-03",
     )
@@ -27,9 +29,11 @@ def test_build_export_where_clause_includes_dates_and_tool_stats():
     where_clause, params = build_export_where_clause(criteria)
 
     assert "tool_stats IS NOT NULL" in where_clause
+    assert "COALESCE(session_merge_keep, TRUE) = TRUE" in where_clause
+    assert "session_merge_status = ?" in where_clause
     assert "imported_at >= ?" in where_clause
     assert "imported_at <= ?" in where_clause
-    assert params == [0.8, 0.5, 0.2, "2026-04-01", "2026-04-03"]
+    assert params == [0.8, 0.5, 0.2, "keep", "2026-04-01", "2026-04-03"]
 
 
 def test_preview_export_returns_count_and_size_estimate():

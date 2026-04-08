@@ -6,10 +6,11 @@ LLM-powered agent conversation data filtering tool. Import JSONL files, run roun
 
 1. 导入 OpenAI 或 UniRouter 对话数据。
 2. 将样本写入 DuckDB，并生成稳定的 sample_uid 与本地整数 id。
-3. round feedback 以 claim 模式批量领取 pending 或 failed 样本。
-4. 按统一 turn 语义做逐轮判断，并以原子方式写回结果。
-5. 样本进入 completed 或 failed 状态。
-6. 通过 CLI 或 Web 按结构化条件筛选和导出。
+3. session merge 按真实 user turns 检测并折叠会话快照重复，只保留应继续流转的样本。
+4. round feedback 以 claim 模式批量领取 pending 或 failed 且 session_merge_keep 为 true 的样本。
+5. 按统一 turn 语义做逐轮判断，并以原子方式写回结果。
+6. 样本进入 completed 或 failed 状态。
+7. 通过 CLI 或 Web 按结构化条件和 session merge 标记筛选与导出。
 
 ## Quick Start
 
@@ -19,6 +20,7 @@ claw-filter import data.jsonl
 
 # 2. 运行 round feedback 评分（需要 LLM 服务器）
 claw-filter pressure-test  # 先测试稳定性
+claw-filter session-merge --workers 4 --batch-size 512 --min-prefix-turns 2
 claw-filter round-feedback --workers 32 --batch-size 50
 
 # 3. 查看统计
@@ -55,6 +57,10 @@ bash scripts/run_export.sh
 - BATCH_SIZE
 - LLM_TIMEOUT
 - RUN_PRESSURE_TEST
+- RUN_SESSION_MERGE
+- SESSION_MERGE_WORKERS
+- SESSION_MERGE_BATCH_SIZE
+- SESSION_MERGE_MIN_PREFIX_TURNS
 
 导出脚本可配置项包括：
 - DB_PATH
@@ -112,7 +118,37 @@ samples 表当前使用显式处理状态:
 
 说明:
 - round feedback 使用 claim 模式领取 pending 和 failed 样本。
+- 如果 session merge 已执行，claim 时会自动跳过 session_merge_keep=false 的样本。
 - 结果写入采用原子替换，避免 sample 聚合结果和 turn_judgments 明细不一致。
+
+## Session Merge
+
+session merge 用于修复导入后 DuckDB 中的会话快照重复问题，执行时只依赖真实 user content，而不依赖可能失真的 metadata 标识。
+
+当前策略：
+- 只抽取真实 user turns，跳过 tool_result-only user block。
+- 先按第一轮真实 user 文本分桶。
+- 桶内先折叠完全相同的 user-turn 序列。
+- 对满足最小公共前缀阈值的严格前缀样本，只保留更长的叶子样本。
+
+session merge 会在 samples 表写入以下字段：
+- session_merge_status
+- session_merge_keep
+- session_merge_group_id
+- session_merge_group_size
+- session_merge_representative_id
+- session_merge_reason
+- session_merge_updated_at
+
+CLI 示例：
+
+```bash
+# 仅预览 merge 结果，不写回数据库
+claw-filter session-merge --dry-run --workers 4 --batch-size 512 --min-prefix-turns 2
+
+# 正式写回 merge 标记
+claw-filter session-merge --workers 4 --batch-size 512 --min-prefix-turns 2
+```
 
 ## 评分维度
 
@@ -154,7 +190,7 @@ rate 计算说明:
 主要表:
 
 - samples
-  记录 sample_uid、原始 JSON、派生字段、四个显式 rate 列、tool_stats、processing_status 等样本级信息。
+  记录 sample_uid、原始 JSON、派生字段、四个显式 rate 列、session_merge 标记列、tool_stats、processing_status 等样本级信息。
 - turn_judgments
   记录每个 judged turn 的 response_helpful、user_satisfied、signal_from_users、llm_error。
 
@@ -175,6 +211,7 @@ rate 计算说明:
 claw-filter import <file>              # 导入 JSONL
 claw-filter pressure-test              # LLM 稳定性测试
 claw-filter round-feedback            # 运行 round feedback 评分
+claw-filter session-merge            # 运行 session merge 打标
 claw-filter stats                     # 查看统计
 claw-filter filter [options] --export <file>  # 筛选导出
 claw-filter info                     # 数据库信息
@@ -204,6 +241,12 @@ claw-filter filter --user-satisfied-rate ">=0.7" --export out.jsonl
 # 按 user_negative_feedback_rate 筛选
 claw-filter filter --user-negative-feedback-rate ">=0.3" --export out.jsonl
 
+# 仅导出 session merge 保留样本
+claw-filter filter --session-merge-keep true --export out.jsonl
+
+# 仅导出 session merge 标记为 merged 的样本
+claw-filter filter --session-merge-status merged --export out.jsonl
+
 # 组合筛选
 claw-filter filter --response-helpful-rate ">=0.7" --user-satisfied-rate ">=0.5" --has-error false --export out.jsonl
 
@@ -229,6 +272,7 @@ claw-filter filter --response-helpful-rate ">=0.7" --export out.jsonl --report s
 Web 页面说明:
 - detail 页复用与 round feedback 相同的 turn builder。
 - filter/export 页复用统一查询语义，避免与 CLI 逻辑分叉。
+- overview/filter/detail/tables 页都可以查看 session merge 标记信息。
 
 ## 目录结构
 

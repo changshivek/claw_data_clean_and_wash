@@ -58,12 +58,14 @@ def import_cmd(ctx, input_file):
 @click.option("--response-helpful-rate", type=str, help="Filter by response helpful rate (e.g., '>=0.7')")
 @click.option("--user-satisfied-rate", type=str, help="Filter by user satisfied rate (e.g., '>=0.7')")
 @click.option("--user-negative-feedback-rate", type=str, help="Filter by user negative feedback rate (e.g., '>=0.3')")
+@click.option("--session-merge-keep", type=bool, help="Filter by session merge keep marker (true/false)")
+@click.option("--session-merge-status", type=click.Choice(["keep", "merged", "skipped", "unmarked"]), help="Filter by session merge status")
 @click.option("--has-error", type=bool, help="Filter by has error (true/false)")
 @click.option("--export", type=click.Path(), required=True, help="Output JSONL file")
 @click.option("--report", type=click.Path(), help="Output report JSON file")
 @click.option("--limit", type=int, help="Limit number of results")
 @click.pass_context
-def filter_cmd(ctx, response_helpful_rate, user_satisfied_rate, user_negative_feedback_rate, has_error, export, report, limit):
+def filter_cmd(ctx, response_helpful_rate, user_satisfied_rate, user_negative_feedback_rate, session_merge_keep, session_merge_status, has_error, export, report, limit):
     """Filter samples and export to JSONL with optional report."""
     config = ctx.obj["config"]
 
@@ -97,10 +99,21 @@ def filter_cmd(ctx, response_helpful_rate, user_satisfied_rate, user_negative_fe
             builder.add_condition("user_negative_feedback_rate", op, value)
         else:
             raise ValueError(f"Invalid user-negative-feedback-rate expression: {user_negative_feedback_rate}")
+    if session_merge_status and session_merge_status != "unmarked":
+        builder.add_condition("session_merge_status", ComparisonOp("="), session_merge_status)
     if has_error is not None:
         builder.add_condition("has_error", ComparisonOp("="), has_error)
 
     where_clause, where_params = builder.build_parameterized_where_clause()
+    extra_clauses = []
+    if session_merge_keep is True:
+        extra_clauses.append("COALESCE(session_merge_keep, TRUE) = TRUE")
+    elif session_merge_keep is False:
+        extra_clauses.append("session_merge_keep = FALSE")
+    if session_merge_status == "unmarked":
+        extra_clauses.append("session_merge_status IS NULL")
+    if extra_clauses:
+        where_clause = " AND ".join([where_clause, *extra_clauses]) if where_clause != "1=1" else " AND ".join(extra_clauses)
 
     store = DuckDBStore(config.db_path)
     try:
@@ -231,6 +244,29 @@ def round_feedback(ctx, workers, batch_size):
             store.close()
 
     asyncio.run(_run_round_feedback())
+
+
+@cli.command(name="session-merge")
+@click.option("--workers", type=int, default=4, help="Number of parallel workers")
+@click.option("--batch-size", type=int, default=512, help="Batch size per worker")
+@click.option("--min-prefix-turns", type=int, default=2, help="Minimum shared user turns before collapsing a prefix")
+@click.option("--dry-run", is_flag=True, help="Only print the summary without writing markers")
+@click.pass_context
+def session_merge_cmd(ctx, workers, batch_size, min_prefix_turns, dry_run):
+    """Run content-driven session snapshot merge before round feedback."""
+    from claw_data_filter.session_merge import run_session_merge
+
+    config = ctx.obj["config"]
+    summary = run_session_merge(
+        config.db_path,
+        dry_run=dry_run,
+        batch_size=batch_size,
+        workers=workers,
+        min_prefix_turns=min_prefix_turns,
+    )
+    click.echo("=== Session Merge Summary ===")
+    for key in sorted(summary):
+        click.echo(f"{key}: {summary[key]}")
 
 
 def main():

@@ -26,6 +26,12 @@ def test_build_sample_detail_view_uses_turn_context_grouping():
         "expected_judgment_count": 2,
         "num_tool_calls": 1,
         "tool_stats": {"response_helpful_rate": 1.0, "user_satisfied_rate": 0.5},
+        "session_merge_status": "keep",
+        "session_merge_keep": True,
+        "session_merge_group_id": "group-1",
+        "session_merge_group_size": 4,
+        "session_merge_representative_id": 3,
+        "session_merge_reason": "leaf_sequence",
         "processing_status": "completed",
     }
     judgments = [
@@ -48,6 +54,8 @@ def test_build_sample_detail_view_uses_turn_context_grouping():
 
     assert detail.sample_id == 3
     assert detail.sample_uid == "uid-3"
+    assert detail.session_merge_status == "keep"
+    assert detail.session_merge_reason == "leaf_sequence"
     assert len(detail.turns) == 2
     assert detail.turns[0].turn_index == 0
     assert detail.turns[0].tool_calls[0]["name"] == "weather"
@@ -77,6 +85,7 @@ def test_build_sample_detail_view_handles_missing_judgment():
 
     assert len(detail.turns) == 1
     assert detail.sample_uid == "uid-8"
+    assert detail.session_merge_status is None
     assert detail.turns[0].response_helpful is None
     assert detail.turns[0].user_satisfied is None
     assert detail.turns[0].llm_error is False

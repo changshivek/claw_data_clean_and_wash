@@ -2,7 +2,7 @@
 import streamlit as st
 from claw_data_filter.storage.duckdb_store import DuckDBStore
 from claw_data_filter.web.config import DB_PATH
-from claw_data_filter.web.services.overview_service import get_processing_status_counts
+from claw_data_filter.web.services.overview_service import get_processing_status_counts, get_session_merge_counts
 
 
 def render():
@@ -12,6 +12,7 @@ def render():
     stats = store.get_stats()
     processed_count = store.get_processed_count()
     status_counts = get_processing_status_counts(store)
+    merge_counts = get_session_merge_counts(store)
 
     col1, col2, col3, col4 = st.columns(4)
 
@@ -33,5 +34,13 @@ def render():
     col9, col10, _, _ = st.columns(4)
     col9.metric("Pending", status_counts["pending"])
     col10.metric("Processing", status_counts["processing"])
+
+    st.divider()
+
+    col11, col12, col13, col14 = st.columns(4)
+    col11.metric("Merge Keep", merge_counts["keep"])
+    col12.metric("Merge Merged", merge_counts["merged"])
+    col13.metric("Merge Skipped", merge_counts["skipped"])
+    col14.metric("Merge Unmarked", merge_counts["unmarked"])
 
     store.close()

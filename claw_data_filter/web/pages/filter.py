@@ -35,6 +35,9 @@ def render(route: RouteState):
 
     # Filter controls
     with st.form("filter_form"):
+        merge_scope_options = ["all", "keep", "merged"]
+        merge_status_options = ["all", "keep", "merged", "skipped", "unmarked"]
+
         col1, col2, col3 = st.columns(3)
 
         helpful_ops = [">=", "<=", "=", "!="]
@@ -107,6 +110,32 @@ def render(route: RouteState):
             date_defaults.append(parsed_date_to)
         date_range = col6.date_input("日期范围", value=date_defaults, key="filter.date_range")
 
+        col7, col8, _ = st.columns(3)
+        session_merge_scope = col7.selectbox(
+            "Session Merge 范围",
+            merge_scope_options,
+            index=merge_scope_options.index(criteria.session_merge_scope),
+            key="filter.session_merge_scope",
+            format_func=lambda value: {
+                "all": "全部样本",
+                "keep": "仅可流转样本",
+                "merged": "仅已合并样本",
+            }[value],
+        )
+        session_merge_status = col8.selectbox(
+            "Session Merge 状态",
+            merge_status_options,
+            index=merge_status_options.index(criteria.session_merge_status),
+            key="filter.session_merge_status",
+            format_func=lambda value: {
+                "all": "全部状态",
+                "keep": "keep",
+                "merged": "merged",
+                "skipped": "skipped",
+                "unmarked": "未执行",
+            }[value],
+        )
+
         col_btn1, col_btn2 = st.columns([1, 1])
         submitted = col_btn1.form_submit_button("应用筛选")
         reset = col_btn2.form_submit_button("重置")
@@ -122,6 +151,8 @@ def render(route: RouteState):
             satisfied_val=satisfied_val,
             negative_feedback_op=negative_feedback_op,
             negative_feedback_val=negative_feedback_val,
+            session_merge_scope=session_merge_scope,
+            session_merge_status=session_merge_status,
             num_turns_min=num_turns_min,
             num_turns_max=num_turns_max,
             date_from=date_from_val,

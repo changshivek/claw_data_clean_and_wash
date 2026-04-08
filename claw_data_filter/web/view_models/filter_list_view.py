@@ -19,6 +19,8 @@ class FilterCriteria:
     satisfied_val: float | None = 0.5
     negative_feedback_op: str = ">="
     negative_feedback_val: float | None = None
+    session_merge_scope: str = "all"
+    session_merge_status: str = "all"
     num_turns_min: int | None = 0
     num_turns_max: int | None = 100
     date_from: str | None = None
@@ -32,6 +34,8 @@ class FilterCriteria:
             "satisfied_val": self.satisfied_val,
             "negative_feedback_op": self.negative_feedback_op,
             "negative_feedback_val": self.negative_feedback_val,
+            "session_merge_scope": self.session_merge_scope,
+            "session_merge_status": self.session_merge_status,
             "num_turns_min": self.num_turns_min,
             "num_turns_max": self.num_turns_max,
             "date_from": self.date_from,
@@ -49,6 +53,8 @@ class FilterCriteria:
             satisfied_val=data.get("satisfied_val", 0.5),
             negative_feedback_op=str(data.get("negative_feedback_op", ">=")),
             negative_feedback_val=data.get("negative_feedback_val"),
+            session_merge_scope=str(data.get("session_merge_scope", "all")),
+            session_merge_status=str(data.get("session_merge_status", "all")),
             num_turns_min=data.get("num_turns_min", 0),
             num_turns_max=data.get("num_turns_max", 100),
             date_from=data.get("date_from"),

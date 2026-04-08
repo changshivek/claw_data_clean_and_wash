@@ -35,6 +35,8 @@ def render():
 
     # Filter controls
     with st.form("export_form"):
+        merge_scope_options = ["all", "keep", "merged"]
+        merge_status_options = ["all", "keep", "merged", "skipped", "unmarked"]
         col1, col2, col3 = st.columns(3)
 
         helpful_op = col1.selectbox("Helpful Rate", [">=", "<=", "=", "!="], index=0, key="export.helpful_op")
@@ -58,6 +60,32 @@ def render():
             date_defaults.append(parsed_date_to)
         date_range = col6.date_input("日期范围", value=date_defaults, key="export.date_range")
 
+        col7, col8, _ = st.columns(3)
+        session_merge_scope = col7.selectbox(
+            "Session Merge 范围",
+            merge_scope_options,
+            index=0,
+            key="export.session_merge_scope",
+            format_func=lambda value: {
+                "all": "全部样本",
+                "keep": "仅可流转样本",
+                "merged": "仅已合并样本",
+            }[value],
+        )
+        session_merge_status = col8.selectbox(
+            "Session Merge 状态",
+            merge_status_options,
+            index=0,
+            key="export.session_merge_status",
+            format_func=lambda value: {
+                "all": "全部状态",
+                "keep": "keep",
+                "merged": "merged",
+                "skipped": "skipped",
+                "unmarked": "未执行",
+            }[value],
+        )
+
         output_path = st.text_input("输出文件路径", value="data/exported.jsonl", key="export.output_path")
 
         # Field selection
@@ -79,6 +107,8 @@ def render():
         satisfied_val=satisfied_val,
         negative_feedback_op=negative_feedback_op,
         negative_feedback_val=negative_feedback_val,
+        session_merge_scope=session_merge_scope,
+        session_merge_status=session_merge_status,
         num_turns_min=num_turns_min,
         num_turns_max=num_turns_max,
         date_from=date_from,

@@ -26,4 +26,10 @@ class SampleDetailView:
     helpful_rate: float
     satisfied_rate: float
     processing_status: str
+    session_merge_status: str | None = None
+    session_merge_keep: bool | None = None
+    session_merge_group_id: str | None = None
+    session_merge_group_size: int | None = None
+    session_merge_representative_id: int | None = None
+    session_merge_reason: str | None = None
     turns: list[TurnDetailView] = field(default_factory=list)

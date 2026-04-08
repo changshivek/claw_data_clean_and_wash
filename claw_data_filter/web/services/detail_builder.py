@@ -41,5 +41,11 @@ def build_sample_detail_view(
         helpful_rate=tool_stats.get("response_helpful_rate", 0.0),
         satisfied_rate=tool_stats.get("user_satisfied_rate", 0.0),
         processing_status=sample_record.get("processing_status") or "pending",
+        session_merge_status=sample_record.get("session_merge_status"),
+        session_merge_keep=sample_record.get("session_merge_keep"),
+        session_merge_group_id=sample_record.get("session_merge_group_id"),
+        session_merge_group_size=sample_record.get("session_merge_group_size"),
+        session_merge_representative_id=sample_record.get("session_merge_representative_id"),
+        session_merge_reason=sample_record.get("session_merge_reason"),
         turns=turns,
     )

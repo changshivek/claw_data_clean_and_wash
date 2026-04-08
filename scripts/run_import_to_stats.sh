@@ -16,6 +16,10 @@ MAX_CONCURRENCY="${MAX_CONCURRENCY:-32}"
 BATCH_SIZE="${BATCH_SIZE:-50}"
 LLM_TIMEOUT="${LLM_TIMEOUT:-60}"
 RUN_PRESSURE_TEST="${RUN_PRESSURE_TEST:-true}"
+RUN_SESSION_MERGE="${RUN_SESSION_MERGE:-true}"
+SESSION_MERGE_WORKERS="${SESSION_MERGE_WORKERS:-4}"
+SESSION_MERGE_BATCH_SIZE="${SESSION_MERGE_BATCH_SIZE:-512}"
+SESSION_MERGE_MIN_PREFIX_TURNS="${SESSION_MERGE_MIN_PREFIX_TURNS:-2}"
 
 # Optional override for Python executable.
 # Default uses the project's virtualenv.
@@ -55,20 +59,27 @@ run_cli() {
   "${PYTHON_BIN}" -m claw_data_filter.cli --db-path "${DB_PATH}" --llm-endpoint "${LLM_ENDPOINT}" --llm-model-id "${LLM_MODEL_ID}" "$@"
 }
 
-echo "[1/4] Importing data: ${INPUT_FILE}"
+echo "[1/5] Importing data: ${INPUT_FILE}"
 run_cli import "${INPUT_FILE}"
 
 if [[ "${RUN_PRESSURE_TEST}" == "true" ]]; then
-  echo "[2/4] Running pressure test"
+  echo "[2/5] Running pressure test"
   run_cli pressure-test
 else
-  echo "[2/4] Skipping pressure test"
+  echo "[2/5] Skipping pressure test"
 fi
 
-echo "[3/4] Running round feedback with workers=${MAX_CONCURRENCY}, batch_size=${BATCH_SIZE}"
+if [[ "${RUN_SESSION_MERGE}" == "true" ]]; then
+  echo "[3/5] Running session merge with workers=${SESSION_MERGE_WORKERS}, batch_size=${SESSION_MERGE_BATCH_SIZE}, min_prefix_turns=${SESSION_MERGE_MIN_PREFIX_TURNS}"
+  run_cli session-merge --workers "${SESSION_MERGE_WORKERS}" --batch-size "${SESSION_MERGE_BATCH_SIZE}" --min-prefix-turns "${SESSION_MERGE_MIN_PREFIX_TURNS}"
+else
+  echo "[3/5] Skipping session merge"
+fi
+
+echo "[4/5] Running round feedback with workers=${MAX_CONCURRENCY}, batch_size=${BATCH_SIZE}"
 run_cli round-feedback --workers "${MAX_CONCURRENCY}" --batch-size "${BATCH_SIZE}"
 
-echo "[4/4] Printing stats"
+echo "[5/5] Printing stats"
 run_cli stats
 
 echo "Done. Database written to: ${DB_PATH}"

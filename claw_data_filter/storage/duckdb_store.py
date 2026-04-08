@@ -288,8 +288,15 @@ class DuckDBStore:
             "num_tool_calls": row[7] or 0,
             "has_error": (tool_stats or {}).get("has_error", False),
             "tool_stats": tool_stats,
-            "processing_status": row[13] or "pending",
-            "processing_updated_at": row[14],
+            "session_merge_status": row[13],
+            "session_merge_keep": row[14],
+            "session_merge_group_id": row[15],
+            "session_merge_group_size": row[16],
+            "session_merge_representative_id": row[17],
+            "session_merge_reason": row[18],
+            "session_merge_updated_at": row[19],
+            "processing_status": row[20] or "pending",
+            "processing_updated_at": row[21],
             "helpful_rate": row[8] if row[8] is not None else (tool_stats or {}).get("response_helpful_rate", 0),
             "unhelpful_rate": row[9] if row[9] is not None else (tool_stats or {}).get("response_unhelpful_rate", 0),
             "satisfied_rate": row[10] if row[10] is not None else (tool_stats or {}).get("user_satisfied_rate", 0),
@@ -494,7 +501,9 @@ class DuckDBStore:
             """
              SELECT id, sample_uid, raw_json, user_query, assistant_response, num_turns, expected_judgment_count,
                  num_tool_calls, response_helpful_rate, response_unhelpful_rate, user_satisfied_rate,
-                 user_negative_feedback_rate, tool_stats, processing_status, processing_updated_at
+                 user_negative_feedback_rate, tool_stats, session_merge_status, session_merge_keep,
+                 session_merge_group_id, session_merge_group_size, session_merge_representative_id,
+                 session_merge_reason, session_merge_updated_at, processing_status, processing_updated_at
             FROM samples
             WHERE id = ?
             """,
@@ -510,6 +519,8 @@ class DuckDBStore:
         satisfied_rate_val: float | None = None,
         negative_feedback_rate_op: str = ">=",
         negative_feedback_rate_val: float | None = None,
+        session_merge_keep: bool | None = None,
+        session_merge_status: str | None = None,
         has_error: bool | None = None,
         num_turns_min: int | None = None,
         num_turns_max: int | None = None,
@@ -527,6 +538,8 @@ class DuckDBStore:
             builder.add_condition("user_satisfied_rate", ComparisonOp(satisfied_rate_op), satisfied_rate_val)
         if negative_feedback_rate_val is not None:
             builder.add_condition("user_negative_feedback_rate", ComparisonOp(negative_feedback_rate_op), negative_feedback_rate_val)
+        if session_merge_status and session_merge_status != "unmarked":
+            builder.add_condition("session_merge_status", ComparisonOp.EQ, session_merge_status)
         if has_error is not None:
             builder.add_condition("has_error", ComparisonOp.EQ, has_error)
         if num_turns_min is not None:
@@ -542,6 +555,12 @@ class DuckDBStore:
         if date_to:
             extra_clauses.append("s.imported_at <= ?")
             params.append(date_to)
+        if session_merge_keep is True:
+            extra_clauses.append("COALESCE(s.session_merge_keep, TRUE) = TRUE")
+        elif session_merge_keep is False:
+            extra_clauses.append("s.session_merge_keep = FALSE")
+        if session_merge_status == "unmarked":
+            extra_clauses.append("s.session_merge_status IS NULL")
 
         combined_where = where_clause
         if extra_clauses:
@@ -554,7 +573,9 @@ class DuckDBStore:
         query = f"""
              SELECT id, sample_uid, raw_json, user_query, assistant_response, num_turns, expected_judgment_count,
                  num_tool_calls, response_helpful_rate, response_unhelpful_rate, user_satisfied_rate,
-                 user_negative_feedback_rate, tool_stats, processing_status, processing_updated_at
+                 user_negative_feedback_rate, tool_stats, session_merge_status, session_merge_keep,
+                 session_merge_group_id, session_merge_group_size, session_merge_representative_id,
+                 session_merge_reason, session_merge_updated_at, processing_status, processing_updated_at
             FROM samples s
             WHERE {combined_where}
             ORDER BY id
@@ -562,6 +583,27 @@ class DuckDBStore:
         """
         rows = self.conn.execute(query, [*params, limit, offset]).fetchall()
         return [self._build_sample_record(row) for row in rows], total
+
+    def get_session_merge_counts(self) -> dict[str, int]:
+        """Return session merge marker counts for overview and validation."""
+        row = self.conn.execute(
+            """
+            SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN COALESCE(session_merge_keep, TRUE) THEN 1 ELSE 0 END) AS keep_count,
+                SUM(CASE WHEN session_merge_keep = FALSE THEN 1 ELSE 0 END) AS merged_count,
+                SUM(CASE WHEN session_merge_status = 'skipped' THEN 1 ELSE 0 END) AS skipped_count,
+                SUM(CASE WHEN session_merge_status IS NULL THEN 1 ELSE 0 END) AS unmarked_count
+            FROM samples
+            """
+        ).fetchone()
+        return {
+            "total": int(row[0] or 0),
+            "keep": int(row[1] or 0),
+            "merged": int(row[2] or 0),
+            "skipped": int(row[3] or 0),
+            "unmarked": int(row[4] or 0),
+        }
 
     def get_table_list(self) -> list[str]:
         """List available tables."""

@@ -52,6 +52,14 @@ def render(route: RouteState):
 
     st.caption(f"sample_uid: {detail.sample_uid}")
     st.caption(f"processing_status: {detail.processing_status}")
+    st.caption(
+        "session_merge: "
+        f"status={detail.session_merge_status or 'unmarked'}, "
+        f"keep={detail.session_merge_keep if detail.session_merge_keep is not None else 'n/a'}, "
+        f"reason={detail.session_merge_reason or '-'}, "
+        f"representative_id={detail.session_merge_representative_id or detail.sample_id}, "
+        f"group_size={detail.session_merge_group_size or '-'}"
+    )
 
     st.divider()
 

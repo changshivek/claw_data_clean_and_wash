@@ -95,6 +95,18 @@ def test_filter_builder_supports_unhelpful_rate():
     assert params == [0.2]
 
 
+def test_filter_builder_supports_session_merge_fields():
+    builder = FilterQueryBuilder()
+    builder.add_condition("session_merge_keep", ComparisonOp.EQ, False)
+    builder.add_condition("session_merge_status", ComparisonOp.EQ, "merged")
+
+    sql, params = builder.build_parameterized_where_clause("s")
+
+    assert "session_merge_keep" in sql
+    assert "session_merge_status" in sql
+    assert params == [False, "merged"]
+
+
 def test_filter_builder_parameterized_clause():
     """Test parameterized clause generation keeps values out of SQL text."""
     builder = FilterQueryBuilder()

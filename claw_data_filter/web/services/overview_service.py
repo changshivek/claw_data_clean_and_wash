@@ -16,3 +16,8 @@ def get_processing_status_counts(store: DuckDBStore) -> dict[str, int]:
     for status, count in rows:
         counts[str(status)] = int(count)
     return counts
+
+
+def get_session_merge_counts(store: DuckDBStore) -> dict[str, int]:
+    """Return aggregate counts for session merge markers."""
+    return store.get_session_merge_counts()

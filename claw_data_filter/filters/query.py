@@ -10,6 +10,10 @@ ALLOWED_FIELDS = frozenset([
     "response_unhelpful_rate",
     "user_satisfied_rate",
     "user_negative_feedback_rate",
+    "session_merge_keep",
+    "session_merge_status",
+    "session_merge_reason",
+    "session_merge_group_size",
     "has_error",
     "num_turns",
     "num_tool_calls",
@@ -46,6 +50,14 @@ def _field_sql_expression(field: str, table_name: str = "samples") -> str:
         return f"{table_name}.user_satisfied_rate"
     if field == "user_negative_feedback_rate":
         return f"{table_name}.user_negative_feedback_rate"
+    if field == "session_merge_keep":
+        return f"{table_name}.session_merge_keep"
+    if field == "session_merge_status":
+        return f"{table_name}.session_merge_status"
+    if field == "session_merge_reason":
+        return f"{table_name}.session_merge_reason"
+    if field == "session_merge_group_size":
+        return f"{table_name}.session_merge_group_size"
     if field == "has_error":
         return f"CAST(json_extract({table_name}.tool_stats, '$.has_error') AS BOOLEAN)"
     return f"{table_name}.{field}"

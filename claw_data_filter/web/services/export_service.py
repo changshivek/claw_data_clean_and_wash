@@ -22,19 +22,29 @@ def build_export_where_clause(criteria: FilterCriteria) -> tuple[str, list[Any]]
         builder.add_condition("num_turns", ComparisonOp.LTE, criteria.num_turns_max)
 
     where_clause, params = builder.build_parameterized_where_clause("samples")
-    if where_clause == "1=1":
-        where_clause = "tool_stats IS NOT NULL"
-    else:
-        where_clause = f"tool_stats IS NOT NULL AND {where_clause}"
+    clauses = ["tool_stats IS NOT NULL"]
+    if where_clause != "1=1":
+        clauses.append(where_clause)
+
+    if criteria.session_merge_scope == "keep":
+        clauses.append("COALESCE(session_merge_keep, TRUE) = TRUE")
+    elif criteria.session_merge_scope == "merged":
+        clauses.append("session_merge_keep = FALSE")
+
+    if criteria.session_merge_status not in {"all", "unmarked"}:
+        clauses.append("session_merge_status = ?")
+        params.append(criteria.session_merge_status)
+    elif criteria.session_merge_status == "unmarked":
+        clauses.append("session_merge_status IS NULL")
 
     if criteria.date_from:
-        where_clause += " AND imported_at >= ?"
+        clauses.append("imported_at >= ?")
         params.append(criteria.date_from)
     if criteria.date_to:
-        where_clause += " AND imported_at <= ?"
+        clauses.append("imported_at <= ?")
         params.append(criteria.date_to)
 
-    return where_clause, params
+    return " AND ".join(clauses), params
 
 
 def preview_export(store: DuckDBStore, criteria: FilterCriteria) -> dict[str, float | int]:
