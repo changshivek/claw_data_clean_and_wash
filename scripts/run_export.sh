@@ -8,6 +8,7 @@ set -euo pipefail
 DB_PATH="data/pipeline.duckdb"
 EXPORT_PATH="data/exported.jsonl"
 REPORT_PATH="data/export_report.json"
+EXPORT_FORMAT="raw_jsonl"
 
 # Leave empty to disable a filter.
 RESPONSE_HELPFUL_RATE=">=0.7"
@@ -42,6 +43,13 @@ DB_PATH="${PROJECT_ROOT}/${DB_PATH}"
 EXPORT_PATH="${PROJECT_ROOT}/${EXPORT_PATH}"
 REPORT_PATH="${PROJECT_ROOT}/${REPORT_PATH}"
 
+default_raw_export_path="${PROJECT_ROOT}/data/exported.jsonl"
+default_feedback_export_path="${PROJECT_ROOT}/data/exported_round_feedback.jsonl"
+
+if [[ "${EXPORT_FORMAT}" == "openai_round_feedback" && "${EXPORT_PATH}" == "${default_raw_export_path}" ]]; then
+  EXPORT_PATH="${default_feedback_export_path}"
+fi
+
 if [[ ! -f "${DB_PATH}" ]]; then
   echo "Database file not found: ${DB_PATH}" >&2
   echo "Please update DB_PATH in the config section." >&2
@@ -55,6 +63,7 @@ args=(
   -m claw_data_filter.cli
   --db-path "${DB_PATH}"
   filter
+  --export-format "${EXPORT_FORMAT}"
   --export "${EXPORT_PATH}"
 )
 

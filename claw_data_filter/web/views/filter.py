@@ -4,7 +4,13 @@ from pathlib import Path
 
 import streamlit as st
 
-from claw_data_filter.exporters.jsonl_exporter import JSONLExporter
+from claw_data_filter.exporters.unified_exporter import (
+    OPENAI_ROUND_FEEDBACK,
+    RAW_JSONL,
+    ExportFilterSpec,
+    ExportRequest,
+    UnifiedExporter,
+)
 from claw_data_filter.storage.duckdb_store import DuckDBStore
 from claw_data_filter.web.components.page_shell import render_page_header
 from claw_data_filter.web.components.sample_table import render_samples_table
@@ -156,24 +162,59 @@ def render(route: RouteState):
         st.rerun()
 
     st.divider()
-    col_count, col_export = st.columns([3, 1])
-    col_count.markdown(f"**共 {total} 条结果**")
+    st.markdown(f"**共 {total} 条结果**")
 
+    export_scope_options = ["filtered"]
     if view.selection_enabled:
-        if col_export.button("导出选中"):
+        export_scope_options.append("selected")
+
+    with st.expander("导出当前结果", expanded=False):
+        col_export1, col_export2, col_export3 = st.columns(3)
+        export_scope = col_export1.selectbox(
+            "导出范围",
+            export_scope_options,
+            key="filter.export_scope",
+            format_func=lambda value: {
+                "filtered": "当前筛选结果",
+                "selected": "当前勾选样本",
+            }[value],
+        )
+        export_format = col_export2.selectbox(
+            "导出格式",
+            [RAW_JSONL, OPENAI_ROUND_FEEDBACK],
+            key="filter.export_format",
+            format_func=lambda value: {
+                RAW_JSONL: "原始 raw_json JSONL",
+                OPENAI_ROUND_FEEDBACK: "OpenAI 兼容 + round feedback JSONL",
+            }[value],
+        )
+        default_path = "data/exported.jsonl" if export_format == RAW_JSONL else "data/exported_round_feedback.jsonl"
+        output_path = col_export3.text_input("输出文件路径", value=default_path, key="filter.export_output_path")
+
+        if export_scope == "selected":
+            st.caption(f"当前已选 {len(view.selected_ids)} 条样本")
+        else:
+            st.caption(f"当前筛选结果共 {total} 条样本")
+
+        if st.button("开始导出", key="filter.export_button"):
             selected_ids = sorted(view.selected_ids)
-            if selected_ids:
+            if export_scope == "selected" and not selected_ids:
+                st.warning("当前没有勾选样本可导出")
+            else:
+                filter_spec = _build_export_filter_spec(view.criteria, selected_ids if export_scope == "selected" else None)
                 with st.spinner("导出中..."):
                     try:
-                        placeholders = ", ".join(["?"] * len(selected_ids))
-                        output_path = "data/exported_selected.jsonl"
-                        exporter = JSONLExporter(store)
-                        count = exporter.export(Path(output_path), filter_query=f"id IN ({placeholders})", filter_params=selected_ids)
+                        exporter = UnifiedExporter(store)
+                        count = exporter.export(
+                            ExportRequest(
+                                output_path=Path(output_path),
+                                export_format=export_format,
+                                filter_spec=filter_spec,
+                            )
+                        )
                         st.success(f"成功导出 {count} 条数据到 {output_path}")
                     except Exception as exc:
                         st.error(f"导出失败: {str(exc)}")
-            else:
-                st.warning("请先选择要导出的记录")
 
     def on_detail(sample_id: int) -> None:
         go_to_detail(st.query_params, sample_id, route.active_main_page)
@@ -200,3 +241,34 @@ def render(route: RouteState):
     )
 
     store.close()
+
+
+def _build_export_filter_spec(criteria: FilterCriteria, selected_ids: list[int] | None = None) -> ExportFilterSpec:
+    empty_response = None
+    if criteria.empty_response_scope == "empty_only":
+        empty_response = True
+    elif criteria.empty_response_scope == "non_empty_only":
+        empty_response = False
+
+    session_merge_keep = None
+    if criteria.session_merge_scope == "keep":
+        session_merge_keep = True
+    elif criteria.session_merge_scope == "merged":
+        session_merge_keep = False
+
+    return ExportFilterSpec(
+        helpful_op=criteria.helpful_op,
+        helpful_val=criteria.helpful_val,
+        satisfied_op=criteria.satisfied_op,
+        satisfied_val=criteria.satisfied_val,
+        negative_feedback_op=criteria.negative_feedback_op,
+        negative_feedback_val=criteria.negative_feedback_val,
+        empty_response=empty_response,
+        session_merge_keep=session_merge_keep,
+        session_merge_status=None if criteria.session_merge_status == "all" else criteria.session_merge_status,
+        num_turns_min=criteria.num_turns_min,
+        num_turns_max=criteria.num_turns_max,
+        date_from=criteria.date_from,
+        date_to=criteria.date_to,
+        selected_ids=[] if selected_ids is None else selected_ids,
+    )

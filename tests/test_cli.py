@@ -5,6 +5,7 @@ import tempfile
 import duckdb
 
 from claw_data_filter.cli import cli
+from claw_data_filter.exporters.unified_exporter import OPENAI_ROUND_FEEDBACK
 from claw_data_filter.importers.jsonl_importer import JSONLImporter
 
 
@@ -205,3 +206,42 @@ def test_filter_command_accepts_negative_feedback_rate(tmp_path, monkeypatch):
 
     assert result.exit_code == 0
     assert output_file.exists()
+
+
+def test_filter_command_accepts_openai_round_feedback_export(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    Path("data").mkdir()
+
+    db_path = Path("data/cli_filter_feedback.duckdb")
+    input_file = Path("data/input_feedback.jsonl")
+    output_file = Path("data/output_feedback.jsonl")
+
+    input_file.write_text(
+        '{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"hi"}]}\n',
+        encoding="utf-8",
+    )
+
+    importer = JSONLImporter(db_path)
+    try:
+        importer.import_file(input_file)
+    finally:
+        importer.close()
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "--db-path",
+            str(db_path),
+            "filter",
+            "--export-format",
+            OPENAI_ROUND_FEEDBACK,
+            "--export",
+            str(output_file),
+        ],
+        obj={},
+    )
+
+    assert result.exit_code == 0
+    payload = output_file.read_text(encoding="utf-8").splitlines()[0]
+    assert '"schema": "openai_round_feedback_v1"' in payload

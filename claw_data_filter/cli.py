@@ -8,9 +8,14 @@ from pathlib import Path
 import click
 
 from claw_data_filter.config import Config
-from claw_data_filter.exporters.jsonl_exporter import JSONLExporter
 from claw_data_filter.exporters.report_exporter import ReportExporter
-from claw_data_filter.filters.query import ComparisonOp, FilterQueryBuilder
+from claw_data_filter.exporters.unified_exporter import (
+    OPENAI_ROUND_FEEDBACK,
+    RAW_JSONL,
+    ExportFilterSpec,
+    ExportRequest,
+    UnifiedExporter,
+)
 from claw_data_filter.importers.jsonl_importer import JSONLImporter
 from claw_data_filter.storage.duckdb_store import DuckDBStore
 
@@ -62,66 +67,62 @@ def import_cmd(ctx, input_file):
 @click.option("--session-merge-keep", type=bool, help="Filter by session merge keep marker (true/false)")
 @click.option("--session-merge-status", type=click.Choice(["keep", "merged", "skipped", "unmarked"]), help="Filter by session merge status")
 @click.option("--has-error", type=bool, help="Filter by has error (true/false)")
+@click.option(
+    "--export-format",
+    type=click.Choice([RAW_JSONL, OPENAI_ROUND_FEEDBACK]),
+    default=RAW_JSONL,
+    show_default=True,
+    help="Export format",
+)
 @click.option("--export", type=click.Path(), required=True, help="Output JSONL file")
 @click.option("--report", type=click.Path(), help="Output report JSON file")
 @click.option("--limit", type=int, help="Limit number of results")
 @click.pass_context
-def filter_cmd(ctx, response_helpful_rate, user_satisfied_rate, user_negative_feedback_rate, empty_response, session_merge_keep, session_merge_status, has_error, export, report, limit):
+def filter_cmd(ctx, response_helpful_rate, user_satisfied_rate, user_negative_feedback_rate, empty_response, session_merge_keep, session_merge_status, has_error, export_format, export, report, limit):
     """Filter samples and export to JSONL with optional report."""
     config = ctx.obj["config"]
 
     RATE_PATTERN = re.compile(r"^(>=|<=|>|<|!=|=)\s*([\d.]+)$")
 
-    builder = FilterQueryBuilder()
+    filter_spec = ExportFilterSpec(
+        empty_response=empty_response,
+        session_merge_keep=session_merge_keep,
+        session_merge_status=session_merge_status,
+        has_error=has_error,
+    )
     if response_helpful_rate:
         match = RATE_PATTERN.match(response_helpful_rate.strip())
         if match:
-            op_str, value_str = match.groups()
-            op = ComparisonOp(op_str)
-            value = float(value_str)
-            builder.add_condition("response_helpful_rate", op, value)
+            filter_spec.helpful_op, value_str = match.groups()
+            filter_spec.helpful_val = float(value_str)
         else:
             raise ValueError(f"Invalid response-helpful-rate expression: {response_helpful_rate}")
     if user_satisfied_rate:
         match = RATE_PATTERN.match(user_satisfied_rate.strip())
         if match:
-            op_str, value_str = match.groups()
-            op = ComparisonOp(op_str)
-            value = float(value_str)
-            builder.add_condition("user_satisfied_rate", op, value)
+            filter_spec.satisfied_op, value_str = match.groups()
+            filter_spec.satisfied_val = float(value_str)
         else:
             raise ValueError(f"Invalid user-satisfied-rate expression: {user_satisfied_rate}")
     if user_negative_feedback_rate:
         match = RATE_PATTERN.match(user_negative_feedback_rate.strip())
         if match:
-            op_str, value_str = match.groups()
-            op = ComparisonOp(op_str)
-            value = float(value_str)
-            builder.add_condition("user_negative_feedback_rate", op, value)
+            filter_spec.negative_feedback_op, value_str = match.groups()
+            filter_spec.negative_feedback_val = float(value_str)
         else:
             raise ValueError(f"Invalid user-negative-feedback-rate expression: {user_negative_feedback_rate}")
-    if empty_response is not None:
-        builder.add_condition("empty_response", ComparisonOp("="), empty_response)
-    if session_merge_status and session_merge_status != "unmarked":
-        builder.add_condition("session_merge_status", ComparisonOp("="), session_merge_status)
-    if has_error is not None:
-        builder.add_condition("has_error", ComparisonOp("="), has_error)
-
-    where_clause, where_params = builder.build_parameterized_where_clause()
-    extra_clauses = []
-    if session_merge_keep is True:
-        extra_clauses.append("COALESCE(session_merge_keep, TRUE) = TRUE")
-    elif session_merge_keep is False:
-        extra_clauses.append("session_merge_keep = FALSE")
-    if session_merge_status == "unmarked":
-        extra_clauses.append("session_merge_status IS NULL")
-    if extra_clauses:
-        where_clause = " AND ".join([where_clause, *extra_clauses]) if where_clause != "1=1" else " AND ".join(extra_clauses)
 
     store = DuckDBStore(config.db_path)
     try:
-        exporter = JSONLExporter(store)
-        count = exporter.export(Path(export), filter_query=where_clause, filter_params=where_params, limit=limit)
+        exporter = UnifiedExporter(store)
+        count = exporter.export(
+            ExportRequest(
+                output_path=Path(export),
+                export_format=export_format,
+                filter_spec=filter_spec,
+                limit=limit,
+            )
+        )
         click.echo(f"Exported {count} samples to {export}")
 
         if report:

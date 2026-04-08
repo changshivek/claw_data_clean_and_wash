@@ -2,14 +2,13 @@
 from dataclasses import dataclass
 
 
-MAIN_PAGES = ("overview", "filter", "export", "tables")
+MAIN_PAGES = ("overview", "filter", "tables")
 DETAIL_PAGE = "detail"
 DEFAULT_PAGE = "overview"
 
 PAGE_LABELS = {
     "overview": "📊 统计概览",
     "filter": "🔍 数据筛选",
-    "export": "📤 数据导出",
     "tables": "📋 数据表预览",
     "detail": "📄 Sample 详情",
 }

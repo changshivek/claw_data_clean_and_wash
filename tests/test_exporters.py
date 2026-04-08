@@ -1,18 +1,25 @@
 """Tests for exporters."""
 import json
 from pathlib import Path
-from claw_data_filter.exporters.jsonl_exporter import JSONLExporter
 from claw_data_filter.exporters.report_exporter import ReportExporter
+from claw_data_filter.exporters.unified_exporter import (
+    OPENAI_ROUND_FEEDBACK,
+    RAW_JSONL,
+    ExportFilterSpec,
+    ExportRequest,
+    UnifiedExporter,
+)
 from claw_data_filter.storage.duckdb_store import DuckDBStore
 from claw_data_filter.models.sample import Sample
+from claw_data_filter.models.round_judgment import RoundJudgment
 
 # Use data directory for tests
 TEST_DATA_DIR = Path(__file__).parent.parent / "data"
 TEST_DATA_DIR.mkdir(exist_ok=True)
 
 
-def test_jsonl_export():
-    """Test exporting samples to JSONL."""
+def test_raw_jsonl_export():
+    """Test exporting raw samples to JSONL."""
     db_path = TEST_DATA_DIR / "test_export.duckdb"
     output_path = TEST_DATA_DIR / "test_output.jsonl"
 
@@ -30,8 +37,8 @@ def test_jsonl_export():
     store.insert_sample(sample)
 
     # Export
-    exporter = JSONLExporter(store)
-    count = exporter.export(output_path)
+    exporter = UnifiedExporter(store)
+    count = exporter.export(ExportRequest(output_path=output_path, export_format=RAW_JSONL))
 
     assert count == 1
     with open(output_path) as f:
@@ -41,11 +48,11 @@ def test_jsonl_export():
         assert "messages" in data
 
     store.close()
-    print("test_jsonl_export passed")
+    print("test_raw_jsonl_export passed")
 
 
-def test_jsonl_export_with_filter():
-    """Test exporting with filter query."""
+def test_raw_jsonl_export_with_filter():
+    """Test exporting with structured filter spec."""
     db_path = TEST_DATA_DIR / "test_export_filter.duckdb"
     output_path = TEST_DATA_DIR / "test_output_filter.jsonl"
 
@@ -66,13 +73,233 @@ def test_jsonl_export_with_filter():
         store.update_sample_tool_stats(sample_id, tool_stats)
 
     # Export with filter
-    exporter = JSONLExporter(store)
-    count = exporter.export(output_path, filter_query="json_extract(samples.tool_stats, '$.response_helpful_rate') >= 0.7")
+    exporter = UnifiedExporter(store)
+    count = exporter.export(
+        ExportRequest(
+            output_path=output_path,
+            export_format=RAW_JSONL,
+            filter_spec=ExportFilterSpec(helpful_op=">=", helpful_val=0.7),
+        )
+    )
 
     assert count == 2  # rates 0.9 and 0.7
 
     store.close()
-    print("test_jsonl_export_with_filter passed")
+    print("test_raw_jsonl_export_with_filter passed")
+
+
+def test_openai_round_feedback_export_includes_turn_ranges_and_judgments():
+    """Test exporting OpenAI-compatible payloads with sidecar round feedback."""
+    db_path = TEST_DATA_DIR / "test_export_feedback.duckdb"
+    output_path = TEST_DATA_DIR / "test_output_feedback.jsonl"
+
+    if db_path.exists():
+        db_path.unlink()
+    if output_path.exists():
+        output_path.unlink()
+
+    store = DuckDBStore(db_path)
+    sample_id = store.insert_sample(
+        Sample.from_dict(
+            {
+                "messages": [
+                    {"role": "user", "content": "hello"},
+                    {"role": "assistant", "content": "hi"},
+                    {"role": "user", "content": "next"},
+                    {"role": "assistant", "content": "done"},
+                ],
+                "metadata": {"source": "unit-test"},
+            }
+        )
+    )
+    store.insert_turn_judgment(
+        RoundJudgment(
+            sample_id=sample_id,
+            turn_index=0,
+            response_helpful="yes",
+            user_satisfied="neutral",
+            signal_from_users=["next"],
+            llm_error=False,
+        )
+    )
+    exporter = UnifiedExporter(store)
+    count = exporter.export(ExportRequest(output_path=output_path, export_format=OPENAI_ROUND_FEEDBACK))
+
+    assert count == 1
+    payload = json.loads(output_path.read_text(encoding="utf-8").splitlines()[0])
+    assert payload["schema"] == "openai_round_feedback_v1"
+    assert payload["conversation"]["messages"][0]["role"] == "user"
+    assert payload["round_feedback"]["turns"][0] == {
+        "turn_index": 0,
+        "message_start_index": 0,
+        "message_end_index": 1,
+        "response_helpful": "yes",
+        "user_satisfied": "neutral",
+        "signal_from_users": ["next"],
+        "llm_error": False,
+    }
+    assert payload["round_feedback"]["turns"][1]["message_start_index"] == 2
+    assert payload["source_metadata"]["metadata"] == {"source": "unit-test"}
+
+    store.close()
+
+
+def test_openai_round_feedback_export_converts_anthropic_system_and_tools():
+    """Test Anthropic request-level system and tools are preserved in exported OpenAI-compatible payloads."""
+    db_path = TEST_DATA_DIR / "test_export_anthropic_request.duckdb"
+    output_path = TEST_DATA_DIR / "test_output_anthropic_request.jsonl"
+
+    if db_path.exists():
+        db_path.unlink()
+    if output_path.exists():
+        output_path.unlink()
+
+    store = DuckDBStore(db_path)
+    sample_id = store.insert_sample(
+        Sample.from_dict(
+            {
+                "request": {
+                    "bodyJson": {
+                        "system": [
+                            {"type": "text", "text": "You are a coding assistant."},
+                            {"type": "text", "text": "Answer in Chinese."},
+                        ],
+                        "tools": [
+                            {
+                                "name": "read_file",
+                                "description": "Read a file",
+                                "input_schema": {
+                                    "type": "object",
+                                    "properties": {"path": {"type": "string"}},
+                                    "required": ["path"],
+                                },
+                            }
+                        ],
+                        "messages": [
+                            {"role": "user", "content": [{"type": "text", "text": "hello"}]},
+                            {
+                                "role": "assistant",
+                                "content": [
+                                    {"type": "text", "text": "我先读文件。"},
+                                    {
+                                        "type": "tool_use",
+                                        "id": "toolu_1",
+                                        "name": "read_file",
+                                        "input": {"path": "/tmp/demo.txt"},
+                                    },
+                                ],
+                            },
+                            {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "tool_result",
+                                        "tool_use_id": "toolu_1",
+                                        "content": "demo",
+                                    }
+                                ],
+                            },
+                        ],
+                    }
+                }
+            }
+        )
+    )
+    store.insert_turn_judgment(
+        RoundJudgment(
+            sample_id=sample_id,
+            turn_index=0,
+            response_helpful="yes",
+            user_satisfied="yes",
+            signal_from_users=[],
+            llm_error=False,
+        )
+    )
+
+    exporter = UnifiedExporter(store)
+    count = exporter.export(ExportRequest(output_path=output_path, export_format=OPENAI_ROUND_FEEDBACK))
+
+    assert count == 1
+    payload = json.loads(output_path.read_text(encoding="utf-8").splitlines()[0])
+    assert payload["conversation"]["messages"][0] == {
+        "role": "system",
+        "content": "You are a coding assistant.\n\nAnswer in Chinese.",
+    }
+    assert payload["conversation"]["tools"] == [
+        {
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "description": "Read a file",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                },
+            },
+        }
+    ]
+    assert payload["conversation"]["messages"][2]["tool_calls"][0]["function"]["name"] == "read_file"
+    assert payload["conversation"]["messages"][3] == {
+        "role": "tool",
+        "tool_call_id": "toolu_1",
+        "content": "demo",
+    }
+
+    store.close()
+
+
+def test_openai_round_feedback_export_preserves_openai_tools():
+    """Test OpenAI request-level tools are preserved as-is in exported payloads."""
+    db_path = TEST_DATA_DIR / "test_export_openai_tools.duckdb"
+    output_path = TEST_DATA_DIR / "test_output_openai_tools.jsonl"
+
+    if db_path.exists():
+        db_path.unlink()
+    if output_path.exists():
+        output_path.unlink()
+
+    raw = {
+        "request": {
+            "bodyJson": {
+                "messages": [
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": "hello"},
+                    {"role": "assistant", "content": "hi"},
+                ],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "lookup",
+                            "description": "Lookup a value",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"key": {"type": "string"}},
+                                "required": ["key"],
+                            },
+                        },
+                    }
+                ],
+            }
+        }
+    }
+
+    store = DuckDBStore(db_path)
+    store.insert_sample(Sample.from_dict(raw))
+
+    exporter = UnifiedExporter(store)
+    count = exporter.export(ExportRequest(output_path=output_path, export_format=OPENAI_ROUND_FEEDBACK))
+
+    assert count == 1
+    payload = json.loads(output_path.read_text(encoding="utf-8").splitlines()[0])
+    assert payload["conversation"]["messages"][0] == {
+        "role": "system",
+        "content": "You are a helpful assistant.",
+    }
+    assert payload["conversation"]["tools"] == raw["request"]["bodyJson"]["tools"]
+
+    store.close()
 
 
 def test_report_generation():
@@ -137,8 +364,8 @@ def test_report_export():
     print("test_report_export passed")
 
 
-def test_jsonl_exporter_no_filter():
-    """Test exporter works without evaluations table"""
+def test_unified_exporter_no_filter():
+    """Test exporter works without requiring judgments."""
     db_path = TEST_DATA_DIR / "test_no_eval.duckdb"
     output_path = TEST_DATA_DIR / "test_no_eval.jsonl"
 
@@ -156,8 +383,8 @@ def test_jsonl_exporter_no_filter():
         store.insert_sample(sample)
 
     # Export without filter should work
-    exporter = JSONLExporter(store)
-    count = exporter.export(output_path)
+    exporter = UnifiedExporter(store)
+    count = exporter.export(ExportRequest(output_path=output_path, export_format=RAW_JSONL))
 
     assert count == 3
     with open(output_path) as f:
@@ -166,15 +393,17 @@ def test_jsonl_exporter_no_filter():
 
     # Export with id-based filter should also work
     filter_path = TEST_DATA_DIR / "test_no_eval_filtered.jsonl"
-    count_filtered = exporter.export(filter_path, filter_query="id > 0")
+    count_filtered = exporter.export(
+        ExportRequest(output_path=filter_path, export_format=RAW_JSONL, filter_spec=ExportFilterSpec(selected_ids=[1, 2, 3]))
+    )
     assert count_filtered == 3
 
     store.close()
-    print("test_jsonl_exporter_no_filter passed")
+    print("test_unified_exporter_no_filter passed")
 
 
-def test_jsonl_export_with_parameterized_filter():
-    """Test exporter accepts parameterized WHERE clause and params."""
+def test_unified_export_preview_supports_estimation():
+    """Test preview returns count and estimated bytes."""
     db_path = TEST_DATA_DIR / "test_export_params.duckdb"
     output_path = TEST_DATA_DIR / "test_output_params.jsonl"
 
@@ -197,46 +426,22 @@ def test_jsonl_export_with_parameterized_filter():
         }
         store.update_sample_tool_stats(sample_id, tool_stats)
 
-    exporter = JSONLExporter(store)
-    count = exporter.export(
-        output_path,
-        filter_query="CAST(json_extract(samples.tool_stats, '$.response_helpful_rate') AS DOUBLE) >= ?",
-        filter_params=[0.8],
-    )
+    exporter = UnifiedExporter(store)
+    preview = exporter.preview(ExportFilterSpec(helpful_op=">=", helpful_val=0.8))
 
-    assert count == 1
-    store.close()
-
-
-def test_jsonl_export_rejects_injection_like_filter():
-    """Test raw string filters with dangerous tokens are rejected."""
-    db_path = TEST_DATA_DIR / "test_export_injection.duckdb"
-    output_path = TEST_DATA_DIR / "test_output_injection.jsonl"
-
-    if db_path.exists():
-        db_path.unlink()
-    if output_path.exists():
-        output_path.unlink()
-
-    store = DuckDBStore(db_path)
-    store.insert_sample(Sample.from_dict({"messages": [{"role": "user", "content": "Hi"}]}))
-    exporter = JSONLExporter(store)
-
-    try:
-        exporter.export(output_path, filter_query="1=1; DROP TABLE samples")
-        assert False, "Should have rejected dangerous filter query"
-    except ValueError:
-        pass
-
+    assert preview["count"] == 1
+    assert preview["estimated_bytes"] > 0
     store.close()
 
 
 if __name__ == "__main__":
-    test_jsonl_export()
-    test_jsonl_export_with_filter()
+    test_raw_jsonl_export()
+    test_raw_jsonl_export_with_filter()
+    test_openai_round_feedback_export_includes_turn_ranges_and_judgments()
+    test_openai_round_feedback_export_converts_anthropic_system_and_tools()
+    test_openai_round_feedback_export_preserves_openai_tools()
     test_report_generation()
     test_report_export()
-    test_jsonl_exporter_no_filter()
-    test_jsonl_export_with_parameterized_filter()
-    test_jsonl_export_rejects_injection_like_filter()
+    test_unified_exporter_no_filter()
+    test_unified_export_preview_supports_estimation()
     print("All exporter tests passed!")

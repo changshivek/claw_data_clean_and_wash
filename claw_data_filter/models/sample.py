@@ -23,6 +23,62 @@ def extract_messages_from_payload(data: dict[str, Any]) -> list[dict[str, Any]]:
     return []
 
 
+def extract_request_body_json(data: dict[str, Any]) -> dict[str, Any]:
+    """Extract request body JSON from payload when available."""
+    request = data.get("request")
+    if isinstance(request, dict):
+        body_json = request.get("bodyJson")
+        if isinstance(body_json, dict):
+            return body_json
+    return data if isinstance(data, dict) else {}
+
+
+def normalize_messages_to_openai(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Normalize supported message formats to an OpenAI-compatible message list."""
+    if _detect_format(messages) == "anthropic":
+        return _anthropic_to_openai(messages)
+    return messages
+
+
+def extract_normalized_messages_from_payload(data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Extract payload messages and normalize them to OpenAI-compatible format."""
+    messages = extract_messages_from_payload(data)
+    body_json = extract_request_body_json(data)
+
+    if _payload_looks_anthropic(body_json, messages):
+        normalized_messages = _anthropic_to_openai(messages)
+    else:
+        normalized_messages = normalize_messages_to_openai(messages)
+
+    system_messages = _extract_system_messages_from_payload(body_json)
+    return [*system_messages, *normalized_messages]
+
+
+def extract_normalized_tools_from_payload(data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Extract tool definitions and normalize them to OpenAI-compatible tools."""
+    body_json = extract_request_body_json(data)
+    tools = body_json.get("tools")
+    if not isinstance(tools, list):
+        return []
+
+    if _tools_look_like_openai(tools):
+        return tools
+    if _tools_look_like_anthropic(tools):
+        return _anthropic_tools_to_openai(tools)
+    return tools
+
+
+def extract_normalized_conversation_from_payload(data: dict[str, Any]) -> dict[str, Any]:
+    """Extract an OpenAI-compatible conversation payload including tools."""
+    conversation = {
+        "messages": extract_normalized_messages_from_payload(data),
+    }
+    tools = extract_normalized_tools_from_payload(data)
+    if tools:
+        conversation["tools"] = tools
+    return conversation
+
+
 def has_empty_response(messages: list[dict[str, Any]]) -> bool:
     """Return True when imported messages contain user input but no assistant reply."""
     has_user = False
@@ -101,6 +157,79 @@ def _detect_format(messages: list) -> str:
                     if c.get("type") == "tool_use":
                         return "anthropic"
     return "openai"
+
+
+def _payload_looks_anthropic(body_json: dict[str, Any], messages: list[dict[str, Any]]) -> bool:
+    """Detect Anthropic-style payloads using request-level fields and message blocks."""
+    if not isinstance(body_json, dict):
+        return False
+
+    if "system" in body_json:
+        return True
+
+    tools = body_json.get("tools")
+    if isinstance(tools, list) and _tools_look_like_anthropic(tools):
+        return True
+
+    return _detect_format(messages) == "anthropic"
+
+
+def _extract_system_messages_from_payload(body_json: dict[str, Any]) -> list[dict[str, Any]]:
+    """Normalize payload-level system prompts to OpenAI system messages."""
+    if not isinstance(body_json, dict) or "system" not in body_json:
+        return []
+
+    system_value = body_json.get("system")
+    if isinstance(system_value, str):
+        return [{"role": "system", "content": system_value}] if system_value else []
+
+    if isinstance(system_value, dict):
+        text = system_value.get("text") if system_value.get("type") == "text" else _extract_text_content(system_value)
+        return [{"role": "system", "content": text}] if text else []
+
+    if isinstance(system_value, list):
+        text_parts: list[str] = []
+        for part in system_value:
+            if isinstance(part, str) and part:
+                text_parts.append(part)
+            elif isinstance(part, dict) and part.get("type") == "text" and part.get("text"):
+                text_parts.append(part["text"])
+        if text_parts:
+            return [{"role": "system", "content": "\n\n".join(text_parts)}]
+
+    return []
+
+
+def _tools_look_like_openai(tools: list[dict[str, Any]]) -> bool:
+    return any(
+        isinstance(tool, dict) and (tool.get("type") == "function" or "function" in tool)
+        for tool in tools
+    )
+
+
+def _tools_look_like_anthropic(tools: list[dict[str, Any]]) -> bool:
+    return any(
+        isinstance(tool, dict) and "name" in tool and "input_schema" in tool
+        for tool in tools
+    )
+
+
+def _anthropic_tools_to_openai(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result = []
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        result.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": tool.get("name"),
+                    "description": tool.get("description", ""),
+                    "parameters": tool.get("input_schema") or {"type": "object", "properties": {}},
+                },
+            }
+        )
+    return result
 
 
 def _anthropic_to_openai(messages: list) -> list:
@@ -210,11 +339,7 @@ class Sample(BaseModel):
             ]
         }
         """
-        messages = extract_messages_from_payload(data)
-
-        # Detect and convert format if needed
-        if _detect_format(messages) == "anthropic":
-            messages = _anthropic_to_openai(messages)
+        messages = extract_normalized_messages_from_payload(data)
 
         # Extract user query (last user message)
         user_query = ""

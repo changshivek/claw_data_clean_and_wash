@@ -11,7 +11,7 @@ LLM-powered agent conversation data filtering tool. Import JSONL files, run roun
 5. round feedback 以 claim 模式批量领取 pending 或 failed 且 session_merge_keep 为 true 的样本。
 6. 按统一 turn 语义做逐轮判断，并以原子方式写回结果。
 7. 样本进入 completed 或 failed 状态。
-8. 通过 CLI 或 Web 按结构化条件、session merge 标记和 empty_response 标记筛选与导出。
+8. 通过 CLI 或 Web 筛选页按统一导出服务导出 raw_json JSONL，或导出带 round feedback 侧挂信息的 OpenAI 兼容 JSONL。
 
 ## Quick Start
 
@@ -70,12 +70,17 @@ bash scripts/run_export.sh
 - RESPONSE_HELPFUL_RATE
 - USER_SATISFIED_RATE
 - USER_NEGATIVE_FEEDBACK_RATE
+- EXPORT_FORMAT
 - SESSION_MERGE_KEEP
 - SESSION_MERGE_STATUS
 - EMPTY_RESPONSE
 - HAS_ERROR
 - LIMIT
 - GENERATE_REPORT
+
+脚本行为说明：
+- 当 `EXPORT_FORMAT=raw_jsonl` 时，默认输出文件名是 `data/exported.jsonl`。
+- 当 `EXPORT_FORMAT=openai_round_feedback` 且 `EXPORT_PATH` 仍保持默认值时，脚本会自动改写为 `data/exported_round_feedback.jsonl`，避免把两种格式写到同一个默认路径。
 
 ## 数据格式
 
@@ -261,11 +266,48 @@ claw-filter filter --response-helpful-rate ">=0.7" --user-satisfied-rate ">=0.5"
 
 # 带统计报告
 claw-filter filter --response-helpful-rate ">=0.7" --export out.jsonl --report stats.json
+
+# 导出 OpenAI 兼容 + round feedback 侧挂 JSONL
+claw-filter filter --response-helpful-rate ">=0.7" --export-format openai_round_feedback --export out.jsonl
 ```
 
 实现说明:
-- CLI filter 走参数化查询，不直接把筛选值拼接进 SQL。
+- CLI filter 和 Web 筛选页共用同一个 UnifiedExporter，不再维护两套导出链路。
+- 导出统一采用结构化筛选条件构建，不再在不同入口各自拼 SQL。
 - JSONL 导出采用临时文件写入后原子替换，避免生成半截文件。
+
+### 导出格式
+
+- `raw_jsonl`
+  每行直接导出一个 sample 的原始 `raw_json`。
+- `openai_round_feedback`
+  每行导出一个包装后的 JSON 对象，包含：
+  - `schema`: 固定为 `openai_round_feedback_v1`
+  - `metadata`: sample 级派生字段和处理状态
+  - `source_metadata`: 从原始载荷中提取的时间、model requested、user agent、request id、trace id、metadata 等来源信息
+  - `conversation.messages`: 规范化后的 OpenAI 兼容消息数组
+  - `conversation.tools`: 规范化后的工具定义数组；OpenAI 原生 `tools` 会原样保留，Anthropic request-level `tools` 会被转换为 OpenAI function tools
+  - `round_feedback.turns`: 每个 turn 的消息范围和 round feedback 结论
+
+`conversation.messages` 的规范化规则：
+- 如果源数据本身是 OpenAI 风格，原有 `messages` 会直接保留。
+- 如果源数据来自 UniRouter/Anthropic request body，顶层 `system` 会被前置转换为 OpenAI `system` message。
+- Anthropic `tool_use` / `tool_result` block 会被转换为 OpenAI 风格的 `assistant.tool_calls` 和 `tool` message。
+
+`round_feedback.turns` 中仅保留轻量侧挂信息：
+- `turn_index`
+- `message_start_index`
+- `message_end_index`
+- `response_helpful`
+- `user_satisfied`
+- `signal_from_users`
+- `llm_error`
+
+turn range 语义说明：
+- `turn_index` 仍按 judged turn 顺序编号，不会因为前置 `system` message 改变。
+- `message_start_index` 和 `message_end_index` 是基于最终导出的 `conversation.messages` 重新计算的真实数组索引。
+- 因此，如果规范化时在最前面新增了 `system` message，后续 turn 的消息范围会相应后移。
+- `conversation.tools` 不参与 range 计算，因为它不在 `messages` 数组中。
 
 ## 老库回填
 
@@ -294,17 +336,17 @@ DB_PATH=data/unirouter_20260403_512.duckdb .venv/bin/streamlit run claw_data_fil
 
 当前页面包括:
 - overview: 统计概览
-- filter: 数据筛选与导出选中
-- export: 按条件导出
+- filter: 数据筛选、勾选与统一导出
 - tables: 数据表预览
 - detail: 样本详情与逐轮 judgment 展示
 
 Web 页面说明:
 - 只保留 `app.py` 这一个 Streamlit 入口；侧边栏导航由 query params 路由驱动，不再暴露默认多页标签。
 - detail 页复用与 round feedback 相同的 turn builder。
-- filter/export 页复用统一查询语义，避免与 CLI 逻辑分叉。
+- 导出功能已并入 filter 页，不再维护独立 export 页。
+- CLI 与 Web filter 页共用 UnifiedExporter，避免导出逻辑分叉。
 - overview/filter/detail/tables 页都可以查看 session merge 标记信息。
-- overview/filter/export/detail/tables 页都已接入 empty_response 信息或过滤能力。
+- overview/filter/detail/tables 页都已接入 empty_response 信息或过滤能力。
 
 ## 目录结构
 

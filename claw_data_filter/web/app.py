@@ -71,10 +71,6 @@ elif route.page == "filter":
     from claw_data_filter.web.views import filter
 
     filter.render(route)
-elif route.page == "export":
-    from claw_data_filter.web.views import export
-
-    export.render()
 elif route.page == "tables":
     from claw_data_filter.web.views import tables
 
