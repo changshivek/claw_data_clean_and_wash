@@ -1,17 +1,8 @@
-"""Standalone session snapshot merge flow for imported DuckDB samples.
+"""Content-driven session snapshot merge for imported DuckDB samples.
 
-This module marks intermediate session snapshots in the samples table without
-changing the existing import or round-feedback pipeline. The default strategy
-is conservative:
-
-- Prefer stable session identifiers such as clientTokenId or sessionId.
-- Only collapse samples when one sample's normalized user-turn sequence is a
-  strict prefix of another sample in the same session partition.
-- Keep all leaf samples so diverging branches of a conversation are preserved.
-
-It can be executed directly:
-
-    python -m claw_data_filter.session_merge --db-path data/example.duckdb
+This module is designed to run after import and before round feedback.
+It only uses normalized real user turns to detect duplicated session snapshots,
+without relying on potentially unreliable metadata identifiers.
 """
 
 from __future__ import annotations
@@ -19,13 +10,14 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import multiprocessing
 import re
 from collections import Counter, defaultdict
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable, Iterator
+from typing import Any, Iterable
 
 import duckdb
 
@@ -40,11 +32,8 @@ WHITESPACE_RE = re.compile(r"\s+")
 @dataclass(frozen=True)
 class SessionMergeCandidate:
     sample_id: int
-    session_partition_key: str | None
     grouping_key: str | None
-    grouping_source: str
     user_turns: tuple[str, ...]
-    request_started_at: str
     message_count: int
     num_turns: int
 
@@ -61,7 +50,7 @@ class SessionMergeDecision:
 
 
 def normalize_user_text(text: str) -> str:
-    """Normalize real user text for stable prefix comparison."""
+    """Normalize real user text for stable exact-prefix comparison."""
     cleaned_lines: list[str] = []
     for raw_line in text.splitlines():
         line = raw_line.strip()
@@ -106,63 +95,30 @@ def extract_real_user_turns(payload: dict[str, Any]) -> tuple[str, ...]:
     return tuple(turns)
 
 
-def _extract_session_partition_key(payload: dict[str, Any]) -> tuple[str | None, str]:
-    log = payload.get("log") if isinstance(payload.get("log"), dict) else {}
-    client_token_id = str(log.get("clientTokenId") or "").strip()
-    session_id = str(log.get("sessionId") or "").strip()
-    user_id = str(log.get("userId") or "").strip()
-    route_path = str(log.get("routePath") or "").strip()
-
-    if client_token_id:
-        return f"clientTokenId:{client_token_id}|route:{route_path}", "client_token_id"
-    if session_id:
-        return f"sessionId:{session_id}|route:{route_path}", "session_id"
-    if user_id and route_path:
-        return f"userId:{user_id}|route:{route_path}", "user_id_route"
-    return None, "missing"
-
-
-def _extract_request_started_at(payload: dict[str, Any]) -> str:
-    log = payload.get("log") if isinstance(payload.get("log"), dict) else {}
-    value = log.get("requestStartedAt") or log.get("createdAt") or payload.get("exportedAt")
-    return str(value or "")
-
-
 def _hash_group_key(grouping_key: str) -> str:
     return hashlib.sha1(grouping_key.encode("utf-8")).hexdigest()[:16]
 
 
-def analyze_sample_row(row: tuple[int, str, int | None], allow_first_turn_fallback: bool = False) -> SessionMergeCandidate:
+def analyze_sample_row(row: tuple[int, str, int | None]) -> SessionMergeCandidate:
     sample_id, raw_json, num_turns = row
     payload = json.loads(raw_json)
     user_turns = extract_real_user_turns(payload)
-    session_partition_key, grouping_source = _extract_session_partition_key(payload)
-
-    grouping_key = session_partition_key
-    if grouping_key is None and allow_first_turn_fallback and user_turns:
-        first_turn_hash = hashlib.sha1(user_turns[0].encode("utf-8")).hexdigest()[:16]
-        grouping_key = f"firstTurn:{first_turn_hash}"
-        grouping_source = "first_turn_fallback"
-
+    first_turn = user_turns[0] if user_turns else None
     message_count = len(extract_messages_from_payload(payload))
     return SessionMergeCandidate(
         sample_id=sample_id,
-        session_partition_key=session_partition_key,
-        grouping_key=grouping_key,
-        grouping_source=grouping_source,
+        grouping_key=first_turn,
         user_turns=user_turns,
-        request_started_at=_extract_request_started_at(payload),
         message_count=message_count,
         num_turns=num_turns or 0,
     )
 
 
-def _candidate_sort_key(candidate: SessionMergeCandidate) -> tuple[int, int, int, str, int]:
+def _candidate_sort_key(candidate: SessionMergeCandidate) -> tuple[int, int, int, int]:
     return (
         len(candidate.user_turns),
         candidate.num_turns,
         candidate.message_count,
-        candidate.request_started_at,
         candidate.sample_id,
     )
 
@@ -185,7 +141,7 @@ def plan_session_merge(
     candidates: Iterable[SessionMergeCandidate],
     min_prefix_turns: int = 2,
 ) -> list[SessionMergeDecision]:
-    """Plan which samples to keep or collapse as intermediate snapshots."""
+    """Plan which samples to keep or collapse as content-prefix snapshots."""
     decisions: dict[int, SessionMergeDecision] = {}
     grouped: dict[str, list[SessionMergeCandidate]] = defaultdict(list)
 
@@ -201,21 +157,10 @@ def plan_session_merge(
                 reason="no_user_turns",
             )
             continue
-        if candidate.grouping_key is None:
-            decisions[candidate.sample_id] = SessionMergeDecision(
-                sample_id=candidate.sample_id,
-                status="skipped",
-                keep=True,
-                group_id=None,
-                group_size=1,
-                representative_id=candidate.sample_id,
-                reason="no_session_key",
-            )
-            continue
-        grouped[candidate.grouping_key].append(candidate)
+        grouped[candidate.grouping_key or ""].append(candidate)
 
     for grouping_key, group_candidates in grouped.items():
-        group_id = _hash_group_key(grouping_key)
+        group_id = _hash_group_key(grouping_key) if grouping_key else None
         group_size = len(group_candidates)
 
         if group_size == 1:
@@ -253,30 +198,20 @@ def plan_session_merge(
                 )
 
         sequences = list(unique_representatives.keys())
+        best_descendant_by_prefix: dict[tuple[str, ...], SessionMergeCandidate] = {}
+        for candidate in unique_representatives.values():
+            for prefix_len in range(min_prefix_turns, len(candidate.user_turns)):
+                prefix = candidate.user_turns[:prefix_len]
+                current = best_descendant_by_prefix.get(prefix)
+                if current is None or _candidate_sort_key(candidate) > _candidate_sort_key(current):
+                    best_descendant_by_prefix[prefix] = candidate
+
         for sequence in sorted(sequences, key=len):
             representative = unique_representatives[sequence]
             if representative.sample_id in decisions:
                 continue
 
-            descendants = [
-                unique_representatives[other_sequence]
-                for other_sequence in sequences
-                if len(other_sequence) > len(sequence)
-                and len(sequence) >= min_prefix_turns
-                and other_sequence[:len(sequence)] == sequence
-            ]
-            if descendants:
-                best_descendant = _choose_best_candidate(descendants)
-                decisions[representative.sample_id] = SessionMergeDecision(
-                    sample_id=representative.sample_id,
-                    status="merged",
-                    keep=False,
-                    group_id=group_id,
-                    group_size=group_size,
-                    representative_id=best_descendant.sample_id,
-                    reason="strict_prefix_of_longer_sequence",
-                )
-            else:
+            if len(sequence) < min_prefix_turns:
                 decisions[representative.sample_id] = SessionMergeDecision(
                     sample_id=representative.sample_id,
                     status="keep",
@@ -284,14 +219,39 @@ def plan_session_merge(
                     group_id=group_id,
                     group_size=group_size,
                     representative_id=representative.sample_id,
-                    reason="leaf_sequence",
+                    reason="below_prefix_threshold",
                 )
+                continue
+
+            winner = best_descendant_by_prefix.get(sequence)
+            if winner is not None:
+                decisions[representative.sample_id] = SessionMergeDecision(
+                    sample_id=representative.sample_id,
+                    status="merged",
+                    keep=False,
+                    group_id=group_id,
+                    group_size=group_size,
+                    representative_id=winner.sample_id,
+                    reason="strict_prefix_of_longer_sequence",
+                )
+                continue
+
+            decisions[representative.sample_id] = SessionMergeDecision(
+                sample_id=representative.sample_id,
+                status="keep",
+                keep=True,
+                group_id=group_id,
+                group_size=group_size,
+                representative_id=representative.sample_id,
+                reason="leaf_sequence",
+            )
 
     resolved: list[SessionMergeDecision] = []
-    for decision in decisions.values():
+    for sample_id in sorted(decisions):
+        decision = decisions[sample_id]
         representative_id = decision.representative_id
         if not decision.keep:
-            representative_id = _resolve_representative(decisions, representative_id)
+            representative_id = _resolve_representative(decisions, sample_id)
         resolved.append(
             SessionMergeDecision(
                 sample_id=decision.sample_id,
@@ -303,26 +263,12 @@ def plan_session_merge(
                 reason=decision.reason,
             )
         )
-
-    return sorted(resolved, key=lambda item: item.sample_id)
-
-
-def summarize_decisions(decisions: Iterable[SessionMergeDecision]) -> dict[str, int]:
-    decision_list = list(decisions)
-    reason_counts = Counter(decision.reason for decision in decision_list)
-    summary = {
-        "total_samples": len(decision_list),
-        "keep_samples": sum(1 for item in decision_list if item.keep),
-        "merged_samples": sum(1 for item in decision_list if not item.keep),
-        "groups_with_markers": sum(1 for item in decision_list if item.group_id is not None),
-    }
-    for reason, count in sorted(reason_counts.items()):
-        summary[f"reason::{reason}"] = count
-    return summary
+    return resolved
 
 
-def ensure_session_merge_columns(conn: duckdb.DuckDBPyConnection) -> None:
-    for statement in [
+def ensure_session_merge_schema(conn: duckdb.DuckDBPyConnection) -> None:
+    """Ensure samples table exposes the marker columns used by session merge."""
+    alterations = [
         "ALTER TABLE samples ADD COLUMN session_merge_status TEXT",
         "ALTER TABLE samples ADD COLUMN session_merge_keep BOOLEAN",
         "ALTER TABLE samples ADD COLUMN session_merge_group_id TEXT",
@@ -330,164 +276,152 @@ def ensure_session_merge_columns(conn: duckdb.DuckDBPyConnection) -> None:
         "ALTER TABLE samples ADD COLUMN session_merge_representative_id INTEGER",
         "ALTER TABLE samples ADD COLUMN session_merge_reason TEXT",
         "ALTER TABLE samples ADD COLUMN session_merge_updated_at TIMESTAMP",
-    ]:
+    ]
+    for sql in alterations:
         try:
-            conn.execute(statement)
+            conn.execute(sql)
         except Exception:
             pass
 
-    try:
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_samples_session_merge_keep ON samples(session_merge_keep)")
-    except Exception:
-        pass
 
-
-def iter_sample_rows(
-    conn: duckdb.DuckDBPyConnection,
-    batch_size: int,
-) -> Iterator[list[tuple[int, str, int | None]]]:
-    cursor = conn.execute("SELECT id, raw_json, num_turns FROM samples ORDER BY id")
-    while True:
-        rows = cursor.fetchmany(batch_size)
-        if not rows:
-            break
-        yield rows
-
-
-def collect_candidates(
+def _load_candidates(
     conn: duckdb.DuckDBPyConnection,
     batch_size: int,
     workers: int,
-    allow_first_turn_fallback: bool,
 ) -> list[SessionMergeCandidate]:
+    total = conn.execute("SELECT COUNT(*) FROM samples").fetchone()[0]
     candidates: list[SessionMergeCandidate] = []
-    for rows in iter_sample_rows(conn, batch_size=batch_size):
-        if workers > 1:
-            with ThreadPoolExecutor(max_workers=workers) as executor:
-                batch_candidates = list(
-                    executor.map(
-                        lambda row: analyze_sample_row(row, allow_first_turn_fallback=allow_first_turn_fallback),
-                        rows,
-                    )
-                )
-        else:
-            batch_candidates = [
-                analyze_sample_row(row, allow_first_turn_fallback=allow_first_turn_fallback)
-                for row in rows
-            ]
-        candidates.extend(batch_candidates)
+    max_workers = max(1, workers)
+    if max_workers > 1:
+        executor = ProcessPoolExecutor(
+            max_workers=max_workers,
+            mp_context=multiprocessing.get_context("spawn"),
+        )
+    else:
+        executor = ThreadPoolExecutor(max_workers=max_workers)
+    with executor:
+        for offset in range(0, total, batch_size):
+            rows = conn.execute(
+                "SELECT id, CAST(raw_json AS VARCHAR), num_turns FROM samples ORDER BY id LIMIT ? OFFSET ?",
+                [batch_size, offset],
+            ).fetchall()
+            candidates.extend(executor.map(analyze_sample_row, rows))
     return candidates
 
 
-def apply_decisions(conn: duckdb.DuckDBPyConnection, decisions: Iterable[SessionMergeDecision]) -> None:
-    ensure_session_merge_columns(conn)
-    decision_rows = [
-        (
-            decision.status,
-            decision.keep,
-            decision.group_id,
-            decision.group_size,
-            decision.representative_id,
-            decision.reason,
-            datetime.now(),
-            decision.sample_id,
-        )
-        for decision in decisions
-    ]
-
-    conn.execute("BEGIN TRANSACTION")
-    try:
-        conn.execute(
-            """
-            UPDATE samples
-            SET session_merge_status = NULL,
-                session_merge_keep = NULL,
-                session_merge_group_id = NULL,
-                session_merge_group_size = NULL,
-                session_merge_representative_id = NULL,
-                session_merge_reason = NULL,
-                session_merge_updated_at = NULL
-            """
-        )
-        conn.executemany(
-            """
-            UPDATE samples
-            SET session_merge_status = ?,
-                session_merge_keep = ?,
-                session_merge_group_id = ?,
-                session_merge_group_size = ?,
-                session_merge_representative_id = ?,
-                session_merge_reason = ?,
-                session_merge_updated_at = ?
-            WHERE id = ?
-            """,
-            decision_rows,
-        )
-        conn.execute("COMMIT")
-    except Exception:
-        conn.execute("ROLLBACK")
-        raise
+def _build_summary(decisions: list[SessionMergeDecision], total_samples: int) -> dict[str, int]:
+    status_counts = Counter(decision.status for decision in decisions)
+    reason_counts = Counter(decision.reason for decision in decisions)
+    keep_count = sum(1 for decision in decisions if decision.keep)
+    merged_count = sum(1 for decision in decisions if not decision.keep)
+    return {
+        "total_samples": total_samples,
+        "planned_samples": len(decisions),
+        "keep_count": keep_count,
+        "merged_count": merged_count,
+        "skipped_count": status_counts.get("skipped", 0),
+        "keep_status_count": status_counts.get("keep", 0),
+        "merged_status_count": status_counts.get("merged", 0),
+        "exact_duplicate_sequence": reason_counts.get("exact_duplicate_sequence", 0),
+        "strict_prefix_of_longer_sequence": reason_counts.get("strict_prefix_of_longer_sequence", 0),
+        "leaf_sequence": reason_counts.get("leaf_sequence", 0),
+        "below_prefix_threshold": reason_counts.get("below_prefix_threshold", 0),
+        "no_user_turns": reason_counts.get("no_user_turns", 0),
+        "singleton_group": reason_counts.get("singleton_group", 0),
+    }
 
 
 def run_session_merge(
-    db_path: Path,
-    batch_size: int = 128,
-    workers: int = 1,
-    min_prefix_turns: int = 2,
-    allow_first_turn_fallback: bool = False,
+    db_path: Path | str,
+    *,
     dry_run: bool = False,
+    batch_size: int = 512,
+    workers: int = 4,
+    min_prefix_turns: int = 2,
 ) -> dict[str, int]:
-    conn = duckdb.connect(str(db_path), read_only=dry_run)
+    """Analyze imported samples and mark which session snapshots should flow onward."""
+    conn = duckdb.connect(str(db_path))
     try:
-        candidates = collect_candidates(
-            conn,
-            batch_size=batch_size,
-            workers=workers,
-            allow_first_turn_fallback=allow_first_turn_fallback,
-        )
+        ensure_session_merge_schema(conn)
+        total_samples = conn.execute("SELECT COUNT(*) FROM samples").fetchone()[0]
+        candidates = _load_candidates(conn, batch_size=batch_size, workers=workers)
         decisions = plan_session_merge(candidates, min_prefix_turns=min_prefix_turns)
-        summary = summarize_decisions(decisions)
-        if not dry_run:
-            apply_decisions(conn, decisions)
+        summary = _build_summary(decisions, total_samples)
+        if dry_run:
+            return summary
+
+        updated_at = datetime.now()
+        conn.execute("BEGIN TRANSACTION")
+        try:
+            conn.execute(
+                """
+                UPDATE samples
+                SET session_merge_status = NULL,
+                    session_merge_keep = NULL,
+                    session_merge_group_id = NULL,
+                    session_merge_group_size = NULL,
+                    session_merge_representative_id = NULL,
+                    session_merge_reason = NULL,
+                    session_merge_updated_at = NULL
+                """
+            )
+            conn.executemany(
+                """
+                UPDATE samples
+                SET session_merge_status = ?,
+                    session_merge_keep = ?,
+                    session_merge_group_id = ?,
+                    session_merge_group_size = ?,
+                    session_merge_representative_id = ?,
+                    session_merge_reason = ?,
+                    session_merge_updated_at = ?
+                WHERE id = ?
+                """,
+                [
+                    (
+                        decision.status,
+                        decision.keep,
+                        decision.group_id,
+                        decision.group_size,
+                        decision.representative_id,
+                        decision.reason,
+                        updated_at,
+                        decision.sample_id,
+                    )
+                    for decision in decisions
+                ],
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
         return summary
     finally:
         conn.close()
 
 
-def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Mark intermediate session snapshots in samples table.")
-    parser.add_argument("--db-path", required=True, type=Path, help="DuckDB path to process")
-    parser.add_argument("--batch-size", type=int, default=128, help="Rows fetched from DuckDB per batch")
-    parser.add_argument("--workers", type=int, default=1, help="Thread workers for per-batch JSON parsing")
-    parser.add_argument(
-        "--min-prefix-turns",
-        type=int,
-        default=2,
-        help="Minimum shared user-turn count before a shorter sample can be collapsed into a longer one",
-    )
-    parser.add_argument(
-        "--allow-first-turn-fallback",
-        action="store_true",
-        help="When stable session keys are missing, use the first user turn to build candidate groups",
-    )
-    parser.add_argument("--dry-run", action="store_true", help="Only compute and print summary without writing markers")
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Merge content-prefix session snapshots in DuckDB samples")
+    parser.add_argument("--db-path", required=True, help="DuckDB database path")
+    parser.add_argument("--batch-size", type=int, default=512, help="Batch size when scanning samples")
+    parser.add_argument("--workers", type=int, default=4, help="Worker count for JSON analysis")
+    parser.add_argument("--min-prefix-turns", type=int, default=2, help="Minimum shared user turns before collapsing a strict prefix")
+    parser.add_argument("--dry-run", action="store_true", help="Only print the merge summary without writing markers")
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = build_arg_parser()
-    args = parser.parse_args(argv)
+def main() -> None:
+    parser = _build_parser()
+    args = parser.parse_args()
     summary = run_session_merge(
-        db_path=args.db_path,
+        args.db_path,
+        dry_run=args.dry_run,
         batch_size=args.batch_size,
         workers=args.workers,
         min_prefix_turns=args.min_prefix_turns,
-        allow_first_turn_fallback=args.allow_first_turn_fallback,
-        dry_run=args.dry_run,
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
-    return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()

@@ -183,6 +183,29 @@ def test_claim_unprocessed_samples_marks_processing():
         store.close()
 
 
+def test_claim_unprocessed_samples_skips_session_merged_rows():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "claim_session_merge.db"
+        store = DuckDBStore(db_path)
+        sample_id = store.insert_sample(Sample.from_dict({
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi"},
+            ]
+        }))
+        store.conn.execute(
+            "UPDATE samples SET session_merge_keep = false, session_merge_status = 'merged', session_merge_representative_id = ? WHERE id = ?",
+            [sample_id, sample_id],
+        )
+
+        claimed = store.claim_unprocessed_samples(limit=10)
+
+        assert claimed == []
+        row = store.conn.execute("SELECT processing_status FROM samples WHERE id = ?", [sample_id]).fetchone()
+        assert row[0] == "pending"
+        store.close()
+
+
 def test_partially_processed_sample_remains_unprocessed():
     """Test samples with missing judgments are still returned for processing."""
     from claw_data_filter.models.round_judgment import RoundJudgment
@@ -316,6 +339,13 @@ def test_samples_schema_removed_unused_columns_and_added_uid():
         assert "response_unhelpful_rate" in column_names
         assert "user_satisfied_rate" in column_names
         assert "user_negative_feedback_rate" in column_names
+        assert "session_merge_status" in column_names
+        assert "session_merge_keep" in column_names
+        assert "session_merge_group_id" in column_names
+        assert "session_merge_group_size" in column_names
+        assert "session_merge_representative_id" in column_names
+        assert "session_merge_reason" in column_names
+        assert "session_merge_updated_at" in column_names
         assert "task_type" not in column_names
         assert "has_error" not in column_names
         store.close()

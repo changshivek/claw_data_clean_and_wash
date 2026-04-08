@@ -39,6 +39,13 @@ class DuckDBStore:
                 user_negative_feedback_rate DOUBLE,
                 imported_at TIMESTAMP,
                 tool_stats JSON,
+                session_merge_status TEXT,
+                session_merge_keep BOOLEAN,
+                session_merge_group_id TEXT,
+                session_merge_group_size INTEGER,
+                session_merge_representative_id INTEGER,
+                session_merge_reason TEXT,
+                session_merge_updated_at TIMESTAMP,
                 processing_status TEXT,
                 processing_updated_at TIMESTAMP
             )
@@ -79,6 +86,34 @@ class DuckDBStore:
             pass
         try:
             self.conn.execute("ALTER TABLE samples ADD COLUMN user_negative_feedback_rate DOUBLE")
+        except:
+            pass
+        try:
+            self.conn.execute("ALTER TABLE samples ADD COLUMN session_merge_status TEXT")
+        except:
+            pass
+        try:
+            self.conn.execute("ALTER TABLE samples ADD COLUMN session_merge_keep BOOLEAN")
+        except:
+            pass
+        try:
+            self.conn.execute("ALTER TABLE samples ADD COLUMN session_merge_group_id TEXT")
+        except:
+            pass
+        try:
+            self.conn.execute("ALTER TABLE samples ADD COLUMN session_merge_group_size INTEGER")
+        except:
+            pass
+        try:
+            self.conn.execute("ALTER TABLE samples ADD COLUMN session_merge_representative_id INTEGER")
+        except:
+            pass
+        try:
+            self.conn.execute("ALTER TABLE samples ADD COLUMN session_merge_reason TEXT")
+        except:
+            pass
+        try:
+            self.conn.execute("ALTER TABLE samples ADD COLUMN session_merge_updated_at TIMESTAMP")
         except:
             pass
 
@@ -417,6 +452,7 @@ class DuckDBStore:
                 SELECT id, raw_json
                 FROM samples
                 WHERE COALESCE(processing_status, 'pending') IN ('pending', 'failed')
+                                    AND COALESCE(session_merge_keep, TRUE) = TRUE
                 ORDER BY id
                 LIMIT ?
                 """,
@@ -444,6 +480,7 @@ class DuckDBStore:
             SELECT s.id, s.raw_json
             FROM samples s
             WHERE COALESCE(s.processing_status, 'pending') IN ('pending', 'failed')
+                            AND COALESCE(s.session_merge_keep, TRUE) = TRUE
             ORDER BY s.id
             LIMIT ?
             """,
