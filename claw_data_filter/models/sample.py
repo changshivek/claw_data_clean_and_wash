@@ -23,6 +23,22 @@ def extract_messages_from_payload(data: dict[str, Any]) -> list[dict[str, Any]]:
     return []
 
 
+def has_empty_response(messages: list[dict[str, Any]]) -> bool:
+    """Return True when imported messages contain user input but no assistant reply."""
+    has_user = False
+    has_assistant = False
+
+    for message in messages:
+        role = message.get("role")
+        if role == "user":
+            if _extract_text_content(message.get("content")):
+                has_user = True
+        elif role == "assistant":
+            has_assistant = True
+
+    return has_user and not has_assistant
+
+
 def generate_sample_uid(data: dict[str, Any]) -> str:
     """Generate a stable, collision-resistant sample uid from raw payload."""
     canonical = json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -174,6 +190,7 @@ class Sample(BaseModel):
     num_turns: int = 0
     expected_judgment_count: int = 0
     num_tool_calls: int = 0
+    empty_response: bool = False
     has_error: bool = False
     imported_at: datetime = Field(default_factory=datetime.now)
 
@@ -247,5 +264,6 @@ class Sample(BaseModel):
             num_turns=num_turns,
             expected_judgment_count=expected_judgment_count,
             num_tool_calls=num_tool_calls,
+            empty_response=has_empty_response(messages),
             has_error=has_error,
         )

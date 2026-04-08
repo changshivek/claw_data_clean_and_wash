@@ -10,6 +10,7 @@ ALLOWED_FIELDS = frozenset([
     "response_unhelpful_rate",
     "user_satisfied_rate",
     "user_negative_feedback_rate",
+    "empty_response",
     "session_merge_keep",
     "session_merge_status",
     "session_merge_reason",
@@ -50,6 +51,8 @@ def _field_sql_expression(field: str, table_name: str = "samples") -> str:
         return f"{table_name}.user_satisfied_rate"
     if field == "user_negative_feedback_rate":
         return f"{table_name}.user_negative_feedback_rate"
+    if field == "empty_response":
+        return f"{table_name}.empty_response"
     if field == "session_merge_keep":
         return f"{table_name}.session_merge_keep"
     if field == "session_merge_status":

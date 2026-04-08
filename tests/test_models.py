@@ -155,6 +155,24 @@ def test_sample_from_unirouter_payload():
     assert sample.assistant_response == "2+2 is 4."
     assert sample.num_turns == 1
     assert sample.expected_judgment_count == 1
+    assert sample.empty_response is False
+
+
+def test_sample_marks_empty_response_when_only_user_messages_exist():
+    raw = {
+        "request": {
+            "bodyJson": {
+                "messages": [
+                    {"role": "user", "content": "只有用户输入"},
+                ]
+            }
+        }
+    }
+
+    sample = Sample.from_dict(raw)
+
+    assert sample.empty_response is True
+    assert sample.num_turns == 0
 
 
 def test_sample_num_turns_ignores_unanswered_user_messages():

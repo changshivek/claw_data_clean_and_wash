@@ -2,7 +2,8 @@
 import streamlit as st
 
 from claw_data_filter.storage.duckdb_store import DuckDBStore
-from claw_data_filter.web.config import DB_PATH
+from claw_data_filter.web.components.page_shell import render_page_header
+from claw_data_filter.web.config import get_active_db_path
 from claw_data_filter.web.services.detail_builder import build_sample_detail_view
 from claw_data_filter.web.state.models import PAGE_LABELS, RouteState
 from claw_data_filter.web.state.router import go_back
@@ -23,14 +24,17 @@ def _render_expandable_text(label: str, text: str, preview_limit: int, key: str)
 
 
 def render(route: RouteState):
-    st.title("Sample 详情")
+    render_page_header(
+        "Sample 详情",
+        "查看样本级元数据、session merge 标记、empty response 状态，以及与 round feedback 同语义的逐轮对话上下文。",
+        "Detail",
+    )
 
     if route.sample_id is None:
         st.error("未指定 sample_id")
         return
 
-    store = DuckDBStore(DB_PATH, read_only=True)
-
+    store = DuckDBStore(get_active_db_path(st.session_state), read_only=True)
     sample = store.get_sample_by_id(route.sample_id)
 
     if not sample:
@@ -40,8 +44,6 @@ def render(route: RouteState):
 
     detail = build_sample_detail_view(sample, store.get_turn_judgments(route.sample_id))
 
-    # Info card
-    st.markdown("### 基本信息")
     col1, col2, col3, col4, col5, col6 = st.columns(6)
     col1.markdown(f"**sample_id:** {detail.sample_id}")
     col2.markdown(f"**judged_turns:** {detail.num_turns}")
@@ -52,6 +54,7 @@ def render(route: RouteState):
 
     st.caption(f"sample_uid: {detail.sample_uid}")
     st.caption(f"processing_status: {detail.processing_status}")
+    st.caption(f"empty_response: {detail.empty_response}")
     st.caption(
         "session_merge: "
         f"status={detail.session_merge_status or 'unmarked'}, "
@@ -64,17 +67,18 @@ def render(route: RouteState):
     st.divider()
 
     col_back, _ = st.columns([1, 4])
-    back_target = route.back_target
-    back_label = PAGE_LABELS[back_target]
+    back_label = PAGE_LABELS[route.back_target]
     if col_back.button(f"← 返回{back_label}"):
         go_back(st.query_params, route)
         st.rerun()
 
     st.markdown("### Turn 数据")
 
-    # Render turns
     if not detail.turns:
-        st.info("没有找到对话记录")
+        if detail.empty_response:
+            st.info("该样本已标记为 empty_response：导入数据中只有 user，没有 assistant。")
+        else:
+            st.info("没有找到对话记录")
         store.close()
         return
 

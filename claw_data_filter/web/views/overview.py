@@ -1,21 +1,26 @@
 """Statistics overview page."""
 import streamlit as st
+
 from claw_data_filter.storage.duckdb_store import DuckDBStore
-from claw_data_filter.web.config import DB_PATH
+from claw_data_filter.web.components.page_shell import render_page_header
+from claw_data_filter.web.config import get_active_db_path
 from claw_data_filter.web.services.overview_service import get_processing_status_counts, get_session_merge_counts
 
 
 def render():
-    st.title("统计概览")
+    render_page_header(
+        "统计概览",
+        "从样本规模、处理状态、session merge 和 empty response 四个层面快速了解当前数据库的整体质量。",
+        "Overview",
+    )
 
-    store = DuckDBStore(DB_PATH, read_only=True)
+    store = DuckDBStore(get_active_db_path(st.session_state), read_only=True)
     stats = store.get_stats()
     processed_count = store.get_processed_count()
     status_counts = get_processing_status_counts(store)
     merge_counts = get_session_merge_counts(store)
 
     col1, col2, col3, col4 = st.columns(4)
-
     col1.metric("总样本数", stats["total_samples"])
     col2.metric("已处理", processed_count)
     col3.metric("平均 Helpful Rate", f"{stats['avg_response_helpful_rate']:.2f}")
@@ -31,16 +36,18 @@ def render():
 
     st.divider()
 
-    col9, col10, _, _ = st.columns(4)
+    col9, col10, col11 = st.columns(3)
     col9.metric("Pending", status_counts["pending"])
     col10.metric("Processing", status_counts["processing"])
+    col11.metric("Completed", status_counts["completed"])
 
     st.divider()
 
-    col11, col12, col13, col14 = st.columns(4)
-    col11.metric("Merge Keep", merge_counts["keep"])
-    col12.metric("Merge Merged", merge_counts["merged"])
-    col13.metric("Merge Skipped", merge_counts["skipped"])
-    col14.metric("Merge Unmarked", merge_counts["unmarked"])
+    col12, col13, col14, col15, col16 = st.columns(5)
+    col12.metric("Merge Keep", merge_counts["keep"])
+    col13.metric("Merge Merged", merge_counts["merged"])
+    col14.metric("Merge Skipped", merge_counts["skipped"])
+    col15.metric("Merge Unmarked", merge_counts["unmarked"])
+    col16.metric("Empty Response", merge_counts["empty_response"])
 
     store.close()

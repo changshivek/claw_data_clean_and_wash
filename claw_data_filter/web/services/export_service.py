@@ -16,6 +16,10 @@ def build_export_where_clause(criteria: FilterCriteria) -> tuple[str, list[Any]]
         builder.add_condition("user_satisfied_rate", ComparisonOp(criteria.satisfied_op), criteria.satisfied_val)
     if criteria.negative_feedback_val is not None:
         builder.add_condition("user_negative_feedback_rate", ComparisonOp(criteria.negative_feedback_op), criteria.negative_feedback_val)
+    if criteria.empty_response_scope == "empty_only":
+        builder.add_condition("empty_response", ComparisonOp.EQ, True)
+    elif criteria.empty_response_scope == "non_empty_only":
+        builder.add_condition("empty_response", ComparisonOp.EQ, False)
     if criteria.num_turns_min is not None and criteria.num_turns_min > 0:
         builder.add_condition("num_turns", ComparisonOp.GTE, criteria.num_turns_min)
     if criteria.num_turns_max is not None and criteria.num_turns_max < 100:

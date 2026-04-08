@@ -120,3 +120,46 @@ def test_get_filtered_samples_supports_session_merge_filters():
         assert len(rows) == 1
         assert rows[0]["id"] == merged_id
         store.close()
+
+
+def test_get_filtered_samples_supports_empty_response_scope():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        store = DuckDBStore(Path(tmpdir) / "filtered_empty_response.duckdb")
+        empty_id = store.insert_sample(
+            Sample.from_dict(
+                {
+                    "messages": [
+                        {"role": "user", "content": "keep me out"},
+                    ]
+                }
+            )
+        )
+        normal_id = store.insert_sample(
+            Sample.from_dict(
+                {
+                    "messages": [
+                        {"role": "user", "content": "keep me in"},
+                        {"role": "assistant", "content": "answer"},
+                    ]
+                }
+            )
+        )
+
+        empty_rows, empty_total = get_filtered_samples(
+            store,
+            FilterCriteria(helpful_val=None, satisfied_val=None, empty_response_scope="empty_only"),
+            page_index=1,
+            page_size=20,
+        )
+        normal_rows, normal_total = get_filtered_samples(
+            store,
+            FilterCriteria(helpful_val=None, satisfied_val=None, empty_response_scope="non_empty_only"),
+            page_index=1,
+            page_size=20,
+        )
+
+        assert empty_total == 1
+        assert empty_rows[0]["id"] == empty_id
+        assert normal_total == 1
+        assert normal_rows[0]["id"] == normal_id
+        store.close()

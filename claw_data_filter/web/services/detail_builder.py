@@ -35,6 +35,7 @@ def build_sample_detail_view(
     return SampleDetailView(
         sample_id=sample_record["id"],
         sample_uid=sample_record.get("sample_uid") or "-",
+        empty_response=bool(sample_record.get("empty_response")),
         num_turns=sample_record.get("num_turns") or 0,
         expected_judgment_count=sample_record.get("expected_judgment_count") or len(turns),
         num_tool_calls=sample_record.get("num_tool_calls") or 0,

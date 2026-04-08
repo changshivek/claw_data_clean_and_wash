@@ -32,19 +32,20 @@ def render_samples_table(
 
     # Table header
     if show_checkboxes:
-        header_cols = st.columns([0.5, 0.7, 0.8, 1.2, 0.8, 1, 0.8, 0.8, 1])
+        header_cols = st.columns([0.5, 0.7, 0.8, 0.9, 1.2, 0.8, 1, 0.8, 0.8, 1])
         header_cols[0].markdown("**选择**")
         header_cols[1].markdown("**ID**")
         header_cols[2].markdown("**judged_turns**")
-        header_cols[3].markdown("**merge**")
-        header_cols[4].markdown("**helpful**")
-        header_cols[5].markdown("**status**")
-        header_cols[6].markdown("**satisfied**")
-        header_cols[7].markdown("**has_error**")
-        header_cols[8].markdown("**操作**")
+        header_cols[3].markdown("**empty**")
+        header_cols[4].markdown("**merge**")
+        header_cols[5].markdown("**helpful**")
+        header_cols[6].markdown("**status**")
+        header_cols[7].markdown("**satisfied**")
+        header_cols[8].markdown("**has_error**")
+        header_cols[9].markdown("**操作**")
     else:
-        cols = st.columns([0.7, 0.8, 1.2, 0.8, 1, 0.8, 0.8, 1])
-        headers = ["ID", "judged_turns", "merge", "helpful_rate", "status", "satisfied_rate", "has_error", "操作"]
+        cols = st.columns([0.7, 0.8, 0.9, 1.2, 0.8, 1, 0.8, 0.8, 1])
+        headers = ["ID", "judged_turns", "empty", "merge", "helpful_rate", "status", "satisfied_rate", "has_error", "操作"]
         for col, header in zip(cols, headers):
             col.markdown(f"**{header}**")
 
@@ -53,8 +54,9 @@ def render_samples_table(
         merge_status = sample.get("session_merge_status") or "unmarked"
         merge_reason = sample.get("session_merge_reason")
         merge_text = merge_status if not merge_reason else f"{merge_status}/{merge_reason}"
+        empty_response_text = "✓" if sample.get("empty_response") else "-"
         if show_checkboxes:
-            cols = st.columns([0.5, 0.7, 0.8, 1.2, 0.8, 1, 0.8, 0.8, 1])
+            cols = st.columns([0.5, 0.7, 0.8, 0.9, 1.2, 0.8, 1, 0.8, 0.8, 1])
             checked = cols[0].checkbox("", key=f"select_{sample['id']}", value=sample["id"] in current_selected)
             if checked:
                 next_selected.add(sample["id"])
@@ -62,23 +64,25 @@ def render_samples_table(
                 next_selected.discard(sample["id"])
             cols[1].write(sample["id"])
             cols[2].write(sample.get("num_turns", 0))
+            cols[3].write(empty_response_text)
+            cols[4].write(merge_text)
+            cols[5].write(f"{sample.get('helpful_rate', 0):.2f}")
+            cols[6].write(sample.get("processing_status", "pending"))
+            cols[7].write(f"{sample.get('satisfied_rate', 0):.2f}")
+            cols[8].write("✓" if sample.get("has_error") else "-")
+            if cols[9].button("详情", key=f"detail_{sample['id']}"):
+                on_detail_click(sample["id"])
+        else:
+            cols = st.columns([0.7, 0.8, 0.9, 1.2, 0.8, 1, 0.8, 0.8, 1])
+            cols[0].write(sample["id"])
+            cols[1].write(sample.get("num_turns", 0))
+            cols[2].write(empty_response_text)
             cols[3].write(merge_text)
             cols[4].write(f"{sample.get('helpful_rate', 0):.2f}")
             cols[5].write(sample.get("processing_status", "pending"))
             cols[6].write(f"{sample.get('satisfied_rate', 0):.2f}")
             cols[7].write("✓" if sample.get("has_error") else "-")
             if cols[8].button("详情", key=f"detail_{sample['id']}"):
-                on_detail_click(sample["id"])
-        else:
-            cols = st.columns([0.7, 0.8, 1.2, 0.8, 1, 0.8, 0.8, 1])
-            cols[0].write(sample["id"])
-            cols[1].write(sample.get("num_turns", 0))
-            cols[2].write(merge_text)
-            cols[3].write(f"{sample.get('helpful_rate', 0):.2f}")
-            cols[4].write(sample.get("processing_status", "pending"))
-            cols[5].write(f"{sample.get('satisfied_rate', 0):.2f}")
-            cols[6].write("✓" if sample.get("has_error") else "-")
-            if cols[7].button("详情", key=f"detail_{sample['id']}"):
                 on_detail_click(sample["id"])
 
     if on_selection_change and next_selected != current_selected:

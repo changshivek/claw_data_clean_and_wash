@@ -61,6 +61,7 @@ run_cli() {
 
 echo "[1/5] Importing data: ${INPUT_FILE}"
 run_cli import "${INPUT_FILE}"
+echo "      Import step will also persist empty_response markers for user-only samples"
 
 if [[ "${RUN_PRESSURE_TEST}" == "true" ]]; then
   echo "[2/5] Running pressure test"

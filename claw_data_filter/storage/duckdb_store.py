@@ -30,6 +30,7 @@ class DuckDBStore:
                 raw_json JSON,
                 user_query TEXT,
                 assistant_response TEXT,
+                empty_response BOOLEAN,
                 num_turns INTEGER,
                 expected_judgment_count INTEGER,
                 num_tool_calls INTEGER,
@@ -60,6 +61,10 @@ class DuckDBStore:
             self.conn.execute("ALTER TABLE samples ADD COLUMN sample_uid TEXT")
         except:
             pass  # Column may already exist (ignore error)
+        try:
+            self.conn.execute("ALTER TABLE samples ADD COLUMN empty_response BOOLEAN")
+        except:
+            pass
         try:
             self.conn.execute("ALTER TABLE samples ADD COLUMN expected_judgment_count INTEGER")
         except:
@@ -121,6 +126,7 @@ class DuckDBStore:
             "UPDATE samples SET processing_status = COALESCE(processing_status, 'pending'), processing_updated_at = COALESCE(processing_updated_at, imported_at, CURRENT_TIMESTAMP)"
         )
         self.conn.execute("UPDATE samples SET sample_uid = COALESCE(sample_uid, sha256(CAST(raw_json AS VARCHAR)))")
+        self.conn.execute("UPDATE samples SET empty_response = COALESCE(empty_response, FALSE)")
         self.conn.execute("UPDATE samples SET num_turns = COALESCE(expected_judgment_count, num_turns)")
         self.conn.execute(
             """
@@ -256,8 +262,8 @@ class DuckDBStore:
 
         self.conn.execute(
             """
-            INSERT INTO samples (id, sample_uid, raw_json, user_query, assistant_response, num_turns, expected_judgment_count, num_tool_calls, imported_at, processing_status, processing_updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO samples (id, sample_uid, raw_json, user_query, assistant_response, empty_response, num_turns, expected_judgment_count, num_tool_calls, imported_at, processing_status, processing_updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 sample_id,
@@ -265,6 +271,7 @@ class DuckDBStore:
                 json.dumps(sample.raw_json),
                 sample.user_query,
                 sample.assistant_response,
+                sample.empty_response,
                 sample.num_turns,
                 sample.expected_judgment_count,
                 sample.num_tool_calls,
@@ -276,31 +283,32 @@ class DuckDBStore:
         return sample_id
 
     def _build_sample_record(self, row: tuple[Any, ...]) -> dict[str, Any]:
-        tool_stats = json.loads(row[12]) if row[12] else None
+        tool_stats = json.loads(row[13]) if row[13] else None
         return {
             "id": row[0],
             "sample_uid": row[1],
             "raw_json": json.loads(row[2]) if row[2] else {},
             "user_query": row[3],
             "assistant_response": row[4],
-            "num_turns": row[5] or 0,
-            "expected_judgment_count": row[6] or 0,
-            "num_tool_calls": row[7] or 0,
+            "empty_response": bool(row[5]),
+            "num_turns": row[6] or 0,
+            "expected_judgment_count": row[7] or 0,
+            "num_tool_calls": row[8] or 0,
             "has_error": (tool_stats or {}).get("has_error", False),
             "tool_stats": tool_stats,
-            "session_merge_status": row[13],
-            "session_merge_keep": row[14],
-            "session_merge_group_id": row[15],
-            "session_merge_group_size": row[16],
-            "session_merge_representative_id": row[17],
-            "session_merge_reason": row[18],
-            "session_merge_updated_at": row[19],
-            "processing_status": row[20] or "pending",
-            "processing_updated_at": row[21],
-            "helpful_rate": row[8] if row[8] is not None else (tool_stats or {}).get("response_helpful_rate", 0),
-            "unhelpful_rate": row[9] if row[9] is not None else (tool_stats or {}).get("response_unhelpful_rate", 0),
-            "satisfied_rate": row[10] if row[10] is not None else (tool_stats or {}).get("user_satisfied_rate", 0),
-            "negative_feedback_rate": row[11] if row[11] is not None else (tool_stats or {}).get("user_negative_feedback_rate", 0),
+            "session_merge_status": row[14],
+            "session_merge_keep": row[15],
+            "session_merge_group_id": row[16],
+            "session_merge_group_size": row[17],
+            "session_merge_representative_id": row[18],
+            "session_merge_reason": row[19],
+            "session_merge_updated_at": row[20],
+            "processing_status": row[21] or "pending",
+            "processing_updated_at": row[22],
+            "helpful_rate": row[9] if row[9] is not None else (tool_stats or {}).get("response_helpful_rate", 0),
+            "unhelpful_rate": row[10] if row[10] is not None else (tool_stats or {}).get("response_unhelpful_rate", 0),
+            "satisfied_rate": row[11] if row[11] is not None else (tool_stats or {}).get("user_satisfied_rate", 0),
+            "negative_feedback_rate": row[12] if row[12] is not None else (tool_stats or {}).get("user_negative_feedback_rate", 0),
         }
 
     def get_samples(self, limit: int = 100, offset: int = 0) -> list[Sample]:
@@ -499,7 +507,7 @@ class DuckDBStore:
         """Get a sample record with parsed JSON fields."""
         row = self.conn.execute(
             """
-             SELECT id, sample_uid, raw_json, user_query, assistant_response, num_turns, expected_judgment_count,
+             SELECT id, sample_uid, raw_json, user_query, assistant_response, empty_response, num_turns, expected_judgment_count,
                  num_tool_calls, response_helpful_rate, response_unhelpful_rate, user_satisfied_rate,
                  user_negative_feedback_rate, tool_stats, session_merge_status, session_merge_keep,
                  session_merge_group_id, session_merge_group_size, session_merge_representative_id,
@@ -521,6 +529,7 @@ class DuckDBStore:
         negative_feedback_rate_val: float | None = None,
         session_merge_keep: bool | None = None,
         session_merge_status: str | None = None,
+        empty_response: bool | None = None,
         has_error: bool | None = None,
         num_turns_min: int | None = None,
         num_turns_max: int | None = None,
@@ -540,6 +549,8 @@ class DuckDBStore:
             builder.add_condition("user_negative_feedback_rate", ComparisonOp(negative_feedback_rate_op), negative_feedback_rate_val)
         if session_merge_status and session_merge_status != "unmarked":
             builder.add_condition("session_merge_status", ComparisonOp.EQ, session_merge_status)
+        if empty_response is not None:
+            builder.add_condition("empty_response", ComparisonOp.EQ, empty_response)
         if has_error is not None:
             builder.add_condition("has_error", ComparisonOp.EQ, has_error)
         if num_turns_min is not None:
@@ -571,7 +582,7 @@ class DuckDBStore:
         total = total_row[0] if total_row else 0
 
         query = f"""
-             SELECT id, sample_uid, raw_json, user_query, assistant_response, num_turns, expected_judgment_count,
+             SELECT id, sample_uid, raw_json, user_query, assistant_response, empty_response, num_turns, expected_judgment_count,
                  num_tool_calls, response_helpful_rate, response_unhelpful_rate, user_satisfied_rate,
                  user_negative_feedback_rate, tool_stats, session_merge_status, session_merge_keep,
                  session_merge_group_id, session_merge_group_size, session_merge_representative_id,
@@ -593,7 +604,8 @@ class DuckDBStore:
                 SUM(CASE WHEN COALESCE(session_merge_keep, TRUE) THEN 1 ELSE 0 END) AS keep_count,
                 SUM(CASE WHEN session_merge_keep = FALSE THEN 1 ELSE 0 END) AS merged_count,
                 SUM(CASE WHEN session_merge_status = 'skipped' THEN 1 ELSE 0 END) AS skipped_count,
-                SUM(CASE WHEN session_merge_status IS NULL THEN 1 ELSE 0 END) AS unmarked_count
+                SUM(CASE WHEN session_merge_status IS NULL THEN 1 ELSE 0 END) AS unmarked_count,
+                SUM(CASE WHEN empty_response = TRUE THEN 1 ELSE 0 END) AS empty_response_count
             FROM samples
             """
         ).fetchone()
@@ -603,6 +615,7 @@ class DuckDBStore:
             "merged": int(row[2] or 0),
             "skipped": int(row[3] or 0),
             "unmarked": int(row[4] or 0),
+            "empty_response": int(row[5] or 0),
         }
 
     def get_table_list(self) -> list[str]:

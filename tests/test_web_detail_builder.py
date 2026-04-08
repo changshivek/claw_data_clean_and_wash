@@ -54,6 +54,7 @@ def test_build_sample_detail_view_uses_turn_context_grouping():
 
     assert detail.sample_id == 3
     assert detail.sample_uid == "uid-3"
+    assert detail.empty_response is False
     assert detail.session_merge_status == "keep"
     assert detail.session_merge_reason == "leaf_sequence"
     assert len(detail.turns) == 2
@@ -68,6 +69,7 @@ def test_build_sample_detail_view_handles_missing_judgment():
     sample_record = {
         "id": 8,
         "sample_uid": "uid-8",
+        "empty_response": True,
         "raw_json": {
             "messages": [
                 {"role": "user", "content": "hello"},
@@ -85,6 +87,7 @@ def test_build_sample_detail_view_handles_missing_judgment():
 
     assert len(detail.turns) == 1
     assert detail.sample_uid == "uid-8"
+    assert detail.empty_response is True
     assert detail.session_merge_status is None
     assert detail.turns[0].response_helpful is None
     assert detail.turns[0].user_satisfied is None

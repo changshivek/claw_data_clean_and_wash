@@ -1,11 +1,13 @@
 """Data export page."""
 import json
 from datetime import date
-import streamlit as st
 from pathlib import Path
 
+import streamlit as st
+
 from claw_data_filter.storage.duckdb_store import DuckDBStore
-from claw_data_filter.web.config import DB_PATH
+from claw_data_filter.web.components.page_shell import render_page_header
+from claw_data_filter.web.config import get_active_db_path
 from claw_data_filter.web.services.export_service import fetch_export_rows, preview_export
 from claw_data_filter.web.view_models.filter_list_view import FilterCriteria
 
@@ -28,13 +30,17 @@ def _format_size(num_bytes: int) -> str:
 
 
 def render():
-    st.title("数据导出")
+    render_page_header(
+        "数据导出",
+        "复用与筛选页完全一致的查询语义，先预览数量和大小，再导出 JSONL 或生成统计报告。",
+        "Export",
+    )
 
-    store = DuckDBStore(DB_PATH, read_only=True)
+    store = DuckDBStore(get_active_db_path(st.session_state), read_only=True)
     criteria = FilterCriteria()
 
-    # Filter controls
     with st.form("export_form"):
+        empty_response_options = ["all", "empty_only", "non_empty_only"]
         merge_scope_options = ["all", "keep", "merged"]
         merge_status_options = ["all", "keep", "merged", "skipped", "unmarked"]
         col1, col2, col3 = st.columns(3)
@@ -60,8 +66,19 @@ def render():
             date_defaults.append(parsed_date_to)
         date_range = col6.date_input("日期范围", value=date_defaults, key="export.date_range")
 
-        col7, col8, _ = st.columns(3)
-        session_merge_scope = col7.selectbox(
+        col7, col8, col9 = st.columns(3)
+        empty_response_scope = col7.selectbox(
+            "Empty Response",
+            empty_response_options,
+            index=0,
+            key="export.empty_response_scope",
+            format_func=lambda value: {
+                "all": "全部样本",
+                "empty_only": "仅 empty response",
+                "non_empty_only": "排除 empty response",
+            }[value],
+        )
+        session_merge_scope = col8.selectbox(
             "Session Merge 范围",
             merge_scope_options,
             index=0,
@@ -72,7 +89,7 @@ def render():
                 "merged": "仅已合并样本",
             }[value],
         )
-        session_merge_status = col8.selectbox(
+        session_merge_status = col9.selectbox(
             "Session Merge 状态",
             merge_status_options,
             index=0,
@@ -88,7 +105,6 @@ def render():
 
         output_path = st.text_input("输出文件路径", value="data/exported.jsonl", key="export.output_path")
 
-        # Field selection
         st.markdown("**选择导出字段**")
         col_f1, col_f2 = st.columns(2)
         export_raw_json = col_f1.checkbox("raw_json", value=True, key="export.raw_json")
@@ -107,6 +123,7 @@ def render():
         satisfied_val=satisfied_val,
         negative_feedback_op=negative_feedback_op,
         negative_feedback_val=negative_feedback_val,
+        empty_response_scope=empty_response_scope,
         session_merge_scope=session_merge_scope,
         session_merge_status=session_merge_status,
         num_turns_min=num_turns_min,
@@ -118,14 +135,11 @@ def render():
     if preview:
         with st.spinner("加载中..."):
             preview_data = preview_export(store, criteria)
-            st.info(
-                f"预览: 将导出 {preview_data['count']} 条数据，估算文件大小约 {_format_size(int(preview_data['estimated_bytes']))}"
-            )
+            st.info(f"预览: 将导出 {preview_data['count']} 条数据，估算文件大小约 {_format_size(int(preview_data['estimated_bytes']))}")
 
     if export:
         with st.spinner("导出中..."):
             try:
-                # Build column list based on selection
                 columns = ["raw_json"]
                 if export_tool_stats:
                     columns.append("tool_stats")
@@ -137,21 +151,21 @@ def render():
                 output.parent.mkdir(parents=True, exist_ok=True)
 
                 count = 0
-                with open(output, "w", encoding="utf-8") as f:
+                with open(output, "w", encoding="utf-8") as file_handle:
                     for row in rows:
                         data = {}
-                        for i, col in enumerate(columns):
+                        for index, col in enumerate(columns):
                             if col == "raw_json":
-                                data[col] = json.loads(row[i]) if row[i] else {}
+                                data[col] = json.loads(row[index]) if row[index] else {}
                             elif col == "tool_stats":
-                                data[col] = json.loads(row[i]) if row[i] else {}
+                                data[col] = json.loads(row[index]) if row[index] else {}
                             else:
-                                data[col] = row[i]
-                        f.write(json.dumps(data, ensure_ascii=False) + "\n")
+                                data[col] = row[index]
+                        file_handle.write(json.dumps(data, ensure_ascii=False) + "\n")
                         count += 1
 
                 st.success(f"成功导出 {count} 条数据到 {output_path}")
-            except Exception as e:
-                st.error(f"导出失败: {str(e)}")
+            except Exception as exc:
+                st.error(f"导出失败: {str(exc)}")
 
     store.close()

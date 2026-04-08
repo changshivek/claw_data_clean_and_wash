@@ -14,6 +14,13 @@ def get_filtered_samples(
     """Fetch a single page of filtered sample records."""
     session_merge_keep: bool | None = None
     session_merge_status: str | None = None
+    empty_response: bool | None = None
+
+    if criteria.empty_response_scope == "empty_only":
+        empty_response = True
+    elif criteria.empty_response_scope == "non_empty_only":
+        empty_response = False
+
     if criteria.session_merge_scope == "keep":
         session_merge_keep = True
     elif criteria.session_merge_scope == "merged":
@@ -28,6 +35,7 @@ def get_filtered_samples(
         satisfied_rate_val=criteria.satisfied_val,
         negative_feedback_rate_op=criteria.negative_feedback_op,
         negative_feedback_rate_val=criteria.negative_feedback_val,
+        empty_response=empty_response,
         session_merge_keep=session_merge_keep,
         session_merge_status=session_merge_status,
         num_turns_min=criteria.num_turns_min,
@@ -64,7 +72,7 @@ def get_table_preview(
     if table_name == "samples":
         query = """
             SELECT id, num_turns, expected_judgment_count, num_tool_calls,
-                   processing_status, session_merge_status, session_merge_keep,
+                 empty_response, processing_status, session_merge_status, session_merge_keep,
                    session_merge_reason, imported_at,
                    response_helpful_rate AS helpful_rate,
                    user_satisfied_rate AS satisfied_rate
@@ -79,6 +87,7 @@ def get_table_preview(
             "num_turns",
             "expected_judgment_count",
             "num_tool_calls",
+            "empty_response",
             "processing_status",
             "session_merge_status",
             "session_merge_keep",

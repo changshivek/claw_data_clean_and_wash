@@ -58,6 +58,7 @@ def import_cmd(ctx, input_file):
 @click.option("--response-helpful-rate", type=str, help="Filter by response helpful rate (e.g., '>=0.7')")
 @click.option("--user-satisfied-rate", type=str, help="Filter by user satisfied rate (e.g., '>=0.7')")
 @click.option("--user-negative-feedback-rate", type=str, help="Filter by user negative feedback rate (e.g., '>=0.3')")
+@click.option("--empty-response", type=bool, help="Filter by empty response marker (true/false)")
 @click.option("--session-merge-keep", type=bool, help="Filter by session merge keep marker (true/false)")
 @click.option("--session-merge-status", type=click.Choice(["keep", "merged", "skipped", "unmarked"]), help="Filter by session merge status")
 @click.option("--has-error", type=bool, help="Filter by has error (true/false)")
@@ -65,7 +66,7 @@ def import_cmd(ctx, input_file):
 @click.option("--report", type=click.Path(), help="Output report JSON file")
 @click.option("--limit", type=int, help="Limit number of results")
 @click.pass_context
-def filter_cmd(ctx, response_helpful_rate, user_satisfied_rate, user_negative_feedback_rate, session_merge_keep, session_merge_status, has_error, export, report, limit):
+def filter_cmd(ctx, response_helpful_rate, user_satisfied_rate, user_negative_feedback_rate, empty_response, session_merge_keep, session_merge_status, has_error, export, report, limit):
     """Filter samples and export to JSONL with optional report."""
     config = ctx.obj["config"]
 
@@ -99,6 +100,8 @@ def filter_cmd(ctx, response_helpful_rate, user_satisfied_rate, user_negative_fe
             builder.add_condition("user_negative_feedback_rate", op, value)
         else:
             raise ValueError(f"Invalid user-negative-feedback-rate expression: {user_negative_feedback_rate}")
+    if empty_response is not None:
+        builder.add_condition("empty_response", ComparisonOp("="), empty_response)
     if session_merge_status and session_merge_status != "unmarked":
         builder.add_condition("session_merge_status", ComparisonOp("="), session_merge_status)
     if has_error is not None:

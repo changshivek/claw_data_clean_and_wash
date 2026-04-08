@@ -6,11 +6,12 @@ LLM-powered agent conversation data filtering tool. Import JSONL files, run roun
 
 1. 导入 OpenAI 或 UniRouter 对话数据。
 2. 将样本写入 DuckDB，并生成稳定的 sample_uid 与本地整数 id。
-3. session merge 按真实 user turns 检测并折叠会话快照重复，只保留应继续流转的样本。
-4. round feedback 以 claim 模式批量领取 pending 或 failed 且 session_merge_keep 为 true 的样本。
-5. 按统一 turn 语义做逐轮判断，并以原子方式写回结果。
-6. 样本进入 completed 或 failed 状态。
-7. 通过 CLI 或 Web 按结构化条件和 session merge 标记筛选与导出。
+3. 对导入消息中只有 user、没有 assistant 的样本打标 empty_response=true。
+4. session merge 按真实 user turns 检测并折叠会话快照重复，只保留应继续流转的样本。
+5. round feedback 以 claim 模式批量领取 pending 或 failed 且 session_merge_keep 为 true 的样本。
+6. 按统一 turn 语义做逐轮判断，并以原子方式写回结果。
+7. 样本进入 completed 或 failed 状态。
+8. 通过 CLI 或 Web 按结构化条件、session merge 标记和 empty_response 标记筛选与导出。
 
 ## Quick Start
 
@@ -69,6 +70,9 @@ bash scripts/run_export.sh
 - RESPONSE_HELPFUL_RATE
 - USER_SATISFIED_RATE
 - USER_NEGATIVE_FEEDBACK_RATE
+- SESSION_MERGE_KEEP
+- SESSION_MERGE_STATUS
+- EMPTY_RESPONSE
 - HAS_ERROR
 - LIMIT
 - GENERATE_REPORT
@@ -101,8 +105,9 @@ UniRouter 格式自动从 request.bodyJson.messages 提取:
 ```
 
 说明:
-- 导入阶段会统一提取消息并生成 user_query、assistant_response、num_turns、expected_judgment_count 等派生字段。
+- 导入阶段会统一提取消息并生成 user_query、assistant_response、num_turns、expected_judgment_count、empty_response 等派生字段。
 - 导入阶段还会基于原始 payload 生成 SHA-256 的 sample_uid，用作稳定、低碰撞的导入身份；整数 id 继续作为本地关系键。
+- 当导入数据中存在 user 消息但没有 assistant 消息时，会标记 empty_response=true，便于后续筛除这类样本。
 - judged turn 不是简单按 assistant 消息数计算，而是按同一 user 下的 assistant/tool/assistant 序列合并后的轮次计算。
 
 ## 样本状态
@@ -178,6 +183,7 @@ turn 语义说明:
 | response_unhelpful_rate | samples | helpful=no 比例，分母为 yes+no |
 | user_satisfied_rate | samples | satisfied=yes 比例，分母为 yes+no+neutral |
 | user_negative_feedback_rate | samples | satisfied=no 比例，分母为 yes+no+neutral |
+| empty_response | samples | 导入消息中是否只有 user、没有 assistant |
 | num_turns | samples | 轮次数 |
 | has_error | samples.tool_stats | round feedback 是否含错误 |
 
@@ -190,7 +196,7 @@ rate 计算说明:
 主要表:
 
 - samples
-  记录 sample_uid、原始 JSON、派生字段、四个显式 rate 列、session_merge 标记列、tool_stats、processing_status 等样本级信息。
+  记录 sample_uid、原始 JSON、empty_response 在内的派生字段、四个显式 rate 列、session_merge 标记列、tool_stats、processing_status 等样本级信息。
 - turn_judgments
   记录每个 judged turn 的 response_helpful、user_satisfied、signal_from_users、llm_error。
 
@@ -244,6 +250,9 @@ claw-filter filter --user-negative-feedback-rate ">=0.3" --export out.jsonl
 # 仅导出 session merge 保留样本
 claw-filter filter --session-merge-keep true --export out.jsonl
 
+# 仅导出 empty response 样本
+claw-filter filter --empty-response true --export out.jsonl
+
 # 仅导出 session merge 标记为 merged 的样本
 claw-filter filter --session-merge-status merged --export out.jsonl
 
@@ -258,9 +267,30 @@ claw-filter filter --response-helpful-rate ">=0.7" --export out.jsonl --report s
 - CLI filter 走参数化查询，不直接把筛选值拼接进 SQL。
 - JSONL 导出采用临时文件写入后原子替换，避免生成半截文件。
 
+## 老库回填
+
+对已存在的 DuckDB，可用一次性脚本按导入阶段同样的规则回填 empty_response：
+
+```bash
+# 只看回填摘要，不写库
+.venv/bin/python scripts/mark_empty_response.py --db-path data/unirouter_20260403_512.duckdb --dry-run
+
+# 正式回填
+.venv/bin/python scripts/mark_empty_response.py --db-path data/unirouter_20260403_512.duckdb
+```
+
 ## Web 页面
 
-项目已包含基于 Streamlit 的可视化页面，页面与后端使用同一套查询和 turn 语义。
+项目已包含基于 Streamlit 的单入口可视化工作台，页面与后端使用同一套查询和 turn 语义。
+
+启动方式：
+
+```bash
+DB_PATH=data/unirouter_20260403_512.duckdb .venv/bin/streamlit run claw_data_filter/web/app.py --server.port 5000
+```
+
+运行后可以在侧边栏查看当前数据库文件，并直接输入新的 DuckDB 路径点击“加载数据库”切换，无需重启 Web。
+当前 Web 固定使用浅色主题，不依赖 light/dark 模式切换。
 
 当前页面包括:
 - overview: 统计概览
@@ -270,9 +300,11 @@ claw-filter filter --response-helpful-rate ">=0.7" --export out.jsonl --report s
 - detail: 样本详情与逐轮 judgment 展示
 
 Web 页面说明:
+- 只保留 `app.py` 这一个 Streamlit 入口；侧边栏导航由 query params 路由驱动，不再暴露默认多页标签。
 - detail 页复用与 round feedback 相同的 turn builder。
 - filter/export 页复用统一查询语义，避免与 CLI 逻辑分叉。
 - overview/filter/detail/tables 页都可以查看 session merge 标记信息。
+- overview/filter/export/detail/tables 页都已接入 empty_response 信息或过滤能力。
 
 ## 目录结构
 
@@ -287,7 +319,7 @@ claw_data_filter/
 ├── filters/            # 筛选查询
 ├── exporters/          # 导出
 ├── llm/                # LLM 客户端
-└── web/                # Streamlit 可视化页面
+└── web/                # Streamlit 单入口工作台与共享视图组件
 ```
 
 ## 开发

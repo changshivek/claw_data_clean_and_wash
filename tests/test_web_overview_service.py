@@ -90,8 +90,9 @@ def test_get_session_merge_counts_returns_merge_buckets():
         )
         store.conn.execute("UPDATE samples SET session_merge_status = 'keep', session_merge_keep = TRUE WHERE id = ?", [keep_id])
         store.conn.execute("UPDATE samples SET session_merge_status = 'merged', session_merge_keep = FALSE WHERE id = ?", [merged_id])
+        store.conn.execute("UPDATE samples SET empty_response = TRUE WHERE id = ?", [merged_id])
 
         counts = get_session_merge_counts(store)
 
-        assert counts == {"total": 2, "keep": 1, "merged": 1, "skipped": 0, "unmarked": 0}
+        assert counts == {"total": 2, "keep": 1, "merged": 1, "skipped": 0, "unmarked": 0, "empty_response": 1}
         store.close()

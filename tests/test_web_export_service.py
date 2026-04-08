@@ -20,6 +20,7 @@ def test_build_export_where_clause_includes_dates_and_tool_stats():
         satisfied_val=0.5,
         negative_feedback_op=">=",
         negative_feedback_val=0.2,
+        empty_response_scope="non_empty_only",
         session_merge_scope="keep",
         session_merge_status="keep",
         date_from="2026-04-01",
@@ -29,11 +30,12 @@ def test_build_export_where_clause_includes_dates_and_tool_stats():
     where_clause, params = build_export_where_clause(criteria)
 
     assert "tool_stats IS NOT NULL" in where_clause
+    assert "empty_response = ?" in where_clause
     assert "COALESCE(session_merge_keep, TRUE) = TRUE" in where_clause
     assert "session_merge_status = ?" in where_clause
     assert "imported_at >= ?" in where_clause
     assert "imported_at <= ?" in where_clause
-    assert params == [0.8, 0.5, 0.2, "keep", "2026-04-01", "2026-04-03"]
+    assert params == [0.8, 0.5, 0.2, False, "keep", "2026-04-01", "2026-04-03"]
 
 
 def test_preview_export_returns_count_and_size_estimate():
@@ -119,4 +121,56 @@ def test_fetch_export_rows_respects_shared_criteria():
 
         assert len(rows) == 1
         assert rows[0][0] == first_id
+        store.close()
+
+
+def test_fetch_export_rows_can_filter_empty_response():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        store = DuckDBStore(Path(tmpdir) / "rows_empty_response.duckdb")
+
+        empty_id = store.insert_sample(
+            Sample.from_dict(
+                {
+                    "messages": [
+                        {"role": "user", "content": "hello"},
+                    ]
+                }
+            )
+        )
+        store.update_sample_tool_stats(
+            empty_id,
+            {
+                "response_helpful_rate": 0.0,
+                "user_satisfied_rate": 0.0,
+                "total_turns": 0,
+                "has_error": False,
+            },
+        )
+        normal_id = store.insert_sample(
+            Sample.from_dict(
+                {
+                    "messages": [
+                        {"role": "user", "content": "world"},
+                        {"role": "assistant", "content": "ok"},
+                    ]
+                }
+            )
+        )
+        store.update_sample_tool_stats(
+            normal_id,
+            {
+                "response_helpful_rate": 1.0,
+                "user_satisfied_rate": 1.0,
+                "total_turns": 1,
+                "has_error": False,
+            },
+        )
+
+        rows = fetch_export_rows(
+            store,
+            FilterCriteria(helpful_val=None, satisfied_val=None, empty_response_scope="empty_only"),
+            ["id", "empty_response"],
+        )
+
+        assert rows == [(empty_id, True)]
         store.close()

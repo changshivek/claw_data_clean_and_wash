@@ -327,6 +327,30 @@ def test_filter_samples_returns_sample_dicts():
         store.close()
 
 
+    def test_insert_sample_persists_empty_response_marker():
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "empty_response_insert.duckdb"
+            store = DuckDBStore(db_path)
+
+            sample_id = store.insert_sample(
+                Sample.from_dict(
+                    {
+                        "request": {
+                            "bodyJson": {
+                                "messages": [
+                                    {"role": "user", "content": "只有用户"},
+                                ]
+                            }
+                        }
+                    }
+                )
+            )
+
+            row = store.conn.execute("SELECT empty_response FROM samples WHERE id = ?", [sample_id]).fetchone()
+            assert row == (True,)
+            store.close()
+
+
 def test_filter_samples_supports_session_merge_scope_and_status():
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / "filter_session_merge.db"
@@ -365,6 +389,32 @@ def test_filter_samples_supports_session_merge_scope_and_status():
         store.close()
 
 
+    def test_filter_samples_supports_empty_response_flag():
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "filter_empty_response.db"
+            store = DuckDBStore(db_path)
+            empty_id = store.insert_sample(Sample.from_dict({
+                "messages": [
+                    {"role": "user", "content": "hello"},
+                ]
+            }))
+            normal_id = store.insert_sample(Sample.from_dict({
+                "messages": [
+                    {"role": "user", "content": "hello"},
+                    {"role": "assistant", "content": "hi"},
+                ]
+            }))
+
+            empty_rows, empty_total = store.filter_samples(empty_response=True, limit=10, offset=0)
+            normal_rows, normal_total = store.filter_samples(empty_response=False, limit=10, offset=0)
+
+            assert empty_total == 1
+            assert empty_rows[0]["id"] == empty_id
+            assert normal_total == 1
+            assert normal_rows[0]["id"] == normal_id
+            store.close()
+
+
 def test_get_session_merge_counts_returns_summary():
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / "merge_counts.db"
@@ -393,7 +443,7 @@ def test_get_session_merge_counts_returns_summary():
 
         counts = store.get_session_merge_counts()
 
-        assert counts == {"total": 3, "keep": 2, "merged": 1, "skipped": 1, "unmarked": 0}
+        assert counts == {"total": 3, "keep": 2, "merged": 1, "skipped": 1, "unmarked": 0, "empty_response": 0}
         store.close()
 
 
@@ -405,6 +455,7 @@ def test_samples_schema_removed_unused_columns_and_added_uid():
         columns = store.conn.execute("PRAGMA table_info('samples')").fetchall()
         column_names = {column[1] for column in columns}
         assert "sample_uid" in column_names
+        assert "empty_response" in column_names
         assert "response_helpful_rate" in column_names
         assert "response_unhelpful_rate" in column_names
         assert "user_satisfied_rate" in column_names

@@ -20,6 +20,7 @@ class TurnDetailView:
 class SampleDetailView:
     sample_id: int
     sample_uid: str
+    empty_response: bool
     num_turns: int
     expected_judgment_count: int
     num_tool_calls: int
