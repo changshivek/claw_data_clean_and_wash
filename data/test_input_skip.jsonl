@@ -1,5 +1,0 @@
-{"messages": [{"role": "user", "content": "Valid 1"}]}
-this is not json
-{"messages": [{"role": "user", "content": "Valid 2"}]}
-also not json
-{"messages": [{"role": "user", "content": "Valid 3"}]}
