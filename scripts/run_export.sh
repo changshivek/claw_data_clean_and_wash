@@ -12,6 +12,7 @@ REPORT_PATH="data/export_report.json"
 # Leave empty to disable a filter.
 RESPONSE_HELPFUL_RATE=">=0.7"
 USER_SATISFIED_RATE=""
+USER_NEGATIVE_FEEDBACK_RATE=""
 HAS_ERROR="false"
 LIMIT=""
 GENERATE_REPORT="true"
@@ -60,6 +61,10 @@ fi
 
 if [[ -n "${USER_SATISFIED_RATE}" ]]; then
   args+=(--user-satisfied-rate "${USER_SATISFIED_RATE}")
+fi
+
+if [[ -n "${USER_NEGATIVE_FEEDBACK_RATE}" ]]; then
+  args+=(--user-negative-feedback-rate "${USER_NEGATIVE_FEEDBACK_RATE}")
 fi
 
 if [[ -n "${HAS_ERROR}" ]]; then

@@ -30,22 +30,25 @@ def _format_size(num_bytes: int) -> str:
 def render():
     st.title("数据导出")
 
-    store = DuckDBStore(DB_PATH)
+    store = DuckDBStore(DB_PATH, read_only=True)
     criteria = FilterCriteria()
 
     # Filter controls
     with st.form("export_form"):
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
 
-        helpful_op = col1.selectbox("Helpful Rate", [">=", "<=", "=", "!="], index=0)
-        helpful_val = col1.number_input("值", min_value=0.0, max_value=1.0, value=0.7, step=0.1)
+        helpful_op = col1.selectbox("Helpful Rate", [">=", "<=", "=", "!="], index=0, key="export.helpful_op")
+        helpful_val = col1.number_input("值", min_value=0.0, max_value=1.0, value=0.7, step=0.1, key="export.helpful_val")
 
-        satisfied_op = col2.selectbox("Satisfied Rate", [">=", "<=", "=", "!="], index=0)
-        satisfied_val = col2.number_input("值", min_value=0.0, max_value=1.0, value=0.5, step=0.1)
+        satisfied_op = col2.selectbox("Satisfied Rate", [">=", "<=", "=", "!="], index=0, key="export.satisfied_op")
+        satisfied_val = col2.number_input("值", min_value=0.0, max_value=1.0, value=0.5, step=0.1, key="export.satisfied_val")
+
+        negative_feedback_op = col3.selectbox("Negative Feedback Rate", [">=", "<=", "=", "!="], index=0, key="export.negative_feedback_op")
+        negative_feedback_val = col3.number_input("负反馈值", min_value=0.0, max_value=1.0, value=0.0, step=0.1, key="export.negative_feedback_val")
 
         col4, col5, col6 = st.columns(3)
-        num_turns_min = col4.number_input("最小轮次", min_value=0, value=0)
-        num_turns_max = col5.number_input("最大轮次", min_value=0, value=100)
+        num_turns_min = col4.number_input("最小轮次", min_value=0, value=0, key="export.num_turns_min")
+        num_turns_max = col5.number_input("最大轮次", min_value=0, value=100, key="export.num_turns_max")
         date_defaults = []
         parsed_date_from = _parse_date(criteria.date_from)
         parsed_date_to = _parse_date(criteria.date_to)
@@ -53,15 +56,15 @@ def render():
             date_defaults.append(parsed_date_from)
         if parsed_date_to:
             date_defaults.append(parsed_date_to)
-        date_range = col6.date_input("日期范围", value=date_defaults)
+        date_range = col6.date_input("日期范围", value=date_defaults, key="export.date_range")
 
-        output_path = st.text_input("输出文件路径", value="data/exported.jsonl")
+        output_path = st.text_input("输出文件路径", value="data/exported.jsonl", key="export.output_path")
 
         # Field selection
         st.markdown("**选择导出字段**")
         col_f1, col_f2 = st.columns(2)
-        export_raw_json = col_f1.checkbox("raw_json", value=True)
-        export_tool_stats = col_f2.checkbox("tool_stats", value=True)
+        export_raw_json = col_f1.checkbox("raw_json", value=True, key="export.raw_json")
+        export_tool_stats = col_f2.checkbox("tool_stats", value=True, key="export.tool_stats")
 
         col_btn1, col_btn2 = st.columns(2)
         preview = col_btn1.form_submit_button("预览数量")
@@ -74,6 +77,8 @@ def render():
         helpful_val=helpful_val,
         satisfied_op=satisfied_op,
         satisfied_val=satisfied_val,
+        negative_feedback_op=negative_feedback_op,
+        negative_feedback_val=negative_feedback_val,
         num_turns_min=num_turns_min,
         num_turns_max=num_turns_max,
         date_from=date_from,

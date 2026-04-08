@@ -97,6 +97,8 @@ def test_report_generation():
 
     assert "summary" in report
     assert report["summary"]["total_samples"] == 1
+    assert "avg_response_unhelpful_rate" in report["summary"]
+    assert "avg_user_negative_feedback_rate" in report["summary"]
 
     store.close()
     print("test_report_generation passed")
@@ -128,6 +130,8 @@ def test_report_export():
         report = json.load(f)
         assert "total_samples" in report
         assert "avg_response_helpful_rate" in report
+        assert "avg_response_unhelpful_rate" in report
+        assert "avg_user_negative_feedback_rate" in report
 
     store.close()
     print("test_report_export passed")

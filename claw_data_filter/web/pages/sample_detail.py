@@ -29,7 +29,7 @@ def render(route: RouteState):
         st.error("未指定 sample_id")
         return
 
-    store = DuckDBStore(DB_PATH)
+    store = DuckDBStore(DB_PATH, read_only=True)
 
     sample = store.get_sample_by_id(route.sample_id)
 

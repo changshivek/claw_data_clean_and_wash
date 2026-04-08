@@ -51,7 +51,9 @@ class ReportExporter:
             "summary": {
                 "total_samples": stats["total_samples"],
                 "avg_response_helpful_rate": round(stats["avg_response_helpful_rate"], 2),
+                "avg_response_unhelpful_rate": round(stats["avg_response_unhelpful_rate"], 2),
                 "avg_user_satisfied_rate": round(stats["avg_user_satisfied_rate"], 2),
+                "avg_user_negative_feedback_rate": round(stats["avg_user_negative_feedback_rate"], 2),
                 "error_count": stats["error_count"],
             },
         }
@@ -66,7 +68,9 @@ class ReportExporter:
         report = {
             "total_samples": stats["total_samples"],
             "avg_response_helpful_rate": stats["avg_response_helpful_rate"],
+            "avg_response_unhelpful_rate": stats["avg_response_unhelpful_rate"],
             "avg_user_satisfied_rate": stats["avg_user_satisfied_rate"],
+            "avg_user_negative_feedback_rate": stats["avg_user_negative_feedback_rate"],
             "error_count": stats["error_count"],
             "generated_at": datetime.now().isoformat(),
         }

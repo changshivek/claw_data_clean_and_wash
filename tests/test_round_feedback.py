@@ -58,10 +58,13 @@ def test_build_judgment_prompt():
     builder = TurnContextBuilder()
     turns = builder.extract_turns(SAMPLE_MESSAGES)
     prompt = builder.build_judgment_prompt(turns[0], turns)
-    assert "=== 当前轮 ===" in prompt
-    assert "=== 后续用户信号" in prompt
+    assert "=== 当前用户请求 ===" in prompt
+    assert "=== 当前assistant执行链 ===" in prompt
+    assert "=== 后续真实用户反馈" in prompt
     assert "response_helpful:" in prompt
     assert "user_satisfied:" in prompt
+    assert "[assistant_tool_use]: web_search({})" in prompt
+    assert "system reminder、plan mode 提示、tool 框架提示、工具中断提示等系统/框架文本可能混在对话里" in prompt
 
 
 @pytest.mark.asyncio
@@ -147,7 +150,9 @@ def test_tool_stats_aggregator():
     stats = aggregator.aggregate(judgments)
 
     assert stats["response_helpful_rate"] == 2/3  # 2 out of 3 are helpful
+    assert stats["response_unhelpful_rate"] == 1/3
     assert stats["user_satisfied_rate"] == 2/3  # 2 out of 3 are satisfied
+    assert stats["user_negative_feedback_rate"] == 1/3
     assert stats["total_turns"] == 3
     assert stats["has_error"] is False
 
@@ -201,6 +206,76 @@ def test_end_to_end_turn_extraction():
     # Check signal users for the weather turn.
     assert "Thanks!" in turns[1].signal_users
 
+
+ANTHROPIC_TOOL_CHAIN_MESSAGES = [
+    {"role": "user", "content": [{"type": "text", "text": "帮我看一下目录里有什么文件"}]},
+    {"role": "assistant", "content": [
+        {"type": "text", "text": "我先列一下文件。"},
+        {"type": "tool_use", "id": "call_1", "name": "bash", "input": {"cmd": "ls"}},
+    ]},
+    {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "call_1", "content": "a.txt\nb.txt"},
+    ]},
+    {"role": "assistant", "content": [
+        {"type": "text", "text": "目录里有 a.txt 和 b.txt。"},
+    ]},
+    {"role": "user", "content": [{"type": "text", "text": "那 a.txt 里是什么？"}]},
+    {"role": "assistant", "content": "我继续帮你看。"},
+]
+
+
+def test_extract_turns_absorbs_tool_result_only_user_blocks():
+    from claw_data_filter.processors.round_feedback import TurnContextBuilder
+
+    builder = TurnContextBuilder()
+    turns = builder.extract_turns(ANTHROPIC_TOOL_CHAIN_MESSAGES)
+
+    assert len(turns) == 2
+    assert turns[0].user_message == "帮我看一下目录里有什么文件"
+    assert len(turns[0].tool_calls) == 1
+    assert turns[0].tool_calls[0]["name"] == "bash"
+    assert turns[0].tool_result == "a.txt\nb.txt"
+    assert "我先列一下文件。" in turns[0].assistant_message
+    assert "目录里有 a.txt 和 b.txt。" in turns[0].assistant_message
+    assert turns[0].signal_users == ["那 a.txt 里是什么？"]
+
+
+def test_build_prompt_includes_execution_chain_and_real_feedback_only():
+    from claw_data_filter.processors.round_feedback import TurnContextBuilder
+
+    builder = TurnContextBuilder()
+    turns = builder.extract_turns(ANTHROPIC_TOOL_CHAIN_MESSAGES)
+    prompt = builder.build_judgment_prompt(turns[0], turns)
+
+    assert "[assistant_tool_use]: bash({\"cmd\": \"ls\"})" in prompt
+    assert "[tool_result]: a.txt\nb.txt" in prompt
+    assert "目录里有 a.txt 和 b.txt。" in prompt
+    assert "那 a.txt 里是什么？" in prompt
+
+
+def test_signal_users_skip_tool_result_only_user_blocks():
+    from claw_data_filter.processors.round_feedback import TurnContextBuilder
+
+    messages = [
+        {"role": "user", "content": [{"type": "text", "text": "先查天气"}]},
+        {"role": "assistant", "content": [
+            {"type": "text", "text": "我查一下。"},
+            {"type": "tool_use", "id": "call_1", "name": "weather", "input": {"city": "北京"}},
+        ]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_1", "content": "晴 25 度"}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "北京现在晴，25度。"}]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_1", "content": "风力 3 级"}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "风力 3 级。"}]},
+        {"role": "user", "content": [{"type": "text", "text": "要不要带伞？"}]},
+        {"role": "assistant", "content": "不用带伞。"},
+    ]
+
+    builder = TurnContextBuilder()
+    turns = builder.extract_turns(messages)
+
+    assert len(turns) == 2
+    assert turns[0].signal_users == ["要不要带伞？"]
+
 def test_tool_stats_aggregation_integration():
     """Test tool stats aggregation from judgments"""
     from claw_data_filter.processors.round_feedback import ToolStatsAggregator
@@ -219,9 +294,33 @@ def test_tool_stats_aggregation_integration():
     stats = aggregator.aggregate(judgments)
 
     assert stats["response_helpful_rate"] == 1.0  # All 4 are helpful
+    assert stats["response_unhelpful_rate"] == 0.0
     assert stats["user_satisfied_rate"] == 0.75  # 3 out of 4 are satisfied
+    assert stats["user_negative_feedback_rate"] == 0.25
     assert stats["total_turns"] == 4
     assert stats["has_error"] is False
+
+
+def test_tool_stats_aggregator_excludes_uncertain_from_denominator():
+    from claw_data_filter.processors.round_feedback import ToolStatsAggregator
+    from claw_data_filter.models.round_judgment import RoundJudgment
+
+    aggregator = ToolStatsAggregator()
+    judgments = [
+        RoundJudgment(sample_id=1, turn_index=0, response_helpful="yes", user_satisfied="yes", llm_error=False),
+        RoundJudgment(sample_id=1, turn_index=1, response_helpful="uncertain", user_satisfied="uncertain", llm_error=False),
+        RoundJudgment(sample_id=1, turn_index=2, response_helpful="no", user_satisfied="neutral", llm_error=False),
+        RoundJudgment(sample_id=1, turn_index=3, response_helpful="yes", user_satisfied="no", llm_error=False),
+    ]
+
+    stats = aggregator.aggregate(judgments)
+
+    assert stats["response_helpful_rate"] == 2 / 3
+    assert stats["response_unhelpful_rate"] == 1 / 3
+    assert stats["user_satisfied_rate"] == 1 / 3
+    assert stats["user_negative_feedback_rate"] == 1 / 3
+    assert stats["response_helpful_scored_turns"] == 3
+    assert stats["user_feedback_scored_turns"] == 3
 
 def test_empty_messages_handling():
     """Test handling of empty messages"""

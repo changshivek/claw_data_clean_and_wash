@@ -5,21 +5,21 @@ set -euo pipefail
 # -----------------------------
 # Configuration
 # -----------------------------
-INPUT_FILE="/path/to/input.jsonl"
-DB_PATH="data/pipeline.duckdb"
+INPUT_FILE="${INPUT_FILE:-/path/to/input.jsonl}"
+DB_PATH="${DB_PATH:-data/pipeline.duckdb}"
 
-LLM_ENDPOINT="http://127.0.0.1:8000/v1"
-LLM_API_KEY="dummy"
-LLM_MODEL_ID="qwen35"
+LLM_ENDPOINT="${LLM_ENDPOINT:-http://127.0.0.1:8000/v1}"
+LLM_API_KEY="${LLM_API_KEY:-dummy}"
+LLM_MODEL_ID="${LLM_MODEL_ID:-qwen35}"
 
-MAX_CONCURRENCY=32
-BATCH_SIZE=50
-LLM_TIMEOUT=60
-RUN_PRESSURE_TEST="true"
+MAX_CONCURRENCY="${MAX_CONCURRENCY:-32}"
+BATCH_SIZE="${BATCH_SIZE:-50}"
+LLM_TIMEOUT="${LLM_TIMEOUT:-60}"
+RUN_PRESSURE_TEST="${RUN_PRESSURE_TEST:-true}"
 
 # Optional override for Python executable.
 # Default uses the project's virtualenv.
-PYTHON_BIN=""
+PYTHON_BIN="${PYTHON_BIN:-}"
 
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"

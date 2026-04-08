@@ -18,6 +18,8 @@ def test_build_export_where_clause_includes_dates_and_tool_stats():
         helpful_val=0.8,
         satisfied_op=">=",
         satisfied_val=0.5,
+        negative_feedback_op=">=",
+        negative_feedback_val=0.2,
         date_from="2026-04-01",
         date_to="2026-04-03",
     )
@@ -27,7 +29,7 @@ def test_build_export_where_clause_includes_dates_and_tool_stats():
     assert "tool_stats IS NOT NULL" in where_clause
     assert "imported_at >= ?" in where_clause
     assert "imported_at <= ?" in where_clause
-    assert params == [0.8, 0.5, "2026-04-01", "2026-04-03"]
+    assert params == [0.8, 0.5, 0.2, "2026-04-01", "2026-04-03"]
 
 
 def test_preview_export_returns_count_and_size_estimate():

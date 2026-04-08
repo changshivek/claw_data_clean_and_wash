@@ -17,6 +17,8 @@ def get_filtered_samples(
         helpful_rate_val=criteria.helpful_val,
         satisfied_rate_op=criteria.satisfied_op,
         satisfied_rate_val=criteria.satisfied_val,
+        negative_feedback_rate_op=criteria.negative_feedback_op,
+        negative_feedback_rate_val=criteria.negative_feedback_val,
         num_turns_min=criteria.num_turns_min,
         num_turns_max=criteria.num_turns_max,
         date_from=criteria.date_from,

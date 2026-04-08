@@ -29,7 +29,7 @@ def _render_pagination_controls(table_name: str, current_page: int, total_pages:
 def render(route: RouteState):
     st.title("数据表预览")
 
-    store = DuckDBStore(DB_PATH)
+    store = DuckDBStore(DB_PATH, read_only=True)
     tables = store.get_table_list()
     if not tables:
         st.info("数据库中没有可预览的数据表")

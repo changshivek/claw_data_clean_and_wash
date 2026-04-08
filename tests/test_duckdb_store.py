@@ -312,6 +312,10 @@ def test_samples_schema_removed_unused_columns_and_added_uid():
         columns = store.conn.execute("PRAGMA table_info('samples')").fetchall()
         column_names = {column[1] for column in columns}
         assert "sample_uid" in column_names
+        assert "response_helpful_rate" in column_names
+        assert "response_unhelpful_rate" in column_names
+        assert "user_satisfied_rate" in column_names
+        assert "user_negative_feedback_rate" in column_names
         assert "task_type" not in column_names
         assert "has_error" not in column_names
         store.close()
@@ -338,7 +342,9 @@ def test_get_stats_returns_new_fields():
         store = DuckDBStore(db_path)
         stats = store.get_stats()
         assert "avg_response_helpful_rate" in stats
+        assert "avg_response_unhelpful_rate" in stats
         assert "avg_user_satisfied_rate" in stats
+        assert "avg_user_negative_feedback_rate" in stats
         assert "error_count" in stats
         store.close()
 
@@ -387,6 +393,72 @@ def test_init_schema_backfills_num_turns_from_expected_judgment_count():
         store = DuckDBStore(db_path)
         row = store.conn.execute("SELECT num_turns, expected_judgment_count FROM samples WHERE id = 1").fetchone()
         assert row == (1, 1)
+        store.close()
+
+
+def test_init_schema_recomputes_tool_stats_from_turn_judgments():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "tool_stats_backfill.db"
+        conn = __import__("duckdb").connect(str(db_path))
+        conn.execute(
+            """
+            CREATE TABLE samples (
+                id INTEGER PRIMARY KEY,
+                sample_uid TEXT,
+                raw_json JSON,
+                user_query TEXT,
+                assistant_response TEXT,
+                num_turns INTEGER,
+                expected_judgment_count INTEGER,
+                num_tool_calls INTEGER,
+                imported_at TIMESTAMP,
+                tool_stats JSON,
+                processing_status TEXT,
+                processing_updated_at TIMESTAMP
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE turn_judgments (
+                id INTEGER PRIMARY KEY,
+                sample_id INTEGER,
+                turn_index INTEGER,
+                response_helpful TEXT,
+                user_satisfied TEXT,
+                signal_from_users JSON,
+                llm_error BOOLEAN,
+                created_at TIMESTAMP
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO samples (id, sample_uid, raw_json, user_query, assistant_response, num_turns, expected_judgment_count, tool_stats) VALUES (1, 'u', '{\"messages\":[]}', '', '', 3, 3, '{\"response_helpful_rate\": 0.33, \"user_satisfied_rate\": 0.25, \"total_turns\": 4, \"has_error\": false}')"
+        )
+        conn.execute(
+            "INSERT INTO turn_judgments VALUES (1, 1, 0, 'yes', 'uncertain', '[]', false, CURRENT_TIMESTAMP)"
+        )
+        conn.execute(
+            "INSERT INTO turn_judgments VALUES (2, 1, 1, 'no', 'neutral', '[]', false, CURRENT_TIMESTAMP)"
+        )
+        conn.execute(
+            "INSERT INTO turn_judgments VALUES (3, 1, 2, 'yes', 'no', '[]', false, CURRENT_TIMESTAMP)"
+        )
+        conn.close()
+
+        store = DuckDBStore(db_path)
+        row = store.conn.execute("SELECT tool_stats FROM samples WHERE id = 1").fetchone()
+        stats = __import__("json").loads(row[0])
+        assert stats["response_helpful_rate"] == 2 / 3
+        assert stats["response_unhelpful_rate"] == 1 / 3
+        assert stats["user_satisfied_rate"] == 0.0
+        assert stats["user_negative_feedback_rate"] == 0.5
+        assert stats["response_helpful_scored_turns"] == 3
+        assert stats["user_feedback_scored_turns"] == 2
+        rate_row = store.conn.execute(
+            "SELECT response_helpful_rate, response_unhelpful_rate, user_satisfied_rate, user_negative_feedback_rate FROM samples WHERE id = 1"
+        ).fetchone()
+        assert rate_row == (2 / 3, 1 / 3, 0.0, 0.5)
         store.close()
 
 

@@ -57,12 +57,13 @@ def import_cmd(ctx, input_file):
 @cli.command()
 @click.option("--response-helpful-rate", type=str, help="Filter by response helpful rate (e.g., '>=0.7')")
 @click.option("--user-satisfied-rate", type=str, help="Filter by user satisfied rate (e.g., '>=0.7')")
+@click.option("--user-negative-feedback-rate", type=str, help="Filter by user negative feedback rate (e.g., '>=0.3')")
 @click.option("--has-error", type=bool, help="Filter by has error (true/false)")
 @click.option("--export", type=click.Path(), required=True, help="Output JSONL file")
 @click.option("--report", type=click.Path(), help="Output report JSON file")
 @click.option("--limit", type=int, help="Limit number of results")
 @click.pass_context
-def filter_cmd(ctx, response_helpful_rate, user_satisfied_rate, has_error, export, report, limit):
+def filter_cmd(ctx, response_helpful_rate, user_satisfied_rate, user_negative_feedback_rate, has_error, export, report, limit):
     """Filter samples and export to JSONL with optional report."""
     config = ctx.obj["config"]
 
@@ -87,6 +88,15 @@ def filter_cmd(ctx, response_helpful_rate, user_satisfied_rate, has_error, expor
             builder.add_condition("user_satisfied_rate", op, value)
         else:
             raise ValueError(f"Invalid user-satisfied-rate expression: {user_satisfied_rate}")
+    if user_negative_feedback_rate:
+        match = RATE_PATTERN.match(user_negative_feedback_rate.strip())
+        if match:
+            op_str, value_str = match.groups()
+            op = ComparisonOp(op_str)
+            value = float(value_str)
+            builder.add_condition("user_negative_feedback_rate", op, value)
+        else:
+            raise ValueError(f"Invalid user-negative-feedback-rate expression: {user_negative_feedback_rate}")
     if has_error is not None:
         builder.add_condition("has_error", ComparisonOp("="), has_error)
 
@@ -119,7 +129,9 @@ def stats(ctx):
         click.echo(f"Total samples: {stats_data['total_samples']}")
         if stats_data['total_samples'] > 0:
             click.echo(f"Avg response helpful rate: {stats_data['avg_response_helpful_rate']:.2f}")
+            click.echo(f"Avg response unhelpful rate: {stats_data['avg_response_unhelpful_rate']:.2f}")
             click.echo(f"Avg user satisfied rate: {stats_data['avg_user_satisfied_rate']:.2f}")
+            click.echo(f"Avg user negative feedback rate: {stats_data['avg_user_negative_feedback_rate']:.2f}")
             click.echo(f"Error count: {stats_data['error_count']}")
     finally:
         store.close()

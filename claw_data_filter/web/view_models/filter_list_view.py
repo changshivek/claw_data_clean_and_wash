@@ -17,6 +17,8 @@ class FilterCriteria:
     helpful_val: float | None = 0.7
     satisfied_op: str = ">="
     satisfied_val: float | None = 0.5
+    negative_feedback_op: str = ">="
+    negative_feedback_val: float | None = None
     num_turns_min: int | None = 0
     num_turns_max: int | None = 100
     date_from: str | None = None
@@ -28,6 +30,8 @@ class FilterCriteria:
             "helpful_val": self.helpful_val,
             "satisfied_op": self.satisfied_op,
             "satisfied_val": self.satisfied_val,
+            "negative_feedback_op": self.negative_feedback_op,
+            "negative_feedback_val": self.negative_feedback_val,
             "num_turns_min": self.num_turns_min,
             "num_turns_max": self.num_turns_max,
             "date_from": self.date_from,
@@ -43,6 +47,8 @@ class FilterCriteria:
             helpful_val=data.get("helpful_val", 0.7),
             satisfied_op=str(data.get("satisfied_op", ">=")),
             satisfied_val=data.get("satisfied_val", 0.5),
+            negative_feedback_op=str(data.get("negative_feedback_op", ">=")),
+            negative_feedback_val=data.get("negative_feedback_val"),
             num_turns_min=data.get("num_turns_min", 0),
             num_turns_max=data.get("num_turns_max", 100),
             date_from=data.get("date_from"),

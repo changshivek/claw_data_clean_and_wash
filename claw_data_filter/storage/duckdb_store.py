@@ -13,10 +13,12 @@ from claw_data_filter.models.round_judgment import RoundJudgment
 class DuckDBStore:
     """DuckDB-backed storage for samples and evaluations."""
 
-    def __init__(self, db_path: Path):
+    def __init__(self, db_path: Path, read_only: bool = False):
         self.db_path = Path(db_path)
-        self.conn = duckdb.connect(str(self.db_path))
-        self.init_schema()
+        self.read_only = read_only
+        self.conn = duckdb.connect(str(self.db_path), read_only=read_only)
+        if not self.read_only:
+            self.init_schema()
 
     def init_schema(self):
         """Create tables and sequences if not exist."""
@@ -31,6 +33,10 @@ class DuckDBStore:
                 num_turns INTEGER,
                 expected_judgment_count INTEGER,
                 num_tool_calls INTEGER,
+                response_helpful_rate DOUBLE,
+                response_unhelpful_rate DOUBLE,
+                user_satisfied_rate DOUBLE,
+                user_negative_feedback_rate DOUBLE,
                 imported_at TIMESTAMP,
                 tool_stats JSON,
                 processing_status TEXT,
@@ -59,12 +65,38 @@ class DuckDBStore:
             self.conn.execute("ALTER TABLE samples ADD COLUMN processing_updated_at TIMESTAMP")
         except:
             pass  # Column may already exist (ignore error)
+        try:
+            self.conn.execute("ALTER TABLE samples ADD COLUMN response_helpful_rate DOUBLE")
+        except:
+            pass
+        try:
+            self.conn.execute("ALTER TABLE samples ADD COLUMN response_unhelpful_rate DOUBLE")
+        except:
+            pass
+        try:
+            self.conn.execute("ALTER TABLE samples ADD COLUMN user_satisfied_rate DOUBLE")
+        except:
+            pass
+        try:
+            self.conn.execute("ALTER TABLE samples ADD COLUMN user_negative_feedback_rate DOUBLE")
+        except:
+            pass
 
         self.conn.execute(
             "UPDATE samples SET processing_status = COALESCE(processing_status, 'pending'), processing_updated_at = COALESCE(processing_updated_at, imported_at, CURRENT_TIMESTAMP)"
         )
         self.conn.execute("UPDATE samples SET sample_uid = COALESCE(sample_uid, sha256(CAST(raw_json AS VARCHAR)))")
         self.conn.execute("UPDATE samples SET num_turns = COALESCE(expected_judgment_count, num_turns)")
+        self.conn.execute(
+            """
+            UPDATE samples
+            SET response_helpful_rate = COALESCE(response_helpful_rate, CAST(json_extract(tool_stats, '$.response_helpful_rate') AS DOUBLE)),
+                response_unhelpful_rate = COALESCE(response_unhelpful_rate, CAST(json_extract(tool_stats, '$.response_unhelpful_rate') AS DOUBLE)),
+                user_satisfied_rate = COALESCE(user_satisfied_rate, CAST(json_extract(tool_stats, '$.user_satisfied_rate') AS DOUBLE)),
+                user_negative_feedback_rate = COALESCE(user_negative_feedback_rate, CAST(json_extract(tool_stats, '$.user_negative_feedback_rate') AS DOUBLE))
+            WHERE tool_stats IS NOT NULL
+            """
+        )
 
         try:
             self.conn.execute("ALTER TABLE samples DROP COLUMN task_type")
@@ -104,6 +136,79 @@ class DuckDBStore:
             ON turn_judgments(sample_id)
         """)
 
+        self._refresh_tool_stats_from_turn_judgments()
+
+    def _refresh_tool_stats_from_turn_judgments(self) -> None:
+        """Backfill tool_stats metrics using current turn_judgments semantics.
+
+        This keeps historical databases aligned when rate definitions change.
+        Only samples with persisted turn_judgments are recalculated.
+        """
+        rows = self.conn.execute(
+            """
+            SELECT sample_id, response_helpful, user_satisfied, llm_error
+            FROM turn_judgments
+            ORDER BY sample_id, turn_index
+            """
+        ).fetchall()
+        if not rows:
+            return
+
+        aggregated: dict[int, dict[str, Any]] = {}
+        for sample_id, response_helpful, user_satisfied, llm_error in rows:
+            stats = aggregated.setdefault(
+                sample_id,
+                {
+                    "total_turns": 0,
+                    "helpful_yes": 0,
+                    "helpful_no": 0,
+                    "satisfied_yes": 0,
+                    "satisfied_no": 0,
+                    "satisfied_neutral": 0,
+                    "has_error": False,
+                },
+            )
+            stats["total_turns"] += 1
+            stats["helpful_yes"] += 1 if response_helpful == "yes" else 0
+            stats["helpful_no"] += 1 if response_helpful == "no" else 0
+            stats["satisfied_yes"] += 1 if user_satisfied == "yes" else 0
+            stats["satisfied_no"] += 1 if user_satisfied == "no" else 0
+            stats["satisfied_neutral"] += 1 if user_satisfied == "neutral" else 0
+            stats["has_error"] = stats["has_error"] or bool(llm_error)
+
+        for sample_id, counters in aggregated.items():
+            response_helpful_scored_turns = counters["helpful_yes"] + counters["helpful_no"]
+            user_feedback_scored_turns = (
+                counters["satisfied_yes"] + counters["satisfied_no"] + counters["satisfied_neutral"]
+            )
+            existing = self.conn.execute("SELECT tool_stats FROM samples WHERE id = ?", [sample_id]).fetchone()
+            tool_stats = json.loads(existing[0]) if existing and existing[0] else {}
+            tool_stats.update(
+                {
+                    "response_helpful_rate": counters["helpful_yes"] / response_helpful_scored_turns if response_helpful_scored_turns else 0.0,
+                    "response_unhelpful_rate": counters["helpful_no"] / response_helpful_scored_turns if response_helpful_scored_turns else 0.0,
+                    "user_satisfied_rate": counters["satisfied_yes"] / user_feedback_scored_turns if user_feedback_scored_turns else 0.0,
+                    "user_negative_feedback_rate": counters["satisfied_no"] / user_feedback_scored_turns if user_feedback_scored_turns else 0.0,
+                    "response_helpful_scored_turns": response_helpful_scored_turns,
+                    "user_feedback_scored_turns": user_feedback_scored_turns,
+                    "total_turns": counters["total_turns"],
+                    "has_error": counters["has_error"],
+                }
+            )
+            self.conn.execute(
+                "UPDATE samples SET tool_stats = ?, num_turns = ?, expected_judgment_count = ?, response_helpful_rate = ?, response_unhelpful_rate = ?, user_satisfied_rate = ?, user_negative_feedback_rate = ?, processing_updated_at = COALESCE(processing_updated_at, CURRENT_TIMESTAMP) WHERE id = ?",
+                [
+                    json.dumps(tool_stats),
+                    counters["total_turns"],
+                    counters["total_turns"],
+                    tool_stats["response_helpful_rate"],
+                    tool_stats["response_unhelpful_rate"],
+                    tool_stats["user_satisfied_rate"],
+                    tool_stats["user_negative_feedback_rate"],
+                    sample_id,
+                ],
+            )
+
     def insert_sample(self, sample: Sample) -> int:
         """Insert sample, return auto-generated id."""
         sample_uid = sample.sample_uid or generate_sample_uid(sample.raw_json)
@@ -136,7 +241,7 @@ class DuckDBStore:
         return sample_id
 
     def _build_sample_record(self, row: tuple[Any, ...]) -> dict[str, Any]:
-        tool_stats = json.loads(row[8]) if row[8] else None
+        tool_stats = json.loads(row[12]) if row[12] else None
         return {
             "id": row[0],
             "sample_uid": row[1],
@@ -148,10 +253,12 @@ class DuckDBStore:
             "num_tool_calls": row[7] or 0,
             "has_error": (tool_stats or {}).get("has_error", False),
             "tool_stats": tool_stats,
-            "processing_status": row[9] or "pending",
-            "processing_updated_at": row[10],
-            "helpful_rate": (tool_stats or {}).get("response_helpful_rate", 0),
-            "satisfied_rate": (tool_stats or {}).get("user_satisfied_rate", 0),
+            "processing_status": row[13] or "pending",
+            "processing_updated_at": row[14],
+            "helpful_rate": row[8] if row[8] is not None else (tool_stats or {}).get("response_helpful_rate", 0),
+            "unhelpful_rate": row[9] if row[9] is not None else (tool_stats or {}).get("response_unhelpful_rate", 0),
+            "satisfied_rate": row[10] if row[10] is not None else (tool_stats or {}).get("user_satisfied_rate", 0),
+            "negative_feedback_rate": row[11] if row[11] is not None else (tool_stats or {}).get("user_negative_feedback_rate", 0),
         }
 
     def get_samples(self, limit: int = 100, offset: int = 0) -> list[Sample]:
@@ -175,8 +282,10 @@ class DuckDBStore:
         stats = self.conn.execute("""
             SELECT
                 COUNT(*) as total,
-                AVG(CAST(json_extract(tool_stats, '$.response_helpful_rate') AS DOUBLE)) as avg_helpful,
-                AVG(CAST(json_extract(tool_stats, '$.user_satisfied_rate') AS DOUBLE)) as avg_satisfied,
+                AVG(response_helpful_rate) as avg_helpful,
+                AVG(response_unhelpful_rate) as avg_unhelpful,
+                AVG(user_satisfied_rate) as avg_satisfied,
+                AVG(user_negative_feedback_rate) as avg_negative_feedback,
                 SUM(CASE WHEN CAST(json_extract(tool_stats, '$.has_error') AS BOOLEAN) = true THEN 1 ELSE 0 END) as error_count
             FROM samples
             WHERE tool_stats IS NOT NULL
@@ -185,8 +294,10 @@ class DuckDBStore:
         return {
             "total_samples": sample_count,
             "avg_response_helpful_rate": stats[1] or 0,
-            "avg_user_satisfied_rate": stats[2] or 0,
-            "error_count": stats[3] or 0,
+            "avg_response_unhelpful_rate": stats[2] or 0,
+            "avg_user_satisfied_rate": stats[3] or 0,
+            "avg_user_negative_feedback_rate": stats[4] or 0,
+            "error_count": stats[5] or 0,
         }
 
     def get_processed_count(self) -> int:
@@ -241,8 +352,16 @@ class DuckDBStore:
     def update_sample_tool_stats(self, sample_id: int, tool_stats: dict) -> None:
         """Update tool_stats for a sample."""
         self.conn.execute(
-            "UPDATE samples SET tool_stats = ?, processing_updated_at = ? WHERE id = ?",
-            [json.dumps(tool_stats), datetime.now(), sample_id],
+            "UPDATE samples SET tool_stats = ?, response_helpful_rate = ?, response_unhelpful_rate = ?, user_satisfied_rate = ?, user_negative_feedback_rate = ?, processing_updated_at = ? WHERE id = ?",
+            [
+                json.dumps(tool_stats),
+                tool_stats.get("response_helpful_rate"),
+                tool_stats.get("response_unhelpful_rate"),
+                tool_stats.get("user_satisfied_rate"),
+                tool_stats.get("user_negative_feedback_rate"),
+                datetime.now(),
+                sample_id,
+            ],
         )
 
     def mark_sample_processing_failed(self, sample_id: int, error_reason: str | None = None) -> None:
@@ -269,8 +388,18 @@ class DuckDBStore:
         try:
             self.conn.execute("DELETE FROM turn_judgments WHERE sample_id = ?", [sample_id])
             self.conn.execute(
-                "UPDATE samples SET tool_stats = ?, num_turns = ?, expected_judgment_count = ?, processing_status = 'completed', processing_updated_at = ? WHERE id = ?",
-                [json.dumps(tool_stats), expected_judgment_count, expected_judgment_count, datetime.now(), sample_id],
+                "UPDATE samples SET tool_stats = ?, num_turns = ?, expected_judgment_count = ?, response_helpful_rate = ?, response_unhelpful_rate = ?, user_satisfied_rate = ?, user_negative_feedback_rate = ?, processing_status = 'completed', processing_updated_at = ? WHERE id = ?",
+                [
+                    json.dumps(tool_stats),
+                    expected_judgment_count,
+                    expected_judgment_count,
+                    tool_stats.get("response_helpful_rate"),
+                    tool_stats.get("response_unhelpful_rate"),
+                    tool_stats.get("user_satisfied_rate"),
+                    tool_stats.get("user_negative_feedback_rate"),
+                    datetime.now(),
+                    sample_id,
+                ],
             )
             for judgment in judgments:
                 self.insert_turn_judgment(judgment)
@@ -327,7 +456,8 @@ class DuckDBStore:
         row = self.conn.execute(
             """
              SELECT id, sample_uid, raw_json, user_query, assistant_response, num_turns, expected_judgment_count,
-                 num_tool_calls, tool_stats, processing_status, processing_updated_at
+                 num_tool_calls, response_helpful_rate, response_unhelpful_rate, user_satisfied_rate,
+                 user_negative_feedback_rate, tool_stats, processing_status, processing_updated_at
             FROM samples
             WHERE id = ?
             """,
@@ -341,6 +471,8 @@ class DuckDBStore:
         helpful_rate_val: float | None = None,
         satisfied_rate_op: str = ">=",
         satisfied_rate_val: float | None = None,
+        negative_feedback_rate_op: str = ">=",
+        negative_feedback_rate_val: float | None = None,
         has_error: bool | None = None,
         num_turns_min: int | None = None,
         num_turns_max: int | None = None,
@@ -356,6 +488,8 @@ class DuckDBStore:
             builder.add_condition("response_helpful_rate", ComparisonOp(helpful_rate_op), helpful_rate_val)
         if satisfied_rate_val is not None:
             builder.add_condition("user_satisfied_rate", ComparisonOp(satisfied_rate_op), satisfied_rate_val)
+        if negative_feedback_rate_val is not None:
+            builder.add_condition("user_negative_feedback_rate", ComparisonOp(negative_feedback_rate_op), negative_feedback_rate_val)
         if has_error is not None:
             builder.add_condition("has_error", ComparisonOp.EQ, has_error)
         if num_turns_min is not None:
@@ -382,7 +516,8 @@ class DuckDBStore:
 
         query = f"""
              SELECT id, sample_uid, raw_json, user_query, assistant_response, num_turns, expected_judgment_count,
-                 num_tool_calls, tool_stats, processing_status, processing_updated_at
+                 num_tool_calls, response_helpful_rate, response_unhelpful_rate, user_satisfied_rate,
+                 user_negative_feedback_rate, tool_stats, processing_status, processing_updated_at
             FROM samples s
             WHERE {combined_where}
             ORDER BY id

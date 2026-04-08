@@ -30,21 +30,38 @@ def generate_sample_uid(data: dict[str, Any]) -> str:
 
 
 def count_expected_judgments(messages: list[dict[str, Any]]) -> int:
-    """Count expected judged turns by grouping assistant/tool replies until next user."""
+    """Count expected judged turns using real user requests plus assistant execution chains."""
     turn_count = 0
-    current_has_response = False
     current_user_active = False
+    current_has_response = False
+
+    def extract_user_text(content: Any) -> str:
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return "".join(
+                part.get("text", "")
+                for part in content
+                if isinstance(part, dict) and part.get("type") == "text"
+            )
+        return str(content) if content else ""
 
     for message in messages:
         role = message.get("role")
         if role == "system":
             continue
+
         if role == "user":
-            if current_user_active and current_has_response:
-                turn_count += 1
-            current_user_active = True
-            current_has_response = False
+            user_text = extract_user_text(message.get("content"))
+            if user_text:
+                if current_user_active and current_has_response:
+                    turn_count += 1
+                current_user_active = True
+                current_has_response = False
+            elif current_user_active:
+                current_has_response = True
             continue
+
         if role in {"assistant", "tool"} and current_user_active:
             current_has_response = True
 

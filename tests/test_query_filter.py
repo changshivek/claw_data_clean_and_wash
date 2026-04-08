@@ -75,6 +75,26 @@ def test_filter_tool_stats_fields():
     assert "response_helpful_rate" in sql
 
 
+def test_filter_builder_supports_negative_feedback_rate():
+    builder = FilterQueryBuilder()
+    builder.add_condition("user_negative_feedback_rate", ComparisonOp.GTE, 0.3)
+
+    sql, params = builder.build_parameterized_where_clause("s")
+
+    assert "user_negative_feedback_rate" in sql
+    assert params == [0.3]
+
+
+def test_filter_builder_supports_unhelpful_rate():
+    builder = FilterQueryBuilder()
+    builder.add_condition("response_unhelpful_rate", ComparisonOp.GTE, 0.2)
+
+    sql, params = builder.build_parameterized_where_clause("s")
+
+    assert "response_unhelpful_rate" in sql
+    assert params == [0.2]
+
+
 def test_filter_builder_parameterized_clause():
     """Test parameterized clause generation keeps values out of SQL text."""
     builder = FilterQueryBuilder()

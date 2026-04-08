@@ -31,16 +31,18 @@ def render(route: RouteState):
 
     view = load_filter_list_view(st.session_state)
     criteria = view.criteria
+    selection_widget_key = "filter.selection_enabled_widget"
 
     # Filter controls
     with st.form("filter_form"):
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
 
         helpful_ops = [">=", "<=", "=", "!="]
         helpful_op = col1.selectbox(
             "Helpful Rate",
             helpful_ops,
             index=helpful_ops.index(criteria.helpful_op),
+            key="filter.helpful_op",
         )
         helpful_val = col1.number_input(
             "值",
@@ -48,6 +50,7 @@ def render(route: RouteState):
             max_value=1.0,
             value=float(criteria.helpful_val or 0.0),
             step=0.1,
+            key="filter.helpful_val",
         )
 
         satisfied_ops = [">=", "<=", "=", "!="]
@@ -55,6 +58,7 @@ def render(route: RouteState):
             "Satisfied Rate",
             satisfied_ops,
             index=satisfied_ops.index(criteria.satisfied_op),
+            key="filter.satisfied_op",
         )
         satisfied_val = col2.number_input(
             "值",
@@ -62,11 +66,38 @@ def render(route: RouteState):
             max_value=1.0,
             value=float(criteria.satisfied_val or 0.0),
             step=0.1,
+            key="filter.satisfied_val",
+        )
+
+        negative_feedback_ops = [">=", "<=", "=", "!="]
+        negative_feedback_op = col3.selectbox(
+            "Negative Feedback Rate",
+            negative_feedback_ops,
+            index=negative_feedback_ops.index(criteria.negative_feedback_op),
+            key="filter.negative_feedback_op",
+        )
+        negative_feedback_val = col3.number_input(
+            "负反馈值",
+            min_value=0.0,
+            max_value=1.0,
+            value=float(criteria.negative_feedback_val or 0.0),
+            step=0.1,
+            key="filter.negative_feedback_val",
         )
 
         col4, col5, col6 = st.columns(3)
-        num_turns_min = col4.number_input("最小轮次", min_value=0, value=int(criteria.num_turns_min or 0))
-        num_turns_max = col5.number_input("最大轮次", min_value=0, value=int(criteria.num_turns_max or 100))
+        num_turns_min = col4.number_input(
+            "最小轮次",
+            min_value=0,
+            value=int(criteria.num_turns_min or 0),
+            key="filter.num_turns_min",
+        )
+        num_turns_max = col5.number_input(
+            "最大轮次",
+            min_value=0,
+            value=int(criteria.num_turns_max or 100),
+            key="filter.num_turns_max",
+        )
         date_defaults = []
         parsed_date_from = _parse_date(criteria.date_from)
         parsed_date_to = _parse_date(criteria.date_to)
@@ -74,7 +105,7 @@ def render(route: RouteState):
             date_defaults.append(parsed_date_from)
         if parsed_date_to:
             date_defaults.append(parsed_date_to)
-        date_range = col6.date_input("日期范围", value=date_defaults)
+        date_range = col6.date_input("日期范围", value=date_defaults, key="filter.date_range")
 
         col_btn1, col_btn2 = st.columns([1, 1])
         submitted = col_btn1.form_submit_button("应用筛选")
@@ -89,6 +120,8 @@ def render(route: RouteState):
             helpful_val=helpful_val,
             satisfied_op=satisfied_op,
             satisfied_val=satisfied_val,
+            negative_feedback_op=negative_feedback_op,
+            negative_feedback_val=negative_feedback_val,
             num_turns_min=num_turns_min,
             num_turns_max=num_turns_max,
             date_from=date_from_val,
@@ -104,7 +137,14 @@ def render(route: RouteState):
         view.selected_ids = set()
         save_filter_list_view(st.session_state, view)
 
-    selection_enabled = st.checkbox("选择模式", value=view.selection_enabled, key="filter.selection_enabled")
+    if selection_widget_key not in st.session_state:
+        st.session_state[selection_widget_key] = view.selection_enabled
+
+    selection_enabled = st.checkbox(
+        "选择模式",
+        value=view.selection_enabled,
+        key=selection_widget_key,
+    )
     if selection_enabled != view.selection_enabled:
         view.selection_enabled = selection_enabled
         if not selection_enabled:
@@ -112,7 +152,7 @@ def render(route: RouteState):
         save_filter_list_view(st.session_state, view)
 
     # Query data
-    store = DuckDBStore(DB_PATH)
+    store = DuckDBStore(DB_PATH, read_only=True)
     with st.spinner("加载数据中..."):
         samples, total = get_filtered_samples(store, view.criteria, view.page_index, view.page_size)
 

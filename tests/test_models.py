@@ -174,6 +174,31 @@ def test_sample_num_turns_ignores_unanswered_user_messages():
     assert sample.expected_judgment_count == 1
 
 
+def test_sample_expected_judgment_count_absorbs_tool_result_only_user_blocks():
+    raw = {
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "列一下目录"}]},
+            {"role": "assistant", "content": [
+                {"type": "text", "text": "我先看看。"},
+                {"type": "tool_use", "id": "call_1", "name": "bash", "input": {"cmd": "ls"}},
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "call_1", "content": "a.txt\nb.txt"},
+            ]},
+            {"role": "assistant", "content": [
+                {"type": "text", "text": "目录里有 a.txt 和 b.txt。"},
+            ]},
+            {"role": "user", "content": [{"type": "text", "text": "继续看 a.txt"}]},
+            {"role": "assistant", "content": "我来打开它。"},
+        ]
+    }
+
+    sample = Sample.from_dict(raw)
+
+    assert sample.num_turns == 2
+    assert sample.expected_judgment_count == 2
+
+
 if __name__ == "__main__":
     test_sample_from_dict_basic()
     test_sample_from_dict_with_tool_calls()

@@ -4,7 +4,7 @@ import json
 import logging
 import time
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -19,6 +19,16 @@ class TurnContext:
     tool_calls: list[dict]
     tool_result: str | None
     signal_users: list[str]
+    execution_trace: list[str] = field(default_factory=list)
+
+
+@dataclass
+class ConversationEvent:
+    """归一化后的对话事件。"""
+    kind: str
+    text: str = ""
+    tool_calls: list[dict] = field(default_factory=list)
+    tool_results: list[str] = field(default_factory=list)
 
 
 class TurnContextBuilder:
@@ -34,74 +44,163 @@ class TurnContextBuilder:
             TurnContext 列表
         """
         turns = []
-        current_user = None
-        assistant_parts: list[str] = []
-        current_tool_calls: list[dict] = []
-        tool_results: list[str] = []
+        events = self._normalize_messages(messages)
+        event_index = 0
 
-        def flush_turn() -> None:
-            if current_user is None:
-                return
-            if not assistant_parts and not current_tool_calls and not tool_results:
-                return
-            turns.append(TurnContext(
-                turn_index=len(turns),
-                user_message=current_user,
-                assistant_message="\n".join(part for part in assistant_parts if part),
-                tool_calls=list(current_tool_calls),
-                tool_result="\n".join(tool_results) if tool_results else None,
-                signal_users=[],
-            ))
-
-        for msg in messages:
-            role = msg.get("role")
-            content = self._extract_text_content(msg.get("content"))
-
-            if role == "system":
-                # Skip system messages
+        while event_index < len(events):
+            event = events[event_index]
+            if event.kind != "user":
+                event_index += 1
                 continue
 
-            elif role == "user":
-                flush_turn()
-                current_user = content
-                assistant_parts = []
-                current_tool_calls = []
-                tool_results = []
+            assistant_parts: list[str] = []
+            current_tool_calls: list[dict] = []
+            tool_results: list[str] = []
+            execution_trace: list[str] = []
+            next_index = event_index + 1
 
-            elif role == "assistant":
-                if current_user is None:
-                    continue
-                if content:
-                    assistant_parts.append(content)
-                # Extract tool calls
-                for tc in msg.get("tool_calls", []):
-                    if isinstance(tc, dict) and "function" in tc:
-                        current_tool_calls.append(tc["function"])
+            while next_index < len(events):
+                next_event = events[next_index]
+                if next_event.kind == "user":
+                    break
+                if next_event.kind == "assistant":
+                    if next_event.text:
+                        assistant_parts.append(next_event.text)
+                        execution_trace.append(self._format_message("assistant", next_event.text))
+                    for tool_call in next_event.tool_calls:
+                        current_tool_calls.append(tool_call)
+                        execution_trace.append(self._format_tool_call(tool_call))
+                elif next_event.kind == "tool_result":
+                    for tool_result in next_event.tool_results:
+                        tool_results.append(tool_result)
+                        execution_trace.append(self._format_tool_result(tool_result))
+                next_index += 1
 
-            elif role == "tool":
-                if current_user is None:
-                    continue
-                if content:
-                    tool_results.append(content)
+            if assistant_parts or current_tool_calls or tool_results:
+                turns.append(TurnContext(
+                    turn_index=len(turns),
+                    user_message=event.text,
+                    assistant_message="\n".join(part for part in assistant_parts if part),
+                    tool_calls=current_tool_calls,
+                    tool_result="\n".join(tool_results) if tool_results else None,
+                    signal_users=[],
+                    execution_trace=execution_trace,
+                ))
 
-        # Don't forget last turn
-        flush_turn()
+            event_index = next_index
 
-        # Now extract signal users for each turn
-        turns = self._extract_signal_users(turns)
-
-        return turns
+        return self._extract_signal_users(turns)
 
     def _extract_signal_users(self, turns: list[TurnContext]) -> list[TurnContext]:
-        """为每个turn提取后续最多3个user消息作为信号"""
+        """为每个turn提取后续最多3轮真实user消息作为信号。"""
         for i, turn in enumerate(turns):
-            # Find user messages after this turn (excluding current turn's user)
             signal_users = []
             for j in range(i + 1, min(i + 4, len(turns))):
                 if turns[j].user_message:
                     signal_users.append(turns[j].user_message)
             turn.signal_users = signal_users
         return turns
+
+    def _normalize_messages(self, messages: list[dict]) -> list[ConversationEvent]:
+        """将 OpenAI/Anthropic 风格消息转换为统一事件流。"""
+        events: list[ConversationEvent] = []
+
+        for msg in messages:
+            role = msg.get("role")
+
+            if role == "system":
+                continue
+
+            if role == "user":
+                user_text, tool_results = self._extract_user_content(msg.get("content"))
+                for tool_result in tool_results:
+                    events.append(ConversationEvent(kind="tool_result", tool_results=[tool_result]))
+                if user_text:
+                    events.append(ConversationEvent(kind="user", text=user_text))
+                continue
+
+            if role == "assistant":
+                assistant_text = self._extract_text_content(msg.get("content"))
+                tool_calls = self._extract_tool_calls(msg)
+                if assistant_text or tool_calls:
+                    events.append(ConversationEvent(kind="assistant", text=assistant_text, tool_calls=tool_calls))
+                continue
+
+            if role == "tool":
+                tool_result = self._extract_text_content(msg.get("content"))
+                if tool_result:
+                    events.append(ConversationEvent(kind="tool_result", tool_results=[tool_result]))
+
+        return events
+
+    def _extract_user_content(self, content: Any) -> tuple[str, list[str]]:
+        """提取 user 文本和其中携带的 tool_result。"""
+        if content is None:
+            return "", []
+        if isinstance(content, str):
+            return content, []
+        if not isinstance(content, list):
+            return str(content), []
+
+        text_parts: list[str] = []
+        tool_results: list[str] = []
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            part_type = part.get("type")
+            if part_type == "text":
+                text_parts.append(part.get("text", ""))
+            elif part_type == "tool_result":
+                tool_result = self._extract_tool_result_content(part.get("content"))
+                if tool_result:
+                    tool_results.append(tool_result)
+
+        return "".join(text_parts), tool_results
+
+    def _extract_tool_result_content(self, content: Any) -> str:
+        """提取 tool_result 文本内容。"""
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                if isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, dict):
+                    if item.get("type") == "text":
+                        parts.append(item.get("text", ""))
+                    else:
+                        parts.append(str(item))
+                else:
+                    parts.append(str(item))
+            return "".join(parts)
+        return str(content)
+
+    def _extract_tool_calls(self, msg: dict) -> list[dict]:
+        """统一提取 OpenAI/Anthropic 风格的 tool_use 信息。"""
+        tool_calls: list[dict] = []
+
+        for tool_call in msg.get("tool_calls", []):
+            if isinstance(tool_call, dict) and isinstance(tool_call.get("function"), dict):
+                function = tool_call["function"]
+                tool_calls.append({
+                    "name": function.get("name", ""),
+                    "arguments": function.get("arguments", ""),
+                })
+
+        content = msg.get("content")
+        if isinstance(content, list):
+            for part in content:
+                if not isinstance(part, dict) or part.get("type") != "tool_use":
+                    continue
+                tool_calls.append({
+                    "name": part.get("name", ""),
+                    "arguments": json.dumps(part.get("input", {}), ensure_ascii=False, sort_keys=True),
+                })
+
+        return tool_calls
 
     def _extract_text_content(self, content: Any) -> str:
         """Extract text from content field"""
@@ -124,36 +223,48 @@ class TurnContextBuilder:
             content = content[:max_len] + "..."
         return f"[{role}]: {content}"
 
+    def _format_tool_call(self, tool_call: dict, max_len: int = 500) -> str:
+        """Format tool use for prompt."""
+        arguments = tool_call.get("arguments", "")
+        if not isinstance(arguments, str):
+            arguments = json.dumps(arguments, ensure_ascii=False, sort_keys=True)
+        if len(arguments) > max_len:
+            arguments = arguments[:max_len] + "..."
+        return f"[assistant_tool_use]: {tool_call.get('name', 'unknown')}({arguments})"
+
+    def _format_tool_result(self, content: str, max_len: int = 500) -> str:
+        """Format tool result for prompt."""
+        if len(content) > max_len:
+            content = content[:max_len] + "..."
+        return f"[tool_result]: {content}"
+
     def count_expected_turns(self, messages: list[dict]) -> int:
         """Count judged turns using the same grouping logic as extract_turns."""
         return len(self.extract_turns(messages))
 
     def build_judgment_prompt(self, turn: TurnContext, all_turns: list[TurnContext]) -> str:
         """构建判断prompt（简化版：只判断 response_helpful 和 user_satisfied）"""
-        current_parts = []
-        if turn.user_message:
-            current_parts.append(self._format_message("user", turn.user_message))
-        if turn.tool_result:
-            current_parts.append(f"[tool_result]: {turn.tool_result}")
-        if turn.assistant_message:
-            current_parts.append(self._format_message("assistant", turn.assistant_message))
+        current_user = self._format_message("user", turn.user_message) if turn.user_message else "(无当前用户请求)"
+        execution_section = "\n".join(turn.execution_trace) if turn.execution_trace else "(无执行结果)"
+        signal_section = "\n".join([self._format_message("user", user) for user in turn.signal_users]) if turn.signal_users else "(无后续真实用户消息)"
 
-        current_section = "\n".join(current_parts)
-        signal_section = "\n".join([f"[user]: {u}" for u in turn.signal_users]) if turn.signal_users else "(无后续用户消息)"
+        return f"""=== 当前用户请求 ===
+{current_user}
 
-        return f"""=== 当前轮 ===
-{current_section}
+=== 当前assistant执行链 ===
+{execution_section}
 
-=== 后续用户信号（最多3轮）===
+=== 后续真实用户反馈（最多3轮，已跳过仅tool_result轮）===
 {signal_section}
 
 请判断：
-1. response_helpful: 这个回答对用户有帮助吗？（yes/no/uncertain）
-2. user_satisfied: 用户对助手回复满意吗？（yes/no/uncertain/neutral）
+1. response_helpful: 综合当前assistant的text、tool use、tool result，以及执行链中的后续assistant continuation，这次响应对用户有帮助吗？（yes/no/uncertain）
+2. user_satisfied: 仅根据后续真实用户反馈判断用户是否满意；纯tool result不算满意度反馈。（yes/no/uncertain/neutral）
 
 答案格式：response_helpful=yes; user_satisfied=no
 
 注意：
+- system reminder、plan mode 提示、tool 框架提示、工具中断提示等系统/框架文本可能混在对话里；把它们视为上下文信息，只有在确实影响任务结果时才纳入判断，不要默认当作用户真实诉求或满意度反馈
 - 用户追问（要求补充/澄清） → user_satisfied=no
 - 用户确认/继续/满意 → user_satisfied=yes
 - 用户转向新话题 → user_satisfied=neutral
@@ -227,22 +338,42 @@ class RoundJudgmentProcessor:
 
 class ToolStatsAggregator:
     @staticmethod
+    def _safe_rate(numerator: int, denominator: int) -> float:
+        if denominator <= 0:
+            return 0.0
+        return numerator / denominator
+
+    @staticmethod
     def aggregate(judgments: list) -> dict:
         if not judgments:
             return {
-                "response_helpful_rate": 0,
-                "user_satisfied_rate": 0,
+                "response_helpful_rate": 0.0,
+                "response_unhelpful_rate": 0.0,
+                "user_satisfied_rate": 0.0,
+                "user_negative_feedback_rate": 0.0,
+                "response_helpful_scored_turns": 0,
+                "user_feedback_scored_turns": 0,
                 "total_turns": 0,
                 "has_error": False,
             }
 
         total = len(judgments)
         helpful_yes = sum(1 for j in judgments if j.response_helpful == "yes")
+        helpful_no = sum(1 for j in judgments if j.response_helpful == "no")
         satisfied_yes = sum(1 for j in judgments if j.user_satisfied == "yes")
+        satisfied_no = sum(1 for j in judgments if j.user_satisfied == "no")
+        satisfied_neutral = sum(1 for j in judgments if j.user_satisfied == "neutral")
+
+        response_helpful_scored_turns = helpful_yes + helpful_no
+        user_feedback_scored_turns = satisfied_yes + satisfied_no + satisfied_neutral
 
         return {
-            "response_helpful_rate": helpful_yes / total,
-            "user_satisfied_rate": satisfied_yes / total,
+            "response_helpful_rate": ToolStatsAggregator._safe_rate(helpful_yes, response_helpful_scored_turns),
+            "response_unhelpful_rate": ToolStatsAggregator._safe_rate(helpful_no, response_helpful_scored_turns),
+            "user_satisfied_rate": ToolStatsAggregator._safe_rate(satisfied_yes, user_feedback_scored_turns),
+            "user_negative_feedback_rate": ToolStatsAggregator._safe_rate(satisfied_no, user_feedback_scored_turns),
+            "response_helpful_scored_turns": response_helpful_scored_turns,
+            "user_feedback_scored_turns": user_feedback_scored_turns,
             "total_turns": total,
             "has_error": any(j.llm_error for j in judgments),
         }

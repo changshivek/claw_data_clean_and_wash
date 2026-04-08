@@ -7,7 +7,9 @@ from typing import Any, Optional
 
 ALLOWED_FIELDS = frozenset([
     "response_helpful_rate",
+    "response_unhelpful_rate",
     "user_satisfied_rate",
+    "user_negative_feedback_rate",
     "has_error",
     "num_turns",
     "num_tool_calls",
@@ -26,8 +28,6 @@ class ComparisonOp(Enum):
 
 # JSON fields stored in tool_stats column
 JSON_FIELDS = frozenset([
-    "response_helpful_rate",
-    "user_satisfied_rate",
     "has_error",
     "total_turns",
 ])
@@ -39,9 +39,13 @@ def _field_sql_expression(field: str, table_name: str = "samples") -> str:
         raise ValueError(f"Invalid field name: {field}")
 
     if field == "response_helpful_rate":
-        return f"CAST(json_extract({table_name}.tool_stats, '$.response_helpful_rate') AS DOUBLE)"
+        return f"{table_name}.response_helpful_rate"
+    if field == "response_unhelpful_rate":
+        return f"{table_name}.response_unhelpful_rate"
     if field == "user_satisfied_rate":
-        return f"CAST(json_extract({table_name}.tool_stats, '$.user_satisfied_rate') AS DOUBLE)"
+        return f"{table_name}.user_satisfied_rate"
+    if field == "user_negative_feedback_rate":
+        return f"{table_name}.user_negative_feedback_rate"
     if field == "has_error":
         return f"CAST(json_extract({table_name}.tool_stats, '$.has_error') AS BOOLEAN)"
     return f"{table_name}.{field}"
