@@ -414,8 +414,10 @@ async def test_process_sample_marks_unirouter_sample_complete(tmp_path):
     assert judgments.sample_uid == store.get_sample_by_id(sample_id)["sample_uid"]
     assert len(judgments.response_judgments) == 2
     assert len(judgments.episode_judgments) == 1
-    persisted = store.get_turn_judgments(sample_id)
-    assert len(persisted) == 1
+    persisted_response = store.get_assistant_response_judgments(judgments.sample_uid)
+    persisted_episode = store.get_user_episode_judgments(judgments.sample_uid)
+    assert len(persisted_response) == 2
+    assert len(persisted_episode) == 1
     row = store.conn.execute(
         "SELECT expected_judgment_count, tool_stats FROM samples WHERE id = ?",
         [sample_id],

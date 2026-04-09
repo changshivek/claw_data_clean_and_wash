@@ -11,7 +11,7 @@ from claw_data_filter.exporters.unified_exporter import (
 )
 from claw_data_filter.storage.duckdb_store import DuckDBStore
 from claw_data_filter.models.sample import Sample
-from claw_data_filter.models.round_judgment import RoundJudgment
+from claw_data_filter.models.round_judgment import AssistantResponseJudgment, FeedbackKind, UserEpisodeJudgment
 
 # Use data directory for tests
 TEST_DATA_DIR = Path(__file__).parent.parent / "data"
@@ -233,13 +233,29 @@ def test_openai_round_feedback_export_converts_anthropic_system_and_tools():
             }
         )
     )
-    store.insert_turn_judgment(
-        RoundJudgment(
-            sample_id=sample_id,
-            turn_index=0,
+    sample_uid = store.get_sample_by_id(sample_id)["sample_uid"]
+    store.insert_assistant_response_judgment(
+        AssistantResponseJudgment(
+            sample_uid=sample_uid,
+            response_index=0,
+            episode_index=0,
+            assistant_message_index=1,
+            feedback_kind=FeedbackKind.TOOL_RESULT,
+            feedback_message_start_index=2,
+            feedback_message_end_index=2,
+            feedback_payload=["demo"],
             response_helpful="yes",
-            user_satisfied="yes",
+            llm_error=False,
+        )
+    )
+    store.insert_user_episode_judgment(
+        UserEpisodeJudgment(
+            sample_uid=sample_uid,
+            episode_index=0,
+            start_user_message_index=0,
+            end_before_user_message_index=1,
             signal_from_users=[],
+            user_satisfied="yes",
             llm_error=False,
         )
     )

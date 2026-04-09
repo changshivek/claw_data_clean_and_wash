@@ -10,13 +10,13 @@
 
 - 已完成: 基线提交已建立，旧单层 round feedback 设计文档已清理，双层级设计与并发原则已补齐。
 - 已完成: claw_data_filter/processors/round_feedback.py 已重建为双层处理器，并实现全局并发池、双队列软配额和按 sample_uid 原子写回。
-- 已完成: claw_data_filter/storage/duckdb_store.py 已接入 assistant_response_judgments / user_episode_judgments 双表、schema migration、旧表回填兼容和 sample_uid 查询接口。
+- 已完成: claw_data_filter/storage/duckdb_store.py 已接入 assistant_response_judgments / user_episode_judgments 双表、schema migration、sample_uid 查询接口，并已移除 turn_judgments 兼容写回/回填壳。
 - 已完成: claw_data_filter/exporters/unified_exporter.py 已切换到 openai_round_feedback_v2，直接导出双层 judgment 明细。
 - 已完成: Web 详情页已切换为 user_satisfied episodes / response_helpful steps 双视图，detail_builder 与 sample_detail_view 不再把单个 turn 作为主展示结构。
-- 已完成: sample_query_service 已支持 assistant_response_judgments / user_episode_judgments 明细预览，旧 Web 测试已替换为直接验证双层语义的测试。
+- 已完成: sample_query_service 已支持 assistant_response_judgments / user_episode_judgments 明细预览，旧 turn_judgments 表预览入口已移除，Web 测试已替换为直接验证双层语义的测试。
 - 已完成: report_exporter 已补齐双层统计摘要与语义说明；CLI stats、overview、filter、sample table 文案已明确区分 assistant steps 与 user episodes。
 - 当前回归结果: 全量 pytest 已通过，130 passed。
-- 下一步: 逐步移除仅用于过渡的单层兼容壳，继续收缩 sample_id / turn_judgments 在 Web 与存储对外接口中的残留依赖。
+- 下一步: 继续收缩 sample_id 在 Web 路由与外显字段中的残留依赖，并评估是否继续下线 RoundJudgment / RoundJudgmentProcessor 兼容入口。
 
 ## 本轮推进结果
 
@@ -25,6 +25,7 @@
 - 已替换 Web detail/query 里对旧 turn 语义的过时断言，使测试直接反馈当前实现而不是历史兼容层。
 - 已把 report_exporter 从平铺旧 rate 字段升级为带 judgment_totals 和 semantics 的双层统计报告。
 - 已把 CLI stats、overview、filter、sample table 文案改为显式说明 response steps / user episodes 语义，减少“turn”口径误导。
+- 已移除 DuckDB 存储层的 turn_judgments 兼容写回、回填和查询接口，并将存储/导出/round feedback 相关测试改为直接验证双 judgment 表。
 
 ## 实施原则
 
@@ -39,7 +40,7 @@
 - [x] 先梳理当前未提交改动，确认哪些属于本轮 round feedback 设计准备，哪些属于之前已完成但尚未提交的修复。
 - [x] 以“当前稳定实现”为基线提交一次，至少包含已验证通过的存储修复、README 更新、脚本修复与测试修复。
 - [x] 在提交说明里明确：这一提交仍是单层 judged turn 语义，不包含双层级实现。
-- [ ] 确保后续双层级重构可以在 Git 历史里和当前稳定版本清晰对比。
+- [x] 确保后续双层级重构可以在 Git 历史里和当前稳定版本清晰对比。
 
 当前已知工作区涉及的改动类别：
 
@@ -51,9 +52,9 @@
 
 验收标准：
 
-- [ ] 工作区没有含义不明的混杂改动
+- [x] 工作区没有含义不明的混杂改动
 - [x] 当前单层实现的稳定状态已形成可回退提交
-- [ ] 后续双层改造可以按阶段单独提交
+- [x] 后续双层改造可以按阶段单独提交
 
 ## Phase 0: 先拍板的设计决策
 
@@ -106,7 +107,7 @@
 - [x] 为两张表设计稳定 judgment_uid 生成规则
 - [x] DuckDB schema migration 或启动时建表补齐
 - [x] 为两张表各自增加 sample_uid 索引和唯一约束
-- [ ] 删除或下线旧 turn_judgments 表，不保留长期兼容壳
+- [x] 删除或下线旧 turn_judgments 表，不保留长期兼容壳
 
 建议改动文件：
 

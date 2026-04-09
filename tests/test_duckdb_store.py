@@ -101,39 +101,69 @@ def test_store_reopens_with_stale_sample_sequence_and_recovers():
         repaired.close()
 
 
-def test_turn_judgments_table_created():
-    """Test that turn_judgments table is created on init"""
+def test_dual_judgment_tables_created():
+    """Test that dual judgment tables are created on init."""
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / "test.db"
         store = DuckDBStore(db_path)
-        # Check table exists (DuckDB uses SHOW TABLES)
         tables = store.conn.execute("SHOW TABLES").fetchall()
         table_names = [r[0] for r in tables]
-        assert "turn_judgments" in table_names
+        assert "assistant_response_judgments" in table_names
+        assert "user_episode_judgments" in table_names
+        assert "turn_judgments" not in table_names
         store.close()
 
 
-def test_insert_and_fetch_turn_judgment():
-    """Test inserting and fetching turn judgments"""
-    from claw_data_filter.models.round_judgment import RoundJudgment
+def test_insert_and_fetch_dual_judgments():
+    """Test inserting and fetching dual-level judgments."""
+    from claw_data_filter.models.round_judgment import AssistantResponseJudgment, FeedbackKind, UserEpisodeJudgment
+    from claw_data_filter.models.sample import Sample
 
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / "test.db"
         store = DuckDBStore(db_path)
-
-        judgment = RoundJudgment(
-            sample_id=1,
-            turn_index=0,
-            response_helpful="yes",
-            user_satisfied="yes",
-            signal_from_users=["谢谢"],
+        sample_id = store.insert_sample(
+            Sample.from_dict(
+                {
+                    "messages": [
+                        {"role": "user", "content": "hello"},
+                        {"role": "assistant", "content": "hi"},
+                    ]
+                }
+            )
         )
-        j_id = store.insert_turn_judgment(judgment)
-        assert j_id > 0
+        sample_uid = store.get_sample_by_id(sample_id)["sample_uid"]
 
-        fetched = store.get_turn_judgments(1)
-        assert len(fetched) == 1
-        assert fetched[0].response_helpful == "yes"
+        response_judgment = AssistantResponseJudgment(
+            sample_uid=sample_uid,
+            response_index=0,
+            episode_index=0,
+            assistant_message_index=1,
+            feedback_kind=FeedbackKind.USER,
+            feedback_message_start_index=2,
+            feedback_message_end_index=2,
+            feedback_payload=["谢谢"],
+            response_helpful="yes",
+        )
+        episode_judgment = UserEpisodeJudgment(
+            sample_uid=sample_uid,
+            episode_index=0,
+            start_user_message_index=0,
+            end_before_user_message_index=1,
+            signal_from_users=["谢谢"],
+            user_satisfied="yes",
+        )
+        response_uid = store.insert_assistant_response_judgment(response_judgment)
+        episode_uid = store.insert_user_episode_judgment(episode_judgment)
+        assert response_uid == response_judgment.judgment_uid
+        assert episode_uid == episode_judgment.judgment_uid
+
+        fetched_response = store.get_assistant_response_judgments(sample_uid)
+        fetched_episode = store.get_user_episode_judgments(sample_uid)
+        assert len(fetched_response) == 1
+        assert len(fetched_episode) == 1
+        assert fetched_response[0].response_helpful == "yes"
+        assert fetched_episode[0].user_satisfied == "yes"
         store.close()
 
 
@@ -278,7 +308,7 @@ def test_claim_unprocessed_samples_skips_session_merged_rows():
 
 def test_partially_processed_sample_remains_unprocessed():
     """Test samples with missing judgments are still returned for processing."""
-    from claw_data_filter.models.round_judgment import RoundJudgment
+    from claw_data_filter.models.round_judgment import AssistantResponseJudgment, FeedbackKind
 
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / "test_partial.db"
@@ -297,8 +327,16 @@ def test_partially_processed_sample_remains_unprocessed():
             "UPDATE samples SET session_merge_status = 'keep', session_merge_keep = TRUE WHERE id = ?",
             [sample_id],
         )
-        store.insert_turn_judgment(
-            RoundJudgment(sample_id=sample_id, turn_index=0, response_helpful="yes", user_satisfied="yes")
+        sample_uid = store.get_sample_by_id(sample_id)["sample_uid"]
+        store.insert_assistant_response_judgment(
+            AssistantResponseJudgment(
+                sample_uid=sample_uid,
+                response_index=0,
+                episode_index=0,
+                assistant_message_index=1,
+                feedback_kind=FeedbackKind.NONE,
+                response_helpful="yes",
+            )
         )
 
         unprocessed = store.get_unprocessed_samples(limit=10)
@@ -308,9 +346,9 @@ def test_partially_processed_sample_remains_unprocessed():
         store.close()
 
 
-def test_replace_round_feedback_results_replaces_old_judgments():
-    """Test replacing round feedback results clears stale partial judgments."""
-    from claw_data_filter.models.round_judgment import RoundJudgment
+def test_replace_round_feedback_results_replaces_stale_dual_judgments():
+    """Test replacing round feedback results clears stale dual judgments."""
+    from claw_data_filter.models.round_judgment import AssistantResponseJudgment, FeedbackKind, UserEpisodeJudgment
 
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / "test_replace.db"
@@ -324,31 +362,79 @@ def test_replace_round_feedback_results_replaces_old_judgments():
             ]
         })
         sample_id = store.insert_sample(sample)
-        store.insert_turn_judgment(
-            RoundJudgment(sample_id=sample_id, turn_index=0, response_helpful="no", user_satisfied="no")
+        sample_uid = store.get_sample_by_id(sample_id)["sample_uid"]
+        store.insert_assistant_response_judgment(
+            AssistantResponseJudgment(
+                sample_uid=sample_uid,
+                response_index=0,
+                episode_index=0,
+                assistant_message_index=1,
+                feedback_kind=FeedbackKind.NONE,
+                response_helpful="no",
+            )
+        )
+        store.insert_user_episode_judgment(
+            UserEpisodeJudgment(
+                sample_uid=sample_uid,
+                episode_index=0,
+                start_user_message_index=0,
+                end_before_user_message_index=2,
+                signal_from_users=[],
+                user_satisfied="no",
+            )
         )
 
-        judgments = [
-            RoundJudgment(sample_id=sample_id, turn_index=0, response_helpful="yes", user_satisfied="yes"),
-            RoundJudgment(sample_id=sample_id, turn_index=1, response_helpful="yes", user_satisfied="uncertain"),
+        response_judgments = [
+            AssistantResponseJudgment(
+                sample_uid=sample_uid,
+                response_index=0,
+                episode_index=0,
+                assistant_message_index=1,
+                feedback_kind=FeedbackKind.NONE,
+                response_helpful="yes",
+            ),
+            AssistantResponseJudgment(
+                sample_uid=sample_uid,
+                response_index=1,
+                episode_index=0,
+                assistant_message_index=2,
+                feedback_kind=FeedbackKind.NONE,
+                response_helpful="yes",
+            ),
+        ]
+        episode_judgments = [
+            UserEpisodeJudgment(
+                sample_uid=sample_uid,
+                episode_index=0,
+                start_user_message_index=0,
+                end_before_user_message_index=2,
+                signal_from_users=[],
+                user_satisfied="uncertain",
+            )
         ]
         tool_stats = {
             "response_helpful_rate": 1.0,
             "user_satisfied_rate": 0.5,
-            "total_turns": 2,
+            "response_unhelpful_rate": 0.0,
+            "user_negative_feedback_rate": 0.0,
+            "assistant_response_count": 2,
+            "user_episode_count": 1,
             "has_error": False,
         }
 
-        store.replace_round_feedback_results(sample_id, 2, judgments, tool_stats)
+        store.replace_round_feedback_results(sample_id, 2, 1, response_judgments, episode_judgments, tool_stats)
 
-        rows = store.get_turn_judgments(sample_id)
-        assert len(rows) == 2
-        assert [row.turn_index for row in rows] == [0, 1]
+        stored_response = store.get_assistant_response_judgments(sample_uid)
+        stored_episode = store.get_user_episode_judgments(sample_uid)
+        assert len(stored_response) == 2
+        assert len(stored_episode) == 1
+        assert [row.response_index for row in stored_response] == [0, 1]
+        assert stored_episode[0].user_satisfied == "uncertain"
         sample_row = store.conn.execute(
-            "SELECT processing_status FROM samples WHERE id = ?",
+            "SELECT processing_status, expected_response_judgment_count, expected_episode_judgment_count FROM samples WHERE id = ?",
             [sample_id],
         ).fetchone()
-        assert sample_row[0] == "completed"
+        assert sample_row == ("completed", 2, 1)
 
         store.close()
 
@@ -601,13 +687,17 @@ def test_init_schema_backfills_num_turns_from_expected_judgment_count():
         )
         conn.execute(
             """
-            CREATE TABLE turn_judgments (
-                id INTEGER PRIMARY KEY,
-                sample_id INTEGER,
-                turn_index INTEGER,
+            CREATE TABLE assistant_response_judgments (
+                judgment_uid TEXT PRIMARY KEY,
+                sample_uid TEXT,
+                response_index INTEGER,
+                episode_index INTEGER,
+                assistant_message_index INTEGER,
+                feedback_kind TEXT,
+                feedback_message_start_index INTEGER,
+                feedback_message_end_index INTEGER,
+                feedback_payload JSON,
                 response_helpful TEXT,
-                user_satisfied TEXT,
-                signal_from_users JSON,
                 llm_error BOOLEAN,
                 created_at TIMESTAMP
             )
@@ -621,7 +711,7 @@ def test_init_schema_backfills_num_turns_from_expected_judgment_count():
         store.close()
 
 
-def test_init_schema_recomputes_tool_stats_from_turn_judgments():
+def test_init_schema_recomputes_tool_stats_from_dual_judgments():
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / "tool_stats_backfill.db"
         conn = __import__("duckdb").connect(str(db_path))
@@ -645,13 +735,32 @@ def test_init_schema_recomputes_tool_stats_from_turn_judgments():
         )
         conn.execute(
             """
-            CREATE TABLE turn_judgments (
-                id INTEGER PRIMARY KEY,
-                sample_id INTEGER,
-                turn_index INTEGER,
+            CREATE TABLE assistant_response_judgments (
+                judgment_uid TEXT PRIMARY KEY,
+                sample_uid TEXT,
+                response_index INTEGER,
+                episode_index INTEGER,
+                assistant_message_index INTEGER,
+                feedback_kind TEXT,
+                feedback_message_start_index INTEGER,
+                feedback_message_end_index INTEGER,
+                feedback_payload JSON,
                 response_helpful TEXT,
-                user_satisfied TEXT,
+                llm_error BOOLEAN,
+                created_at TIMESTAMP
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE user_episode_judgments (
+                judgment_uid TEXT PRIMARY KEY,
+                sample_uid TEXT,
+                episode_index INTEGER,
+                start_user_message_index INTEGER,
+                end_before_user_message_index INTEGER,
                 signal_from_users JSON,
+                user_satisfied TEXT,
                 llm_error BOOLEAN,
                 created_at TIMESTAMP
             )
@@ -661,13 +770,19 @@ def test_init_schema_recomputes_tool_stats_from_turn_judgments():
             "INSERT INTO samples (id, sample_uid, raw_json, user_query, assistant_response, num_turns, expected_judgment_count, tool_stats) VALUES (1, 'u', '{\"messages\":[]}', '', '', 3, 3, '{\"response_helpful_rate\": 0.33, \"user_satisfied_rate\": 0.25, \"total_turns\": 4, \"has_error\": false}')"
         )
         conn.execute(
-            "INSERT INTO turn_judgments VALUES (1, 1, 0, 'yes', 'uncertain', '[]', false, CURRENT_TIMESTAMP)"
+            "INSERT INTO assistant_response_judgments VALUES ('resp:u:0', 'u', 0, 0, 1, 'none', NULL, NULL, '[]', 'yes', false, CURRENT_TIMESTAMP)"
         )
         conn.execute(
-            "INSERT INTO turn_judgments VALUES (2, 1, 1, 'no', 'neutral', '[]', false, CURRENT_TIMESTAMP)"
+            "INSERT INTO assistant_response_judgments VALUES ('resp:u:1', 'u', 1, 0, 2, 'none', NULL, NULL, '[]', 'no', false, CURRENT_TIMESTAMP)"
         )
         conn.execute(
-            "INSERT INTO turn_judgments VALUES (3, 1, 2, 'yes', 'no', '[]', false, CURRENT_TIMESTAMP)"
+            "INSERT INTO assistant_response_judgments VALUES ('resp:u:2', 'u', 2, 1, 4, 'none', NULL, NULL, '[]', 'yes', false, CURRENT_TIMESTAMP)"
+        )
+        conn.execute(
+            "INSERT INTO user_episode_judgments VALUES ('episode:u:0', 'u', 0, 0, 2, '[]', 'neutral', false, CURRENT_TIMESTAMP)"
+        )
+        conn.execute(
+            "INSERT INTO user_episode_judgments VALUES ('episode:u:1', 'u', 1, 3, 4, '[]', 'no', false, CURRENT_TIMESTAMP)"
         )
         conn.close()
 
@@ -678,8 +793,8 @@ def test_init_schema_recomputes_tool_stats_from_turn_judgments():
         assert stats["response_unhelpful_rate"] == 1 / 3
         assert stats["user_satisfied_rate"] == 0.0
         assert stats["user_negative_feedback_rate"] == 0.5
-        assert stats["response_helpful_scored_turns"] == 3
-        assert stats["user_feedback_scored_turns"] == 2
+        assert stats["response_helpful_scored_steps"] == 3
+        assert stats["user_feedback_scored_episodes"] == 2
         rate_row = store.conn.execute(
             "SELECT response_helpful_rate, response_unhelpful_rate, user_satisfied_rate, user_negative_feedback_rate FROM samples WHERE id = 1"
         ).fetchone()
@@ -690,13 +805,13 @@ def test_init_schema_recomputes_tool_stats_from_turn_judgments():
 if __name__ == "__main__":
     test_store_and_retrieve_samples()
     test_insert_sample_deduplicates_by_sample_uid()
-    test_insert_and_fetch_turn_judgment()
+    test_insert_and_fetch_dual_judgments()
     test_tool_stats_column_exists()
     test_update_sample_tool_stats()
     test_get_unprocessed_samples()
     test_claim_unprocessed_samples_marks_processing()
     test_partially_processed_sample_remains_unprocessed()
-    test_replace_round_feedback_results_replaces_old_judgments()
+    test_replace_round_feedback_results_replaces_stale_dual_judgments()
     test_mark_sample_processing_failed_sets_failed_status()
     test_filter_samples_returns_sample_dicts()
     test_samples_schema_removed_unused_columns_and_added_uid()

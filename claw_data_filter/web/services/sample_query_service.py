@@ -149,26 +149,6 @@ def get_table_preview(
             "created_at",
         ]
         return columns, rows, total
-    if table_name == "turn_judgments":
-        query = """
-            SELECT id, sample_id, turn_index, response_helpful, user_satisfied,
-                   llm_error, created_at
-            FROM turn_judgments
-            ORDER BY sample_id, turn_index
-            LIMIT ? OFFSET ?
-        """
-        rows = store.conn.execute(query, [limit, offset]).fetchall()
-        total = store.conn.execute("SELECT COUNT(*) FROM turn_judgments").fetchone()[0]
-        columns = [
-            "id",
-            "sample_id",
-            "turn_index",
-            "response_helpful",
-            "user_satisfied",
-            "llm_error",
-            "created_at",
-        ]
-        return columns, rows, total
 
     query = f"SELECT * FROM {table_name} LIMIT ? OFFSET ?"
     rows = store.conn.execute(query, [limit, offset]).fetchall()
