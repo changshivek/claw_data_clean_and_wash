@@ -143,6 +143,75 @@ def count_expected_judgments(messages: list[dict[str, Any]]) -> int:
     return turn_count
 
 
+def count_user_episodes(messages: list[dict[str, Any]]) -> int:
+    """Count user episodes that contain at least one assistant or tool response."""
+    normalized = extract_normalized_messages(messages)
+    episode_count = 0
+    current_user_active = False
+    current_has_response = False
+
+    for message in normalized:
+        role = message.get("role")
+        if role == "system":
+            continue
+        if role == "user":
+            user_text = _extract_text_content(message.get("content"))
+            if user_text:
+                if current_user_active and current_has_response:
+                    episode_count += 1
+                current_user_active = True
+                current_has_response = False
+            continue
+        if role in {"assistant", "tool"} and current_user_active:
+            current_has_response = True
+
+    if current_user_active and current_has_response:
+        episode_count += 1
+
+    return episode_count
+
+
+def count_assistant_response_units(messages: list[dict[str, Any]]) -> int:
+    """Count assistant response units separated by tool-result or user feedback blocks."""
+    normalized = extract_normalized_messages(messages)
+    response_count = 0
+    current_user_active = False
+    assistant_open = False
+
+    for message in normalized:
+        role = message.get("role")
+        if role == "system":
+            continue
+        if role == "user":
+            if assistant_open:
+                response_count += 1
+                assistant_open = False
+            user_text = _extract_text_content(message.get("content"))
+            if user_text:
+                current_user_active = True
+            continue
+        if role == "assistant" and current_user_active:
+            if assistant_open:
+                response_count += 1
+            assistant_open = True
+            continue
+        if role == "tool" and assistant_open:
+            response_count += 1
+            assistant_open = False
+
+    if assistant_open:
+        response_count += 1
+
+    return response_count
+
+
+def extract_normalized_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Normalize a raw message list without a full payload wrapper."""
+    if _detect_format(messages) == "anthropic":
+        return _anthropic_to_openai(messages)
+    return messages
+
+
 def _detect_format(messages: list) -> str:
     """检测消息格式：返回 'openai' 或 'anthropic'"""
     for msg in messages:
@@ -318,6 +387,8 @@ class Sample(BaseModel):
     assistant_response: str = ""
     num_turns: int = 0
     expected_judgment_count: int = 0
+    expected_response_judgment_count: int = 0
+    expected_episode_judgment_count: int = 0
     num_tool_calls: int = 0
     empty_response: bool = False
     has_error: bool = False
@@ -361,9 +432,10 @@ class Sample(BaseModel):
 
         assistant_response = "\n".join(assistant_parts)
 
-        # Keep num_turns aligned with judged-turn semantics used by round feedback.
-        expected_judgment_count = count_expected_judgments(messages)
-        num_turns = expected_judgment_count
+        expected_episode_judgment_count = count_user_episodes(messages)
+        expected_response_judgment_count = count_assistant_response_units(messages)
+        expected_judgment_count = expected_episode_judgment_count + expected_response_judgment_count
+        num_turns = expected_episode_judgment_count
 
         # Count tool calls: use tool_calls from assistant if available, otherwise count tool role messages
         # (tool role messages come from Anthropic format conversion or are OpenAI tool results)
@@ -388,6 +460,8 @@ class Sample(BaseModel):
             assistant_response=assistant_response,
             num_turns=num_turns,
             expected_judgment_count=expected_judgment_count,
+            expected_response_judgment_count=expected_response_judgment_count,
+            expected_episode_judgment_count=expected_episode_judgment_count,
             num_tool_calls=num_tool_calls,
             empty_response=has_empty_response(messages),
             has_error=has_error,

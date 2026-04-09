@@ -136,7 +136,7 @@ def filter_cmd(ctx, response_helpful_rate, user_satisfied_rate, user_negative_fe
 @cli.command()
 @click.pass_context
 def stats(ctx):
-    """Show statistics about imported data and round judgments."""
+    """Show statistics about imported data and dual-level round judgments."""
     config = ctx.obj["config"]
     store = DuckDBStore(config.db_path)
 
@@ -145,10 +145,10 @@ def stats(ctx):
         click.echo("=== Statistics ===")
         click.echo(f"Total samples: {stats_data['total_samples']}")
         if stats_data['total_samples'] > 0:
-            click.echo(f"Avg response helpful rate: {stats_data['avg_response_helpful_rate']:.2f}")
-            click.echo(f"Avg response unhelpful rate: {stats_data['avg_response_unhelpful_rate']:.2f}")
-            click.echo(f"Avg user satisfied rate: {stats_data['avg_user_satisfied_rate']:.2f}")
-            click.echo(f"Avg user negative feedback rate: {stats_data['avg_user_negative_feedback_rate']:.2f}")
+            click.echo(f"Avg response helpful rate (assistant steps): {stats_data['avg_response_helpful_rate']:.2f}")
+            click.echo(f"Avg response unhelpful rate (assistant steps): {stats_data['avg_response_unhelpful_rate']:.2f}")
+            click.echo(f"Avg user satisfied rate (user episodes): {stats_data['avg_user_satisfied_rate']:.2f}")
+            click.echo(f"Avg user negative feedback rate (user episodes): {stats_data['avg_user_negative_feedback_rate']:.2f}")
             click.echo(f"Error count: {stats_data['error_count']}")
     finally:
         store.close()

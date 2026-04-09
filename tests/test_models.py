@@ -154,7 +154,9 @@ def test_sample_from_unirouter_payload():
     assert sample.user_query == "What is 2+2?"
     assert sample.assistant_response == "2+2 is 4."
     assert sample.num_turns == 1
-    assert sample.expected_judgment_count == 1
+    assert sample.expected_episode_judgment_count == 1
+    assert sample.expected_response_judgment_count == 1
+    assert sample.expected_judgment_count == 2
     assert sample.empty_response is False
 
 
@@ -189,7 +191,9 @@ def test_sample_num_turns_ignores_unanswered_user_messages():
     sample = Sample.from_dict(raw)
 
     assert sample.num_turns == 1
-    assert sample.expected_judgment_count == 1
+    assert sample.expected_episode_judgment_count == 1
+    assert sample.expected_response_judgment_count == 1
+    assert sample.expected_judgment_count == 2
 
 
 def test_sample_expected_judgment_count_absorbs_tool_result_only_user_blocks():
@@ -214,7 +218,9 @@ def test_sample_expected_judgment_count_absorbs_tool_result_only_user_blocks():
     sample = Sample.from_dict(raw)
 
     assert sample.num_turns == 2
-    assert sample.expected_judgment_count == 2
+    assert sample.expected_episode_judgment_count == 2
+    assert sample.expected_response_judgment_count == 3
+    assert sample.expected_judgment_count == 5
 
 
 if __name__ == "__main__":

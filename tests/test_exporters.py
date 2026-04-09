@@ -112,13 +112,31 @@ def test_openai_round_feedback_export_includes_turn_ranges_and_judgments():
             }
         )
     )
-    store.insert_turn_judgment(
-        RoundJudgment(
-            sample_id=sample_id,
-            turn_index=0,
+    sample_uid = store.get_sample_by_id(sample_id)["sample_uid"]
+    from claw_data_filter.models.round_judgment import AssistantResponseJudgment, FeedbackKind, UserEpisodeJudgment
+
+    store.insert_assistant_response_judgment(
+        AssistantResponseJudgment(
+            sample_uid=sample_uid,
+            response_index=0,
+            episode_index=0,
+            assistant_message_index=1,
+            feedback_kind=FeedbackKind.USER,
+            feedback_message_start_index=2,
+            feedback_message_end_index=2,
+            feedback_payload=["next"],
             response_helpful="yes",
-            user_satisfied="neutral",
+            llm_error=False,
+        )
+    )
+    store.insert_user_episode_judgment(
+        UserEpisodeJudgment(
+            sample_uid=sample_uid,
+            episode_index=0,
+            start_user_message_index=0,
+            end_before_user_message_index=1,
             signal_from_users=["next"],
+            user_satisfied="neutral",
             llm_error=False,
         )
     )
@@ -127,18 +145,28 @@ def test_openai_round_feedback_export_includes_turn_ranges_and_judgments():
 
     assert count == 1
     payload = json.loads(output_path.read_text(encoding="utf-8").splitlines()[0])
-    assert payload["schema"] == "openai_round_feedback_v1"
+    assert payload["schema"] == "openai_round_feedback_v2"
     assert payload["conversation"]["messages"][0]["role"] == "user"
-    assert payload["round_feedback"]["turns"][0] == {
-        "turn_index": 0,
+    assert payload["round_feedback"]["response_helpful_steps"][0] == {
+        "response_index": 0,
+        "episode_index": 0,
+        "assistant_message_index": 1,
+        "feedback_kind": "user",
+        "feedback_message_start_index": 2,
+        "feedback_message_end_index": 2,
+        "feedback_payload": ["next"],
+        "response_helpful": "yes",
+        "llm_error": False,
+    }
+    assert payload["round_feedback"]["user_satisfied_episodes"][0] == {
+        "episode_index": 0,
         "message_start_index": 0,
         "message_end_index": 1,
-        "response_helpful": "yes",
         "user_satisfied": "neutral",
         "signal_from_users": ["next"],
         "llm_error": False,
     }
-    assert payload["round_feedback"]["turns"][1]["message_start_index"] == 2
+    assert payload["round_feedback"]["user_satisfied_episodes"][1]["message_start_index"] == 2
     assert payload["source_metadata"]["metadata"] == {"source": "unit-test"}
 
     store.close()
@@ -315,7 +343,17 @@ def test_report_generation():
     raw = {"messages": [{"role": "user", "content": "Test"}]}
     sample = Sample.from_dict(raw)
     sample_id = store.insert_sample(sample)
-    tool_stats = {"response_helpful_rate": 0.9, "user_satisfied_rate": 0.85, "total_turns": 2, "has_error": False}
+    tool_stats = {
+        "response_helpful_rate": 0.9,
+        "response_unhelpful_rate": 0.1,
+        "user_satisfied_rate": 0.85,
+        "user_negative_feedback_rate": 0.15,
+        "assistant_response_count": 4,
+        "user_episode_count": 2,
+        "response_helpful_scored_steps": 4,
+        "user_feedback_scored_episodes": 2,
+        "has_error": False,
+    }
     store.update_sample_tool_stats(sample_id, tool_stats)
 
     # Generate report
@@ -324,8 +362,17 @@ def test_report_generation():
 
     assert "summary" in report
     assert report["summary"]["total_samples"] == 1
+    assert report["summary"]["processed_samples"] == 1
     assert "avg_response_unhelpful_rate" in report["summary"]
     assert "avg_user_negative_feedback_rate" in report["summary"]
+    assert report["judgment_totals"] == {
+        "assistant_response_count": 4,
+        "user_episode_count": 2,
+        "response_helpful_scored_steps": 4,
+        "user_feedback_scored_episodes": 2,
+    }
+    assert "num_turns" in report["semantics"]
+    assert "assistant response judgments" in report["semantics"]["response_helpful_rate"]
 
     store.close()
     print("test_report_generation passed")
@@ -355,10 +402,13 @@ def test_report_export():
     assert report_path.exists()
     with open(report_path) as f:
         report = json.load(f)
-        assert "total_samples" in report
-        assert "avg_response_helpful_rate" in report
-        assert "avg_response_unhelpful_rate" in report
-        assert "avg_user_negative_feedback_rate" in report
+        assert "summary" in report
+        assert "judgment_totals" in report
+        assert "semantics" in report
+        assert "generated_at" in report
+        assert "avg_response_helpful_rate" in report["summary"]
+        assert "avg_response_unhelpful_rate" in report["summary"]
+        assert "avg_user_negative_feedback_rate" in report["summary"]
 
     store.close()
     print("test_report_export passed")

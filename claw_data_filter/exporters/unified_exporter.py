@@ -15,6 +15,7 @@ from claw_data_filter.models.sample import (
     extract_messages_from_payload,
     extract_normalized_conversation_from_payload,
 )
+from claw_data_filter.processors.round_feedback import TurnContextBuilder
 from claw_data_filter.storage.duckdb_store import DuckDBStore
 
 RAW_JSONL = "raw_jsonl"
@@ -120,7 +121,8 @@ class UnifiedExporter:
         where_clause, params = self._build_where_clause(filter_spec, table_name="samples")
         query = f"""
             SELECT id, sample_uid, raw_json, imported_at, empty_response,
-                   num_turns, expected_judgment_count, num_tool_calls,
+                     num_turns, expected_judgment_count, expected_response_judgment_count,
+                     expected_episode_judgment_count, num_tool_calls,
                    response_helpful_rate, response_unhelpful_rate,
                    user_satisfied_rate, user_negative_feedback_rate,
                    tool_stats, session_merge_status, session_merge_keep,
@@ -142,16 +144,18 @@ class UnifiedExporter:
                 "empty_response": bool(row[4]),
                 "num_turns": row[5] or 0,
                 "expected_judgment_count": row[6] or 0,
-                "num_tool_calls": row[7] or 0,
-                "response_helpful_rate": row[8],
-                "response_unhelpful_rate": row[9],
-                "user_satisfied_rate": row[10],
-                "user_negative_feedback_rate": row[11],
-                "tool_stats": json.loads(row[12]) if row[12] else {},
-                "session_merge_status": row[13],
-                "session_merge_keep": row[14],
-                "session_merge_reason": row[15],
-                "processing_status": row[16],
+                "expected_response_judgment_count": row[7] or 0,
+                "expected_episode_judgment_count": row[8] or 0,
+                "num_tool_calls": row[9] or 0,
+                "response_helpful_rate": row[10],
+                "response_unhelpful_rate": row[11],
+                "user_satisfied_rate": row[12],
+                "user_negative_feedback_rate": row[13],
+                "tool_stats": json.loads(row[14]) if row[14] else {},
+                "session_merge_status": row[15],
+                "session_merge_keep": row[16],
+                "session_merge_reason": row[17],
+                "processing_status": row[18],
             }
             for row in rows
         ]
@@ -207,33 +211,57 @@ class UnifiedExporter:
         raw_json = sample_row["raw_json"]
         conversation = extract_normalized_conversation_from_payload(raw_json)
         messages = conversation["messages"]
-        turn_ranges = self._build_turn_ranges(messages)
-        judgments = {judgment.turn_index: judgment for judgment in self.store.get_turn_judgments(sample_row["id"])}
-        turn_count = max(len(turn_ranges), max(judgments.keys(), default=-1) + 1)
+        builder = TurnContextBuilder()
+        response_contexts = builder.extract_response_contexts(sample_row["sample_uid"], messages)
+        episode_contexts = builder.extract_episode_contexts(sample_row["sample_uid"], messages)
+        response_judgments = {
+            judgment.response_index: judgment
+            for judgment in self.store.get_assistant_response_judgments(sample_row["sample_uid"])
+        }
+        episode_judgments = {
+            judgment.episode_index: judgment
+            for judgment in self.store.get_user_episode_judgments(sample_row["sample_uid"])
+        }
 
-        feedback_turns = []
-        for turn_index in range(turn_count):
-            turn_range = turn_ranges[turn_index] if turn_index < len(turn_ranges) else None
-            judgment = judgments.get(turn_index)
-            feedback_turns.append(
+        response_steps = []
+        for context in response_contexts:
+            judgment = response_judgments.get(context.response_index)
+            response_steps.append(
                 {
-                    "turn_index": turn_index,
-                    "message_start_index": None if turn_range is None else turn_range["message_start_index"],
-                    "message_end_index": None if turn_range is None else turn_range["message_end_index"],
+                    "response_index": context.response_index,
+                    "episode_index": context.episode_index,
+                    "assistant_message_index": context.assistant_message_index,
+                    "feedback_kind": context.feedback_kind.value,
+                    "feedback_message_start_index": context.feedback_message_start_index,
+                    "feedback_message_end_index": context.feedback_message_end_index,
+                    "feedback_payload": judgment.feedback_payload if judgment else context.feedback_payload,
                     "response_helpful": None if judgment is None else judgment.response_helpful,
+                    "llm_error": False if judgment is None else judgment.llm_error,
+                }
+            )
+
+        episode_records = []
+        for context in episode_contexts:
+            judgment = episode_judgments.get(context.episode_index)
+            episode_records.append(
+                {
+                    "episode_index": context.episode_index,
+                    "message_start_index": context.start_user_message_index,
+                    "message_end_index": context.end_before_user_message_index,
+                    "signal_from_users": judgment.signal_from_users if judgment else context.signal_from_users,
                     "user_satisfied": None if judgment is None else judgment.user_satisfied,
-                    "signal_from_users": [] if judgment is None else judgment.signal_from_users,
                     "llm_error": False if judgment is None else judgment.llm_error,
                 }
             )
 
         return {
-            "schema": "openai_round_feedback_v1",
+            "schema": "openai_round_feedback_v2",
             "metadata": self._build_metadata(sample_row),
             "source_metadata": self._build_source_metadata(raw_json),
             "conversation": conversation,
             "round_feedback": {
-                "turns": feedback_turns,
+                "response_helpful_steps": response_steps,
+                "user_satisfied_episodes": episode_records,
             },
         }
 
@@ -251,6 +279,8 @@ class UnifiedExporter:
             "session_merge_reason": sample_row.get("session_merge_reason"),
             "num_turns": sample_row.get("num_turns"),
             "expected_judgment_count": sample_row.get("expected_judgment_count"),
+            "expected_response_judgment_count": sample_row.get("expected_response_judgment_count"),
+            "expected_episode_judgment_count": sample_row.get("expected_episode_judgment_count"),
             "num_tool_calls": sample_row.get("num_tool_calls"),
             "response_helpful_rate": sample_row.get("response_helpful_rate"),
             "response_unhelpful_rate": sample_row.get("response_unhelpful_rate"),
@@ -293,51 +323,6 @@ class UnifiedExporter:
             "source_format": "anthropic" if any(isinstance(message.get("content"), list) for message in messages) else "openai",
             "metadata": source_metadata,
         }
-
-    def _build_turn_ranges(self, messages: list[dict[str, Any]]) -> list[dict[str, int]]:
-        turn_ranges: list[dict[str, int]] = []
-        current_user_index: int | None = None
-        last_response_index: int | None = None
-        current_user_active = False
-        current_has_response = False
-
-        for index, message in enumerate(messages):
-            role = message.get("role")
-            if role == "system":
-                continue
-
-            if role == "user":
-                user_text = self._extract_text_content(message.get("content"))
-                if user_text:
-                    if current_user_active and current_has_response and current_user_index is not None and last_response_index is not None:
-                        turn_ranges.append(
-                            {
-                                "message_start_index": current_user_index,
-                                "message_end_index": last_response_index,
-                            }
-                        )
-                    current_user_index = index
-                    current_has_response = False
-                    last_response_index = None
-                    current_user_active = True
-                elif current_user_active:
-                    current_has_response = True
-                    last_response_index = index
-                continue
-
-            if role in {"assistant", "tool"} and current_user_active:
-                current_has_response = True
-                last_response_index = index
-
-        if current_user_active and current_has_response and current_user_index is not None and last_response_index is not None:
-            turn_ranges.append(
-                {
-                    "message_start_index": current_user_index,
-                    "message_end_index": last_response_index,
-                }
-            )
-
-        return turn_ranges
 
     def _extract_text_content(self, content: Any) -> str:
         if isinstance(content, str):

@@ -4,15 +4,32 @@ from typing import Any
 
 
 @dataclass(slots=True)
-class TurnDetailView:
-    turn_index: int
+class ResponseStepDetailView:
+    response_index: int
+    episode_index: int
+    assistant_message_index: int
     user_message: str
     assistant_message: str
     tool_calls: list[dict[str, Any]]
-    tool_result: str | None
-    response_helpful: str | None
-    user_satisfied: str | None
+    feedback_kind: str
+    feedback_message_start_index: int | None
+    feedback_message_end_index: int | None
+    feedback_payload: list[str] = field(default_factory=list)
+    response_helpful: str | None = None
+    llm_error: bool = False
+
+
+@dataclass(slots=True)
+class EpisodeDetailView:
+    episode_index: int
+    start_user_message_index: int
+    end_before_user_message_index: int | None
+    user_message: str
+    assistant_messages: list[str] = field(default_factory=list)
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    tool_results: list[str] = field(default_factory=list)
     signal_from_users: list[str] = field(default_factory=list)
+    user_satisfied: str | None = None
     llm_error: bool = False
 
 
@@ -23,6 +40,8 @@ class SampleDetailView:
     empty_response: bool
     num_turns: int
     expected_judgment_count: int
+    expected_response_judgment_count: int
+    expected_episode_judgment_count: int
     num_tool_calls: int
     helpful_rate: float
     satisfied_rate: float
@@ -33,4 +52,5 @@ class SampleDetailView:
     session_merge_group_size: int | None = None
     session_merge_representative_id: int | None = None
     session_merge_reason: str | None = None
-    turns: list[TurnDetailView] = field(default_factory=list)
+    response_steps: list[ResponseStepDetailView] = field(default_factory=list)
+    user_episodes: list[EpisodeDetailView] = field(default_factory=list)

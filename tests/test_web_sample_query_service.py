@@ -3,6 +3,7 @@
 import tempfile
 from pathlib import Path
 
+from claw_data_filter.models.round_judgment import AssistantResponseJudgment, FeedbackKind, UserEpisodeJudgment
 from claw_data_filter.models.sample import Sample
 from claw_data_filter.storage.duckdb_store import DuckDBStore
 from claw_data_filter.web.services.sample_query_service import get_filtered_samples, get_samples_preview_page, get_table_preview
@@ -56,30 +57,61 @@ def test_get_table_preview_returns_rows_and_total_with_offset():
                 }
             )
         )
-        store.replace_round_feedback_results(
-            first_id,
-            1,
-            [],
-            {"response_helpful_rate": 0.0, "user_satisfied_rate": 0.0, "total_turns": 0, "has_error": False},
+        first_uid = store.get_sample_by_id(first_id)["sample_uid"]
+        second_uid = store.get_sample_by_id(second_id)["sample_uid"]
+        store.insert_assistant_response_judgment(
+            AssistantResponseJudgment(
+                sample_uid=first_uid,
+                response_index=0,
+                episode_index=0,
+                assistant_message_index=1,
+                feedback_kind=FeedbackKind.NONE,
+                response_helpful="uncertain",
+            )
         )
-        store.insert_turn_judgment(
-            __import__("claw_data_filter.models.round_judgment", fromlist=["RoundJudgment"]).RoundJudgment(
-                sample_id=second_id,
-                turn_index=0,
+        store.insert_assistant_response_judgment(
+            AssistantResponseJudgment(
+                sample_uid=second_uid,
+                response_index=0,
+                episode_index=0,
+                assistant_message_index=1,
+                feedback_kind=FeedbackKind.USER,
+                feedback_message_start_index=2,
+                feedback_message_end_index=2,
+                feedback_payload=["good"],
                 response_helpful="yes",
+            )
+        )
+        store.insert_user_episode_judgment(
+            UserEpisodeJudgment(
+                sample_uid=second_uid,
+                episode_index=0,
+                start_user_message_index=0,
+                end_before_user_message_index=1,
+                signal_from_users=["good"],
                 user_satisfied="yes",
             )
         )
 
         columns, rows, total = get_table_preview(store, "samples", limit=10, offset=5)
         assert "id" in columns
+        assert "sample_uid" in columns
+        assert "expected_response_judgment_count" in columns
+        assert "expected_episode_judgment_count" in columns
         assert total == 2
         assert rows == []
 
-        turn_columns, turn_rows, turn_total = get_table_preview(store, "turn_judgments", limit=1, offset=0)
-        assert "sample_id" in turn_columns
-        assert turn_total == 1
-        assert len(turn_rows) == 1
+        response_columns, response_rows, response_total = get_table_preview(store, "assistant_response_judgments", limit=5, offset=0)
+        assert "sample_uid" in response_columns
+        assert "response_index" in response_columns
+        assert response_total == 2
+        assert len(response_rows) == 2
+
+        episode_columns, episode_rows, episode_total = get_table_preview(store, "user_episode_judgments", limit=5, offset=0)
+        assert "sample_uid" in episode_columns
+        assert "episode_index" in episode_columns
+        assert episode_total == 1
+        assert len(episode_rows) == 1
         store.close()
 
 

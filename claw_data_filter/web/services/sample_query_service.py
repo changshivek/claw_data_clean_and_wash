@@ -71,7 +71,8 @@ def get_table_preview(
     """Fetch preview rows for a table."""
     if table_name == "samples":
         query = """
-            SELECT id, num_turns, expected_judgment_count, num_tool_calls,
+                        SELECT id, sample_uid, num_turns, expected_judgment_count,
+                                     expected_response_judgment_count, expected_episode_judgment_count, num_tool_calls,
                  empty_response, processing_status, session_merge_status, session_merge_keep,
                    session_merge_reason, imported_at,
                    response_helpful_rate AS helpful_rate,
@@ -84,8 +85,11 @@ def get_table_preview(
         total = store.conn.execute("SELECT COUNT(*) FROM samples").fetchone()[0]
         columns = [
             "id",
+            "sample_uid",
             "num_turns",
             "expected_judgment_count",
+            "expected_response_judgment_count",
+            "expected_episode_judgment_count",
             "num_tool_calls",
             "empty_response",
             "processing_status",
@@ -95,6 +99,54 @@ def get_table_preview(
             "imported_at",
             "helpful_rate",
             "satisfied_rate",
+        ]
+        return columns, rows, total
+    if table_name == "assistant_response_judgments":
+        query = """
+            SELECT judgment_uid, sample_uid, response_index, episode_index,
+                   assistant_message_index, feedback_kind,
+                   feedback_message_start_index, feedback_message_end_index,
+                   response_helpful, llm_error, created_at
+            FROM assistant_response_judgments
+            ORDER BY sample_uid, response_index
+            LIMIT ? OFFSET ?
+        """
+        rows = store.conn.execute(query, [limit, offset]).fetchall()
+        total = store.conn.execute("SELECT COUNT(*) FROM assistant_response_judgments").fetchone()[0]
+        columns = [
+            "judgment_uid",
+            "sample_uid",
+            "response_index",
+            "episode_index",
+            "assistant_message_index",
+            "feedback_kind",
+            "feedback_message_start_index",
+            "feedback_message_end_index",
+            "response_helpful",
+            "llm_error",
+            "created_at",
+        ]
+        return columns, rows, total
+    if table_name == "user_episode_judgments":
+        query = """
+            SELECT judgment_uid, sample_uid, episode_index,
+                   start_user_message_index, end_before_user_message_index,
+                   user_satisfied, llm_error, created_at
+            FROM user_episode_judgments
+            ORDER BY sample_uid, episode_index
+            LIMIT ? OFFSET ?
+        """
+        rows = store.conn.execute(query, [limit, offset]).fetchall()
+        total = store.conn.execute("SELECT COUNT(*) FROM user_episode_judgments").fetchone()[0]
+        columns = [
+            "judgment_uid",
+            "sample_uid",
+            "episode_index",
+            "start_user_message_index",
+            "end_before_user_message_index",
+            "user_satisfied",
+            "llm_error",
+            "created_at",
         ]
         return columns, rows, total
     if table_name == "turn_judgments":

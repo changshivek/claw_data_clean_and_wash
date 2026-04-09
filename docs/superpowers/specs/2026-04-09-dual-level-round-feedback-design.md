@@ -462,6 +462,112 @@ samples.tool_stats 建议改为分别基于两类 judgment 聚合：
 }
 ```
 
+## LLM 并发分配原则
+
+双层级 judgment 落地后，LLM 调用会从“每个 judged turn 一次调用”变成“两类任务并行提交”。
+这个变化如果处理不好，会出现两类问题：
+
+- 资源被硬切分后，一侧队列空闲但另一侧排队，整体吞吐下降。
+- response_helpful 任务数量通常明显多于 user_satisfied，若完全按提交顺序跑，episode judgment 可能长期饥饿。
+
+因此并发策略需要明确约束。
+
+### 原则 1: 使用全局共享并发池
+
+不要为 response_helpful 和 user_satisfied 各自固定切一半 worker。
+
+推荐做法：
+
+- 整个 round feedback 进程只维护一个全局 `max_concurrency` 预算。
+- 两类 judgment 任务都从同一个全局预算里领取执行槽位。
+- 任一侧没有待处理任务时，空闲并发槽位应立即被另一侧复用。
+
+这样可以保证 LLM 资源始终尽量跑满。
+
+### 原则 2: 使用双队列 + 软配额，而不是硬切分
+
+建议维护两条任务队列：
+
+- `response_helpful_queue`
+- `user_satisfied_queue`
+
+调度时采用软配额：
+
+- 默认不做 50/50 硬切分。
+- 当两边都有积压时，给 user_satisfied 保留一个最小份额，避免被大量 helpful 任务淹没。
+- 当某一侧队列变空时，另一侧可以借满全部剩余并发。
+
+一个可行策略：
+
+- `reserved_episode_slots = max(1, floor(max_concurrency * 0.2))`
+- 剩余槽位全部开放给任意任务竞争
+
+这不是固定比例，而是防饥饿的软底线。
+
+### 原则 3: 调度目标是“高利用率 + 不饥饿”
+
+设计目标不是让两类 judgment 数量上平均，而是：
+
+- 全局并发槽位尽量一直被占满。
+- user_satisfied 不会因为 response_helpful 数量更大而长期滞后。
+- 每个 sample 的两类结果都能在可接受时间内汇合并原子写回。
+
+### 原则 4: 写回粒度与调度粒度分离
+
+建议把“任务执行”与“样本写回”分开：
+
+- 调度层按单个 response step 或单个 user episode 发起 LLM 调用。
+- 聚合层按 sample 收集结果。
+- 当一个 sample 的两类 judgment 都完成后，再统一写回数据库。
+
+这样可以最大化并发利用率，而不必为了等待某个 sample 的另一类 judgment 完成而占住执行槽位。
+
+### 原则 5: 不建议按 sample 串行跑完两层再切到下一个 sample
+
+反例：
+
+- 先对 sample A 跑完全部 helpful
+- 再跑完 sample A 的 satisfied
+- 再处理 sample B
+
+这种做法实现简单，但会显著降低全局调度灵活性，也不利于批量高并发。
+
+更合理的做法是：
+
+- 先把 batch 中所有 sample 拆成两类任务
+- 统一进入调度器
+- 调度器按全局预算执行
+- 每个 sample 的结果在内存中按 sample_uid 汇总，待齐后原子写回
+
+### 推荐调度模型
+
+推荐一个简单且足够稳定的模型：
+
+1. batch 内预先提取所有 assistant response contexts 和 user episode contexts。
+2. 分别进入两条队列。
+3. 使用一个全局 semaphore 控制总并发。
+4. dispatcher 优先从“未达到软配额的一侧”取任务；若该侧为空，则立即从另一侧取任务。
+5. 任一任务完成后立刻释放槽位并继续拉取下一个任务。
+6. sample 级 aggregator 只负责收集结果并判断是否达到可写回条件。
+
+### 与现有配置的关系
+
+现有配置仍可保留：
+
+- `MAX_CONCURRENCY`: 全局总预算
+- `BATCH_SIZE`: 一次 claim 的 sample 数量
+
+但语义要更新为：
+
+- `MAX_CONCURRENCY` 不再代表“样本并发数”，而是“双层 judgment 任务的全局调用上限”。
+
+如有必要，后续可以新增可选配置：
+
+- `EPISODE_MIN_SHARE`
+- `RESPONSE_MIN_SHARE`
+
+但默认应优先采用自动软配额，不要让用户必须手工切并发比例。
+
 ### 7. 测试
 
 - tests/test_round_feedback.py

@@ -33,7 +33,7 @@ def _parse_date(value: str | None) -> date | None:
 def render(route: RouteState):
     render_page_header(
         "数据筛选",
-        "在一页内组合 helpful、满意度、session merge 和 empty response 条件，直接检查样本并按需导出选中记录。",
+        "在一页内组合 response-step helpful、episode satisfied、session merge 和 empty response 条件，直接检查样本并按需导出选中记录。",
         "Filter",
     )
 
@@ -49,20 +49,20 @@ def render(route: RouteState):
         col1, col2, col3 = st.columns(3)
 
         helpful_ops = [">=", "<=", "=", "!="]
-        helpful_op = col1.selectbox("Helpful Rate", helpful_ops, index=helpful_ops.index(criteria.helpful_op), key="filter.helpful_op")
+        helpful_op = col1.selectbox("Response Helpful Rate", helpful_ops, index=helpful_ops.index(criteria.helpful_op), key="filter.helpful_op")
         helpful_val = col1.number_input("值", min_value=0.0, max_value=1.0, value=float(criteria.helpful_val or 0.0), step=0.1, key="filter.helpful_val")
 
         satisfied_ops = [">=", "<=", "=", "!="]
-        satisfied_op = col2.selectbox("Satisfied Rate", satisfied_ops, index=satisfied_ops.index(criteria.satisfied_op), key="filter.satisfied_op")
+        satisfied_op = col2.selectbox("User Satisfied Rate", satisfied_ops, index=satisfied_ops.index(criteria.satisfied_op), key="filter.satisfied_op")
         satisfied_val = col2.number_input("值", min_value=0.0, max_value=1.0, value=float(criteria.satisfied_val or 0.0), step=0.1, key="filter.satisfied_val")
 
         negative_feedback_ops = [">=", "<=", "=", "!="]
-        negative_feedback_op = col3.selectbox("Negative Feedback Rate", negative_feedback_ops, index=negative_feedback_ops.index(criteria.negative_feedback_op), key="filter.negative_feedback_op")
+        negative_feedback_op = col3.selectbox("User Negative Feedback Rate", negative_feedback_ops, index=negative_feedback_ops.index(criteria.negative_feedback_op), key="filter.negative_feedback_op")
         negative_feedback_val = col3.number_input("负反馈值", min_value=0.0, max_value=1.0, value=float(criteria.negative_feedback_val or 0.0), step=0.1, key="filter.negative_feedback_val")
 
         col4, col5, col6 = st.columns(3)
-        num_turns_min = col4.number_input("最小轮次", min_value=0, value=int(criteria.num_turns_min or 0), key="filter.num_turns_min")
-        num_turns_max = col5.number_input("最大轮次", min_value=0, value=int(criteria.num_turns_max or 100), key="filter.num_turns_max")
+        num_turns_min = col4.number_input("最小 Episode 数", min_value=0, value=int(criteria.num_turns_min or 0), key="filter.num_turns_min")
+        num_turns_max = col5.number_input("最大 Episode 数", min_value=0, value=int(criteria.num_turns_max or 100), key="filter.num_turns_max")
         date_defaults = []
         parsed_date_from = _parse_date(criteria.date_from)
         parsed_date_to = _parse_date(criteria.date_to)
@@ -162,6 +162,7 @@ def render(route: RouteState):
         st.rerun()
 
     st.divider()
+    st.caption("当前 num_turns 筛选字段表示 user episode 数；response_helpful_rate 和 user_satisfied_rate 已使用双层 judgment 分母。")
     st.markdown(f"**共 {total} 条结果**")
 
     export_scope_options = ["filtered"]

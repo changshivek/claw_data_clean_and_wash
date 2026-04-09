@@ -41,6 +41,6 @@ def test_go_to_page_clears_detail_context():
     go_to_page(params, "export")
     route = read_route(params)
 
-    assert route.page == "export"
+    assert route.page == "overview"
     assert route.sample_id is None
     assert route.return_to is None

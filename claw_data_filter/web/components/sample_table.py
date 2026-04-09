@@ -35,7 +35,7 @@ def render_samples_table(
         header_cols = st.columns([0.5, 0.7, 0.8, 0.9, 1.2, 0.8, 1, 0.8, 0.8, 1])
         header_cols[0].markdown("**选择**")
         header_cols[1].markdown("**ID**")
-        header_cols[2].markdown("**judged_turns**")
+        header_cols[2].markdown("**episodes**")
         header_cols[3].markdown("**empty**")
         header_cols[4].markdown("**merge**")
         header_cols[5].markdown("**helpful**")
@@ -45,7 +45,7 @@ def render_samples_table(
         header_cols[9].markdown("**操作**")
     else:
         cols = st.columns([0.7, 0.8, 0.9, 1.2, 0.8, 1, 0.8, 0.8, 1])
-        headers = ["ID", "judged_turns", "empty", "merge", "helpful_rate", "status", "satisfied_rate", "has_error", "操作"]
+        headers = ["ID", "episodes", "empty", "merge", "helpful_rate", "status", "satisfied_rate", "has_error", "操作"]
         for col, header in zip(cols, headers):
             col.markdown(f"**{header}**")
 

@@ -1,33 +1,62 @@
 """Build detail-page view models from storage records."""
-from claw_data_filter.models.round_judgment import RoundJudgment
+from claw_data_filter.models.round_judgment import AssistantResponseJudgment, UserEpisodeJudgment
 from claw_data_filter.models.sample import extract_messages_from_payload
 from claw_data_filter.processors.round_feedback import TurnContextBuilder
-from claw_data_filter.web.view_models.sample_detail_view import SampleDetailView, TurnDetailView
+from claw_data_filter.web.view_models.sample_detail_view import (
+    EpisodeDetailView,
+    ResponseStepDetailView,
+    SampleDetailView,
+)
 
 
 def build_sample_detail_view(
     sample_record: dict,
-    judgments: list[RoundJudgment],
+    response_judgments: list[AssistantResponseJudgment],
+    episode_judgments: list[UserEpisodeJudgment],
 ) -> SampleDetailView:
     """Build a detail-page view model from a sample record and its judgments."""
     tool_stats = sample_record.get("tool_stats") or {}
     messages = extract_messages_from_payload(sample_record.get("raw_json") or {})
-    turn_contexts = TurnContextBuilder().extract_turns(messages)
-    judgments_by_turn = {judgment.turn_index: judgment for judgment in judgments}
+    builder = TurnContextBuilder()
+    response_contexts = builder.extract_response_contexts(sample_record.get("sample_uid") or "-", messages)
+    episode_contexts = builder.extract_episode_contexts(sample_record.get("sample_uid") or "-", messages)
+    response_by_index = {judgment.response_index: judgment for judgment in response_judgments}
+    episode_by_index = {judgment.episode_index: judgment for judgment in episode_judgments}
 
-    turns: list[TurnDetailView] = []
-    for turn in turn_contexts:
-        judgment = judgments_by_turn.get(turn.turn_index)
-        turns.append(
-            TurnDetailView(
-                turn_index=turn.turn_index,
-                user_message=turn.user_message,
-                assistant_message=turn.assistant_message,
-                tool_calls=turn.tool_calls,
-                tool_result=turn.tool_result,
+    response_steps: list[ResponseStepDetailView] = []
+    for context in response_contexts:
+        judgment = response_by_index.get(context.response_index)
+        response_steps.append(
+            ResponseStepDetailView(
+                response_index=context.response_index,
+                episode_index=context.episode_index,
+                assistant_message_index=context.assistant_message_index,
+                user_message=context.user_message,
+                assistant_message=context.assistant_message,
+                tool_calls=context.tool_calls,
+                feedback_kind=context.feedback_kind.value,
+                feedback_message_start_index=context.feedback_message_start_index,
+                feedback_message_end_index=context.feedback_message_end_index,
+                feedback_payload=judgment.feedback_payload if judgment else list(context.feedback_payload),
                 response_helpful=judgment.response_helpful if judgment else None,
+                llm_error=judgment.llm_error if judgment else False,
+            )
+        )
+
+    user_episodes: list[EpisodeDetailView] = []
+    for context in episode_contexts:
+        judgment = episode_by_index.get(context.episode_index)
+        user_episodes.append(
+            EpisodeDetailView(
+                episode_index=context.episode_index,
+                start_user_message_index=context.start_user_message_index,
+                end_before_user_message_index=context.end_before_user_message_index,
+                user_message=context.user_message,
+                assistant_messages=list(context.assistant_messages),
+                tool_calls=list(context.tool_calls),
+                tool_results=list(context.tool_results),
+                signal_from_users=judgment.signal_from_users if judgment else list(context.signal_from_users),
                 user_satisfied=judgment.user_satisfied if judgment else None,
-                signal_from_users=judgment.signal_from_users if judgment else list(turn.signal_users),
                 llm_error=judgment.llm_error if judgment else False,
             )
         )
@@ -37,7 +66,9 @@ def build_sample_detail_view(
         sample_uid=sample_record.get("sample_uid") or "-",
         empty_response=bool(sample_record.get("empty_response")),
         num_turns=sample_record.get("num_turns") or 0,
-        expected_judgment_count=sample_record.get("expected_judgment_count") or len(turns),
+        expected_judgment_count=sample_record.get("expected_judgment_count") or (len(response_steps) + len(user_episodes)),
+        expected_response_judgment_count=sample_record.get("expected_response_judgment_count") or len(response_steps),
+        expected_episode_judgment_count=sample_record.get("expected_episode_judgment_count") or len(user_episodes),
         num_tool_calls=sample_record.get("num_tool_calls") or 0,
         helpful_rate=tool_stats.get("response_helpful_rate", 0.0),
         satisfied_rate=tool_stats.get("user_satisfied_rate", 0.0),
@@ -48,5 +79,6 @@ def build_sample_detail_view(
         session_merge_group_size=sample_record.get("session_merge_group_size"),
         session_merge_representative_id=sample_record.get("session_merge_representative_id"),
         session_merge_reason=sample_record.get("session_merge_reason"),
-        turns=turns,
+        response_steps=response_steps,
+        user_episodes=user_episodes,
     )

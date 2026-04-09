@@ -200,7 +200,7 @@ def test_get_unprocessed_samples():
         # Should be unprocessed
         unprocessed = store.get_unprocessed_samples(limit=10)
         assert len(unprocessed) == 1
-        assert unprocessed[0][0] == sample_id
+        assert unprocessed[0][0] == store.get_sample_by_id(sample_id)["sample_uid"]
 
         store.close()
 
@@ -225,7 +225,7 @@ def test_claim_unprocessed_samples_marks_processing():
         claimed = store.claim_unprocessed_samples(limit=10)
 
         assert len(claimed) == 1
-        assert claimed[0][0] == sample_id
+        assert claimed[0][0] == store.get_sample_by_id(sample_id)["sample_uid"]
         row = store.conn.execute("SELECT processing_status FROM samples WHERE id = ?", [sample_id]).fetchone()
         assert row[0] == "processing"
         store.close()
@@ -303,7 +303,7 @@ def test_partially_processed_sample_remains_unprocessed():
 
         unprocessed = store.get_unprocessed_samples(limit=10)
         assert len(unprocessed) == 1
-        assert unprocessed[0][0] == sample_id
+        assert unprocessed[0][0] == store.get_sample_by_id(sample_id)["sample_uid"]
 
         store.close()
 

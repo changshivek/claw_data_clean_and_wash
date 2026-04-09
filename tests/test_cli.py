@@ -244,4 +244,4 @@ def test_filter_command_accepts_openai_round_feedback_export(tmp_path, monkeypat
 
     assert result.exit_code == 0
     payload = output_file.read_text(encoding="utf-8").splitlines()[0]
-    assert '"schema": "openai_round_feedback_v1"' in payload
+    assert '"schema": "openai_round_feedback_v2"' in payload

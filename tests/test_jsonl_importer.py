@@ -150,7 +150,7 @@ def test_import_unirouter_payload_populates_derived_fields():
     row = importer.store.conn.execute(
         "SELECT user_query, assistant_response, expected_judgment_count FROM samples LIMIT 1"
     ).fetchone()
-    assert row == ("Hello", "Hi there", 1)
+    assert row == ("Hello", "Hi there", 2)
 
     importer.close()
     print("test_import_unirouter_payload_populates_derived_fields passed")

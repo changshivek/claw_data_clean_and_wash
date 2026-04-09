@@ -7,7 +7,11 @@ from datetime import datetime
 
 from claw_data_filter.filters.query import ComparisonOp, FilterQueryBuilder
 from claw_data_filter.models.sample import Sample, generate_sample_uid
-from claw_data_filter.models.round_judgment import RoundJudgment
+from claw_data_filter.models.round_judgment import (
+    AssistantResponseJudgment,
+    RoundJudgment,
+    UserEpisodeJudgment,
+)
 
 
 class DuckDBStore:
@@ -20,19 +24,20 @@ class DuckDBStore:
         if not self.read_only:
             self.init_schema()
 
-    def init_schema(self):
-        """Create tables and sequences if not exist."""
-        # Samples table keeps only actively maintained sample-level fields.
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS samples (
-                id INTEGER PRIMARY KEY,
-                sample_uid TEXT,
+    def _create_samples_table(self, table_name: str) -> None:
+        self.conn.execute(
+            f"""
+            CREATE TABLE {table_name} (
+                sample_uid TEXT PRIMARY KEY,
+                id INTEGER UNIQUE,
                 raw_json JSON,
                 user_query TEXT,
                 assistant_response TEXT,
                 empty_response BOOLEAN,
                 num_turns INTEGER,
                 expected_judgment_count INTEGER,
+                expected_response_judgment_count INTEGER,
+                expected_episode_judgment_count INTEGER,
                 num_tool_calls INTEGER,
                 response_helpful_rate DOUBLE,
                 response_unhelpful_rate DOUBLE,
@@ -50,7 +55,74 @@ class DuckDBStore:
                 processing_status TEXT,
                 processing_updated_at TIMESTAMP
             )
-        """)
+            """
+        )
+
+    def _ensure_samples_table(self) -> None:
+        existing_tables = {row[0] for row in self.conn.execute("SHOW TABLES").fetchall()}
+        if "samples" not in existing_tables:
+            self._create_samples_table("samples")
+            return
+
+        columns = self.conn.execute("PRAGMA table_info('samples')").fetchall()
+        column_names = {row[1] for row in columns}
+        primary_keys = [row[1] for row in columns if row[5]]
+
+        needs_rebuild = primary_keys != ["sample_uid"] or "id" not in column_names
+        if not needs_rebuild:
+            return
+
+        def existing(name: str, fallback_sql: str) -> str:
+            return name if name in column_names else fallback_sql
+
+        self._create_samples_table("samples_v2")
+        self.conn.execute(
+            f"""
+            INSERT INTO samples_v2 (
+                sample_uid, id, raw_json, user_query, assistant_response, empty_response,
+                num_turns, expected_judgment_count, expected_response_judgment_count,
+                expected_episode_judgment_count, num_tool_calls, response_helpful_rate,
+                response_unhelpful_rate, user_satisfied_rate, user_negative_feedback_rate,
+                imported_at, tool_stats, session_merge_status, session_merge_keep,
+                session_merge_group_id, session_merge_group_size, session_merge_representative_id,
+                session_merge_reason, session_merge_updated_at, processing_status, processing_updated_at
+            )
+            SELECT
+                COALESCE(sample_uid, sha256(CAST(raw_json AS VARCHAR))),
+                id,
+                raw_json,
+                user_query,
+                assistant_response,
+                COALESCE({existing('empty_response', 'FALSE')}, FALSE),
+                COALESCE({existing('num_turns', '0')}, 0),
+                COALESCE({existing('expected_judgment_count', 'num_turns')}, {existing('num_turns', '0')}, 0),
+                {existing('expected_response_judgment_count', 'NULL')},
+                {existing('expected_episode_judgment_count', 'NULL')},
+                COALESCE({existing('num_tool_calls', '0')}, 0),
+                {existing('response_helpful_rate', 'NULL')},
+                {existing('response_unhelpful_rate', 'NULL')},
+                {existing('user_satisfied_rate', 'NULL')},
+                {existing('user_negative_feedback_rate', 'NULL')},
+                {existing('imported_at', 'CURRENT_TIMESTAMP')},
+                {existing('tool_stats', 'NULL')},
+                {existing('session_merge_status', 'NULL')},
+                {existing('session_merge_keep', 'NULL')},
+                {existing('session_merge_group_id', 'NULL')},
+                {existing('session_merge_group_size', 'NULL')},
+                {existing('session_merge_representative_id', 'NULL')},
+                {existing('session_merge_reason', 'NULL')},
+                {existing('session_merge_updated_at', 'NULL')},
+                {existing('processing_status', "'pending'")},
+                {existing('processing_updated_at', 'CURRENT_TIMESTAMP')}
+            FROM samples
+            """
+        )
+        self.conn.execute("DROP TABLE samples")
+        self.conn.execute("ALTER TABLE samples_v2 RENAME TO samples")
+
+    def init_schema(self):
+        """Create tables and sequences if not exist."""
+        self._ensure_samples_table()
 
         # Migration: add columns if they don't exist
         try:
@@ -69,6 +141,14 @@ class DuckDBStore:
             self.conn.execute("ALTER TABLE samples ADD COLUMN expected_judgment_count INTEGER")
         except:
             pass  # Column may already exist (ignore error)
+        try:
+            self.conn.execute("ALTER TABLE samples ADD COLUMN expected_response_judgment_count INTEGER")
+        except:
+            pass
+        try:
+            self.conn.execute("ALTER TABLE samples ADD COLUMN expected_episode_judgment_count INTEGER")
+        except:
+            pass
         try:
             self.conn.execute("ALTER TABLE samples ADD COLUMN processing_status TEXT")
         except:
@@ -127,7 +207,12 @@ class DuckDBStore:
         )
         self.conn.execute("UPDATE samples SET sample_uid = COALESCE(sample_uid, sha256(CAST(raw_json AS VARCHAR)))")
         self.conn.execute("UPDATE samples SET empty_response = COALESCE(empty_response, FALSE)")
-        self.conn.execute("UPDATE samples SET num_turns = COALESCE(expected_judgment_count, num_turns)")
+        self.conn.execute(
+            "UPDATE samples SET num_turns = COALESCE(expected_episode_judgment_count, expected_judgment_count, num_turns, 0)"
+        )
+        self.conn.execute(
+            "UPDATE samples SET expected_judgment_count = COALESCE(expected_judgment_count, num_turns, 0), expected_response_judgment_count = COALESCE(expected_response_judgment_count, 0), expected_episode_judgment_count = COALESCE(expected_episode_judgment_count, num_turns, 0)"
+        )
         self.conn.execute(
             """
             UPDATE samples
@@ -151,7 +236,7 @@ class DuckDBStore:
         # Drop evaluations table completely
         self.conn.execute("DROP TABLE IF EXISTS evaluations")
 
-        # Turn judgments table (simplified: only response_helpful and user_satisfied)
+        # Legacy table retained temporarily; new code writes to the two tables below.
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS turn_judgments (
                 id INTEGER PRIMARY KEY,
@@ -165,6 +250,40 @@ class DuckDBStore:
             )
         """)
 
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS assistant_response_judgments (
+                judgment_uid TEXT PRIMARY KEY,
+                sample_uid TEXT,
+                response_index INTEGER,
+                episode_index INTEGER,
+                assistant_message_index INTEGER,
+                feedback_kind TEXT,
+                feedback_message_start_index INTEGER,
+                feedback_message_end_index INTEGER,
+                feedback_payload JSON,
+                response_helpful TEXT,
+                llm_error BOOLEAN,
+                created_at TIMESTAMP
+            )
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_episode_judgments (
+                judgment_uid TEXT PRIMARY KEY,
+                sample_uid TEXT,
+                episode_index INTEGER,
+                start_user_message_index INTEGER,
+                end_before_user_message_index INTEGER,
+                signal_from_users JSON,
+                user_satisfied TEXT,
+                llm_error BOOLEAN,
+                created_at TIMESTAMP
+            )
+            """
+        )
+
         # Sequences for auto-increment
         self.conn.execute("CREATE SEQUENCE IF NOT EXISTS sample_id_seq")
         self.conn.execute("CREATE SEQUENCE IF NOT EXISTS turn_judgment_id_seq")
@@ -172,15 +291,28 @@ class DuckDBStore:
         self._sync_sequence_to_table_max("turn_judgment_id_seq", "turn_judgments", "id")
 
         self.conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_samples_uid ON samples(sample_uid)")
+        self.conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_samples_id ON samples(id)")
 
         # Create index
         self.conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_turn_judgments_sample
             ON turn_judgments(sample_id)
         """)
+        self.conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_assistant_response_sample_response ON assistant_response_judgments(sample_uid, response_index)"
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_assistant_response_sample ON assistant_response_judgments(sample_uid)"
+        )
+        self.conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_user_episode_sample_episode ON user_episode_judgments(sample_uid, episode_index)"
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_user_episode_sample ON user_episode_judgments(sample_uid)"
+        )
 
         if self._tool_stats_refresh_needed():
-            self._refresh_tool_stats_from_turn_judgments()
+            self._refresh_tool_stats_from_judgments()
 
     def _sync_sequence_to_table_max(self, sequence_name: str, table_name: str, id_column: str) -> None:
         """Recreate a sequence so its next value is greater than current max(id)."""
@@ -192,8 +324,12 @@ class DuckDBStore:
         self.conn.execute(f"CREATE SEQUENCE {sequence_name} START {next_value}")
 
     def _tool_stats_refresh_needed(self) -> bool:
-        """Refresh tool_stats only when legacy rows still need backfill."""
-        has_judgments = self.conn.execute("SELECT 1 FROM turn_judgments LIMIT 1").fetchone()
+        """Refresh tool_stats only when dual-level judgment rows exist and samples are missing aggregates."""
+        has_judgments = self.conn.execute("SELECT 1 FROM assistant_response_judgments LIMIT 1").fetchone() or self.conn.execute(
+            "SELECT 1 FROM user_episode_judgments LIMIT 1"
+        ).fetchone()
+        if not has_judgments:
+            has_judgments = self.conn.execute("SELECT 1 FROM turn_judgments LIMIT 1").fetchone()
         if not has_judgments:
             return False
 
@@ -212,12 +348,54 @@ class DuckDBStore:
         ).fetchone()
         return needs_refresh is not None
 
-    def _refresh_tool_stats_from_turn_judgments(self) -> None:
-        """Backfill tool_stats metrics using current turn_judgments semantics.
+    def _refresh_tool_stats_from_judgments(self) -> None:
+        """Backfill aggregates from the dual-level judgment tables."""
+        legacy_rows = self.conn.execute("SELECT 1 FROM turn_judgments LIMIT 1").fetchone()
+        if legacy_rows:
+            self._refresh_tool_stats_from_turn_judgments()
 
-        This keeps historical databases aligned when rate definitions change.
-        Only samples with persisted turn_judgments are recalculated.
-        """
+        sample_uids = {
+            row[0]
+            for row in self.conn.execute("SELECT sample_uid FROM assistant_response_judgments").fetchall()
+        }
+        sample_uids.update(
+            row[0] for row in self.conn.execute("SELECT sample_uid FROM user_episode_judgments").fetchall()
+        )
+        for sample_uid in sample_uids:
+            assistant_rows = self.get_assistant_response_judgments(sample_uid)
+            episode_rows = self.get_user_episode_judgments(sample_uid)
+            tool_stats = self._build_tool_stats(assistant_rows, episode_rows)
+            self.conn.execute(
+                """
+                UPDATE samples
+                SET tool_stats = ?,
+                    num_turns = ?,
+                    expected_judgment_count = ?,
+                    expected_response_judgment_count = ?,
+                    expected_episode_judgment_count = ?,
+                    response_helpful_rate = ?,
+                    response_unhelpful_rate = ?,
+                    user_satisfied_rate = ?,
+                    user_negative_feedback_rate = ?,
+                    processing_updated_at = COALESCE(processing_updated_at, CURRENT_TIMESTAMP)
+                WHERE sample_uid = ?
+                """,
+                [
+                    json.dumps(tool_stats),
+                    tool_stats["user_episode_count"],
+                    tool_stats["assistant_response_count"] + tool_stats["user_episode_count"],
+                    tool_stats["assistant_response_count"],
+                    tool_stats["user_episode_count"],
+                    tool_stats["response_helpful_rate"],
+                    tool_stats["response_unhelpful_rate"],
+                    tool_stats["user_satisfied_rate"],
+                    tool_stats["user_negative_feedback_rate"],
+                    sample_uid,
+                ],
+            )
+
+    def _refresh_tool_stats_from_turn_judgments(self) -> None:
+        """Backfill aggregates from the legacy single-layer table."""
         rows = self.conn.execute(
             """
             SELECT sample_id, response_helpful, user_satisfied, llm_error
@@ -230,10 +408,10 @@ class DuckDBStore:
 
         aggregated: dict[int, dict[str, Any]] = {}
         for sample_id, response_helpful, user_satisfied, llm_error in rows:
-            stats = aggregated.setdefault(
+            counters = aggregated.setdefault(
                 sample_id,
                 {
-                    "total_turns": 0,
+                    "turn_count": 0,
                     "helpful_yes": 0,
                     "helpful_no": 0,
                     "satisfied_yes": 0,
@@ -242,39 +420,46 @@ class DuckDBStore:
                     "has_error": False,
                 },
             )
-            stats["total_turns"] += 1
-            stats["helpful_yes"] += 1 if response_helpful == "yes" else 0
-            stats["helpful_no"] += 1 if response_helpful == "no" else 0
-            stats["satisfied_yes"] += 1 if user_satisfied == "yes" else 0
-            stats["satisfied_no"] += 1 if user_satisfied == "no" else 0
-            stats["satisfied_neutral"] += 1 if user_satisfied == "neutral" else 0
-            stats["has_error"] = stats["has_error"] or bool(llm_error)
+            counters["turn_count"] += 1
+            counters["helpful_yes"] += 1 if response_helpful == "yes" else 0
+            counters["helpful_no"] += 1 if response_helpful == "no" else 0
+            counters["satisfied_yes"] += 1 if user_satisfied == "yes" else 0
+            counters["satisfied_no"] += 1 if user_satisfied == "no" else 0
+            counters["satisfied_neutral"] += 1 if user_satisfied == "neutral" else 0
+            counters["has_error"] = counters["has_error"] or bool(llm_error)
 
         for sample_id, counters in aggregated.items():
-            response_helpful_scored_turns = counters["helpful_yes"] + counters["helpful_no"]
-            user_feedback_scored_turns = (
-                counters["satisfied_yes"] + counters["satisfied_no"] + counters["satisfied_neutral"]
-            )
-            existing = self.conn.execute("SELECT tool_stats FROM samples WHERE id = ?", [sample_id]).fetchone()
-            tool_stats = json.loads(existing[0]) if existing and existing[0] else {}
-            tool_stats.update(
-                {
-                    "response_helpful_rate": counters["helpful_yes"] / response_helpful_scored_turns if response_helpful_scored_turns else 0.0,
-                    "response_unhelpful_rate": counters["helpful_no"] / response_helpful_scored_turns if response_helpful_scored_turns else 0.0,
-                    "user_satisfied_rate": counters["satisfied_yes"] / user_feedback_scored_turns if user_feedback_scored_turns else 0.0,
-                    "user_negative_feedback_rate": counters["satisfied_no"] / user_feedback_scored_turns if user_feedback_scored_turns else 0.0,
-                    "response_helpful_scored_turns": response_helpful_scored_turns,
-                    "user_feedback_scored_turns": user_feedback_scored_turns,
-                    "total_turns": counters["total_turns"],
-                    "has_error": counters["has_error"],
-                }
-            )
+            helpful_scored = counters["helpful_yes"] + counters["helpful_no"]
+            satisfied_scored = counters["satisfied_yes"] + counters["satisfied_no"] + counters["satisfied_neutral"]
+            tool_stats = {
+                "response_helpful_rate": counters["helpful_yes"] / helpful_scored if helpful_scored else 0.0,
+                "response_unhelpful_rate": counters["helpful_no"] / helpful_scored if helpful_scored else 0.0,
+                "user_satisfied_rate": counters["satisfied_yes"] / satisfied_scored if satisfied_scored else 0.0,
+                "user_negative_feedback_rate": counters["satisfied_no"] / satisfied_scored if satisfied_scored else 0.0,
+                "response_helpful_scored_turns": helpful_scored,
+                "user_feedback_scored_turns": satisfied_scored,
+                "total_turns": counters["turn_count"],
+                "has_error": counters["has_error"],
+            }
             self.conn.execute(
-                "UPDATE samples SET tool_stats = ?, num_turns = ?, expected_judgment_count = ?, response_helpful_rate = ?, response_unhelpful_rate = ?, user_satisfied_rate = ?, user_negative_feedback_rate = ?, processing_updated_at = COALESCE(processing_updated_at, CURRENT_TIMESTAMP) WHERE id = ?",
+                """
+                UPDATE samples
+                SET tool_stats = ?,
+                    num_turns = ?,
+                    expected_judgment_count = ?,
+                    expected_episode_judgment_count = COALESCE(expected_episode_judgment_count, ?),
+                    response_helpful_rate = ?,
+                    response_unhelpful_rate = ?,
+                    user_satisfied_rate = ?,
+                    user_negative_feedback_rate = ?,
+                    processing_updated_at = COALESCE(processing_updated_at, CURRENT_TIMESTAMP)
+                WHERE id = ?
+                """,
                 [
                     json.dumps(tool_stats),
-                    counters["total_turns"],
-                    counters["total_turns"],
+                    counters["turn_count"],
+                    counters["turn_count"],
+                    counters["turn_count"],
                     tool_stats["response_helpful_rate"],
                     tool_stats["response_unhelpful_rate"],
                     tool_stats["user_satisfied_rate"],
@@ -298,6 +483,8 @@ class DuckDBStore:
             sample.empty_response,
             sample.num_turns,
             sample.expected_judgment_count,
+            sample.expected_response_judgment_count,
+            sample.expected_episode_judgment_count,
             sample.num_tool_calls,
             datetime.now(),
             "pending",
@@ -310,8 +497,13 @@ class DuckDBStore:
             try:
                 self.conn.execute(
                     """
-                    INSERT INTO samples (id, sample_uid, raw_json, user_query, assistant_response, empty_response, num_turns, expected_judgment_count, num_tool_calls, imported_at, processing_status, processing_updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO samples (
+                        id, sample_uid, raw_json, user_query, assistant_response, empty_response,
+                        num_turns, expected_judgment_count, expected_response_judgment_count,
+                        expected_episode_judgment_count, num_tool_calls, imported_at,
+                        processing_status, processing_updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     [sample_id, *insert_params],
                 )
@@ -328,7 +520,7 @@ class DuckDBStore:
         raise RuntimeError("Failed to insert sample after retrying sequence synchronization")
 
     def _build_sample_record(self, row: tuple[Any, ...]) -> dict[str, Any]:
-        tool_stats = json.loads(row[13]) if row[13] else None
+        tool_stats = json.loads(row[15]) if row[15] else None
         return {
             "id": row[0],
             "sample_uid": row[1],
@@ -338,22 +530,24 @@ class DuckDBStore:
             "empty_response": bool(row[5]),
             "num_turns": row[6] or 0,
             "expected_judgment_count": row[7] or 0,
-            "num_tool_calls": row[8] or 0,
+            "expected_response_judgment_count": row[8] or 0,
+            "expected_episode_judgment_count": row[9] or 0,
+            "num_tool_calls": row[10] or 0,
             "has_error": (tool_stats or {}).get("has_error", False),
             "tool_stats": tool_stats,
-            "session_merge_status": row[14],
-            "session_merge_keep": row[15],
-            "session_merge_group_id": row[16],
-            "session_merge_group_size": row[17],
-            "session_merge_representative_id": row[18],
-            "session_merge_reason": row[19],
-            "session_merge_updated_at": row[20],
-            "processing_status": row[21] or "pending",
-            "processing_updated_at": row[22],
-            "helpful_rate": row[9] if row[9] is not None else (tool_stats or {}).get("response_helpful_rate", 0),
-            "unhelpful_rate": row[10] if row[10] is not None else (tool_stats or {}).get("response_unhelpful_rate", 0),
-            "satisfied_rate": row[11] if row[11] is not None else (tool_stats or {}).get("user_satisfied_rate", 0),
-            "negative_feedback_rate": row[12] if row[12] is not None else (tool_stats or {}).get("user_negative_feedback_rate", 0),
+            "session_merge_status": row[16],
+            "session_merge_keep": row[17],
+            "session_merge_group_id": row[18],
+            "session_merge_group_size": row[19],
+            "session_merge_representative_id": row[20],
+            "session_merge_reason": row[21],
+            "session_merge_updated_at": row[22],
+            "processing_status": row[23] or "pending",
+            "processing_updated_at": row[24],
+            "helpful_rate": row[11] if row[11] is not None else (tool_stats or {}).get("response_helpful_rate", 0),
+            "unhelpful_rate": row[12] if row[12] is not None else (tool_stats or {}).get("response_unhelpful_rate", 0),
+            "satisfied_rate": row[13] if row[13] is not None else (tool_stats or {}).get("user_satisfied_rate", 0),
+            "negative_feedback_rate": row[14] if row[14] is not None else (tool_stats or {}).get("user_negative_feedback_rate", 0),
         }
 
     def get_samples(self, limit: int = 100, offset: int = 0) -> list[Sample]:
@@ -402,6 +596,49 @@ class DuckDBStore:
         ).fetchone()
         return result[0] if result else 0
 
+    def _sample_lookup_column(self, sample_ref: int | str) -> str:
+        return "sample_uid" if isinstance(sample_ref, str) else "id"
+
+    def _build_tool_stats(
+        self,
+        response_judgments: list[AssistantResponseJudgment],
+        episode_judgments: list[UserEpisodeJudgment],
+    ) -> dict[str, Any]:
+        helpful_yes = sum(1 for row in response_judgments if row.response_helpful == "yes")
+        helpful_no = sum(1 for row in response_judgments if row.response_helpful == "no")
+        helpful_uncertain = sum(1 for row in response_judgments if row.response_helpful == "uncertain")
+        satisfied_yes = sum(1 for row in episode_judgments if row.user_satisfied == "yes")
+        satisfied_no = sum(1 for row in episode_judgments if row.user_satisfied == "no")
+        satisfied_neutral = sum(1 for row in episode_judgments if row.user_satisfied == "neutral")
+        satisfied_uncertain = sum(1 for row in episode_judgments if row.user_satisfied == "uncertain")
+        helpful_scored = helpful_yes + helpful_no
+        satisfied_scored = satisfied_yes + satisfied_no + satisfied_neutral
+
+        return {
+            "response_helpful": {
+                "yes": helpful_yes,
+                "no": helpful_no,
+                "uncertain": helpful_uncertain,
+                "rate": helpful_yes / helpful_scored if helpful_scored else 0.0,
+            },
+            "user_satisfied": {
+                "yes": satisfied_yes,
+                "no": satisfied_no,
+                "neutral": satisfied_neutral,
+                "uncertain": satisfied_uncertain,
+                "rate": satisfied_yes / satisfied_scored if satisfied_scored else 0.0,
+            },
+            "response_helpful_rate": helpful_yes / helpful_scored if helpful_scored else 0.0,
+            "response_unhelpful_rate": helpful_no / helpful_scored if helpful_scored else 0.0,
+            "user_satisfied_rate": satisfied_yes / satisfied_scored if satisfied_scored else 0.0,
+            "user_negative_feedback_rate": satisfied_no / satisfied_scored if satisfied_scored else 0.0,
+            "response_helpful_scored_steps": helpful_scored,
+            "user_feedback_scored_episodes": satisfied_scored,
+            "assistant_response_count": len(response_judgments),
+            "user_episode_count": len(episode_judgments),
+            "has_error": any(row.llm_error for row in response_judgments) or any(row.llm_error for row in episode_judgments),
+        }
+
     def insert_turn_judgment(self, judgment: RoundJudgment) -> int:
         """Insert turn judgment, return auto-generated id."""
         result = self.conn.execute("SELECT nextval('turn_judgment_id_seq')").fetchone()
@@ -425,12 +662,151 @@ class DuckDBStore:
         )
         return j_id
 
+    def insert_assistant_response_judgment(self, judgment: AssistantResponseJudgment) -> str:
+        self.conn.execute("DELETE FROM assistant_response_judgments WHERE judgment_uid = ?", [judgment.judgment_uid])
+        self.conn.execute(
+            """
+            INSERT INTO assistant_response_judgments (
+                judgment_uid, sample_uid, response_index, episode_index,
+                assistant_message_index, feedback_kind, feedback_message_start_index,
+                feedback_message_end_index, feedback_payload, response_helpful,
+                llm_error, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                judgment.judgment_uid,
+                judgment.sample_uid,
+                judgment.response_index,
+                judgment.episode_index,
+                judgment.assistant_message_index,
+                judgment.feedback_kind.value,
+                judgment.feedback_message_start_index,
+                judgment.feedback_message_end_index,
+                json.dumps(judgment.feedback_payload),
+                judgment.response_helpful,
+                judgment.llm_error,
+                judgment.created_at,
+            ],
+        )
+        return judgment.judgment_uid
+
+    def insert_user_episode_judgment(self, judgment: UserEpisodeJudgment) -> str:
+        self.conn.execute("DELETE FROM user_episode_judgments WHERE judgment_uid = ?", [judgment.judgment_uid])
+        self.conn.execute(
+            """
+            INSERT INTO user_episode_judgments (
+                judgment_uid, sample_uid, episode_index, start_user_message_index,
+                end_before_user_message_index, signal_from_users, user_satisfied,
+                llm_error, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                judgment.judgment_uid,
+                judgment.sample_uid,
+                judgment.episode_index,
+                judgment.start_user_message_index,
+                judgment.end_before_user_message_index,
+                json.dumps(judgment.signal_from_users),
+                judgment.user_satisfied,
+                judgment.llm_error,
+                judgment.created_at,
+            ],
+        )
+        return judgment.judgment_uid
+
+    def get_assistant_response_judgments(self, sample_uid: str) -> list[AssistantResponseJudgment]:
+        rows = self.conn.execute(
+            """
+            SELECT sample_uid, response_index, episode_index, assistant_message_index,
+                   feedback_kind, feedback_message_start_index, feedback_message_end_index,
+                   feedback_payload, response_helpful, llm_error, created_at, judgment_uid
+            FROM assistant_response_judgments
+            WHERE sample_uid = ?
+            ORDER BY response_index
+            """,
+            [sample_uid],
+        ).fetchall()
+        return [
+            AssistantResponseJudgment(
+                sample_uid=row[0],
+                response_index=row[1],
+                episode_index=row[2],
+                assistant_message_index=row[3],
+                feedback_kind=row[4],
+                feedback_message_start_index=row[5],
+                feedback_message_end_index=row[6],
+                feedback_payload=json.loads(row[7]) if row[7] else [],
+                response_helpful=row[8],
+                llm_error=row[9],
+                created_at=row[10],
+                judgment_uid=row[11],
+            )
+            for row in rows
+        ]
+
+    def get_user_episode_judgments(self, sample_uid: str) -> list[UserEpisodeJudgment]:
+        rows = self.conn.execute(
+            """
+            SELECT sample_uid, episode_index, start_user_message_index,
+                   end_before_user_message_index, signal_from_users, user_satisfied,
+                   llm_error, created_at, judgment_uid
+            FROM user_episode_judgments
+            WHERE sample_uid = ?
+            ORDER BY episode_index
+            """,
+            [sample_uid],
+        ).fetchall()
+        return [
+            UserEpisodeJudgment(
+                sample_uid=row[0],
+                episode_index=row[1],
+                start_user_message_index=row[2],
+                end_before_user_message_index=row[3],
+                signal_from_users=json.loads(row[4]) if row[4] else [],
+                user_satisfied=row[5],
+                llm_error=row[6],
+                created_at=row[7],
+                judgment_uid=row[8],
+            )
+            for row in rows
+        ]
+
     def get_turn_judgments(self, sample_id: int) -> list[RoundJudgment]:
         """Get all turn judgments for a sample."""
         rows = self.conn.execute(
             "SELECT sample_id, turn_index, response_helpful, user_satisfied, signal_from_users, llm_error, created_at FROM turn_judgments WHERE sample_id = ? ORDER BY turn_index",
             [sample_id],
         ).fetchall()
+        if not rows:
+            sample = self.get_sample_by_id(sample_id)
+            if not sample or not sample.get("sample_uid"):
+                return []
+
+            response_rows = self.get_assistant_response_judgments(sample["sample_uid"])
+            episode_rows = self.get_user_episode_judgments(sample["sample_uid"])
+            response_by_episode: dict[int, list[AssistantResponseJudgment]] = {}
+            for judgment in response_rows:
+                response_by_episode.setdefault(judgment.episode_index, []).append(judgment)
+
+            synthesized: list[RoundJudgment] = []
+            for episode in episode_rows:
+                episode_responses = response_by_episode.get(episode.episode_index, [])
+                representative = episode_responses[0] if episode_responses else None
+                synthesized.append(
+                    RoundJudgment(
+                        sample_id=sample_id,
+                        turn_index=episode.episode_index,
+                        response_helpful=representative.response_helpful if representative else None,
+                        user_satisfied=episode.user_satisfied,
+                        signal_from_users=episode.signal_from_users,
+                        llm_error=episode.llm_error or any(item.llm_error for item in episode_responses),
+                        created_at=episode.created_at,
+                    )
+                )
+            return synthesized
+
         return [
             RoundJudgment(
                 sample_id=row[0],
@@ -444,10 +820,11 @@ class DuckDBStore:
             for row in rows
         ]
 
-    def update_sample_tool_stats(self, sample_id: int, tool_stats: dict) -> None:
+    def update_sample_tool_stats(self, sample_ref: int | str, tool_stats: dict) -> None:
         """Update tool_stats for a sample."""
+        sample_column = self._sample_lookup_column(sample_ref)
         self.conn.execute(
-            "UPDATE samples SET tool_stats = ?, response_helpful_rate = ?, response_unhelpful_rate = ?, user_satisfied_rate = ?, user_negative_feedback_rate = ?, processing_updated_at = ? WHERE id = ?",
+            f"UPDATE samples SET tool_stats = ?, response_helpful_rate = ?, response_unhelpful_rate = ?, user_satisfied_rate = ?, user_negative_feedback_rate = ?, processing_updated_at = ? WHERE {sample_column} = ?",
             [
                 json.dumps(tool_stats),
                 tool_stats.get("response_helpful_rate"),
@@ -455,61 +832,138 @@ class DuckDBStore:
                 tool_stats.get("user_satisfied_rate"),
                 tool_stats.get("user_negative_feedback_rate"),
                 datetime.now(),
-                sample_id,
+                sample_ref,
             ],
         )
 
-    def mark_sample_processing_failed(self, sample_id: int, error_reason: str | None = None) -> None:
+    def mark_sample_processing_failed(self, sample_ref: int | str, error_reason: str | None = None) -> None:
         """Mark sample as failed and persist error reason in tool_stats."""
-        existing = self.conn.execute("SELECT tool_stats FROM samples WHERE id = ?", [sample_id]).fetchone()
+        sample_column = self._sample_lookup_column(sample_ref)
+        existing = self.conn.execute(f"SELECT tool_stats FROM samples WHERE {sample_column} = ?", [sample_ref]).fetchone()
         tool_stats = json.loads(existing[0]) if existing and existing[0] else {}
         tool_stats["has_error"] = True
         if error_reason:
             tool_stats["error_reason"] = error_reason
         self.conn.execute(
-            "UPDATE samples SET tool_stats = ?, processing_status = 'failed', processing_updated_at = ? WHERE id = ?",
-            [json.dumps(tool_stats), datetime.now(), sample_id],
+            f"UPDATE samples SET tool_stats = ?, processing_status = 'failed', processing_updated_at = ? WHERE {sample_column} = ?",
+            [json.dumps(tool_stats), datetime.now(), sample_ref],
         )
 
     def replace_round_feedback_results(
         self,
-        sample_id: int,
-        expected_judgment_count: int,
-        judgments: list[RoundJudgment],
-        tool_stats: dict,
+        sample_uid: str | int,
+        expected_response_judgment_count: int,
+        expected_episode_judgment_count: int | list[RoundJudgment],
+        response_judgments: list[AssistantResponseJudgment] | list[RoundJudgment] | dict,
+        episode_judgments: list[UserEpisodeJudgment] | None = None,
+        tool_stats: dict | None = None,
     ) -> None:
         """Atomically replace a sample's round feedback results."""
+        if isinstance(sample_uid, int):
+            sample = self.get_sample_by_id(sample_uid)
+            if not sample or not sample.get("sample_uid"):
+                raise ValueError(f"Unknown sample id: {sample_uid}")
+            resolved_sample_uid = sample["sample_uid"]
+        else:
+            resolved_sample_uid = sample_uid
+
+        if isinstance(expected_episode_judgment_count, list):
+            legacy_judgments = expected_episode_judgment_count
+            legacy_tool_stats = response_judgments if isinstance(response_judgments, dict) else tool_stats
+            self.conn.execute("BEGIN TRANSACTION")
+            try:
+                sample = self.get_sample_by_uid(resolved_sample_uid)
+                if not sample:
+                    raise ValueError(f"Unknown sample uid: {resolved_sample_uid}")
+                self.conn.execute("DELETE FROM turn_judgments WHERE sample_id = ?", [sample["id"]])
+                self.conn.execute("DELETE FROM assistant_response_judgments WHERE sample_uid = ?", [resolved_sample_uid])
+                self.conn.execute("DELETE FROM user_episode_judgments WHERE sample_uid = ?", [resolved_sample_uid])
+                self.conn.execute(
+                    """
+                    UPDATE samples
+                    SET tool_stats = ?,
+                        num_turns = ?,
+                        expected_judgment_count = ?,
+                        response_helpful_rate = ?,
+                        response_unhelpful_rate = ?,
+                        user_satisfied_rate = ?,
+                        user_negative_feedback_rate = ?,
+                        processing_status = 'completed',
+                        processing_updated_at = ?
+                    WHERE sample_uid = ?
+                    """,
+                    [
+                        json.dumps(legacy_tool_stats or {}),
+                        expected_response_judgment_count,
+                        expected_response_judgment_count,
+                        (legacy_tool_stats or {}).get("response_helpful_rate"),
+                        (legacy_tool_stats or {}).get("response_unhelpful_rate"),
+                        (legacy_tool_stats or {}).get("user_satisfied_rate"),
+                        (legacy_tool_stats or {}).get("user_negative_feedback_rate"),
+                        datetime.now(),
+                        resolved_sample_uid,
+                    ],
+                )
+                for judgment in legacy_judgments:
+                    self.insert_turn_judgment(judgment)
+                self.conn.execute("COMMIT")
+                return
+            except Exception:
+                self.conn.execute("ROLLBACK")
+                raise
+
+        assert tool_stats is not None
+        assert episode_judgments is not None
         self.conn.execute("BEGIN TRANSACTION")
         try:
-            self.conn.execute("DELETE FROM turn_judgments WHERE sample_id = ?", [sample_id])
+            self.conn.execute("DELETE FROM assistant_response_judgments WHERE sample_uid = ?", [resolved_sample_uid])
+            self.conn.execute("DELETE FROM user_episode_judgments WHERE sample_uid = ?", [resolved_sample_uid])
             self.conn.execute(
-                "UPDATE samples SET tool_stats = ?, num_turns = ?, expected_judgment_count = ?, response_helpful_rate = ?, response_unhelpful_rate = ?, user_satisfied_rate = ?, user_negative_feedback_rate = ?, processing_status = 'completed', processing_updated_at = ? WHERE id = ?",
+                """
+                UPDATE samples
+                SET tool_stats = ?,
+                    num_turns = ?,
+                    expected_judgment_count = ?,
+                    expected_response_judgment_count = ?,
+                    expected_episode_judgment_count = ?,
+                    response_helpful_rate = ?,
+                    response_unhelpful_rate = ?,
+                    user_satisfied_rate = ?,
+                    user_negative_feedback_rate = ?,
+                    processing_status = 'completed',
+                    processing_updated_at = ?
+                WHERE sample_uid = ?
+                """,
                 [
                     json.dumps(tool_stats),
-                    expected_judgment_count,
-                    expected_judgment_count,
+                    expected_episode_judgment_count,
+                    expected_response_judgment_count + expected_episode_judgment_count,
+                    expected_response_judgment_count,
+                    expected_episode_judgment_count,
                     tool_stats.get("response_helpful_rate"),
                     tool_stats.get("response_unhelpful_rate"),
                     tool_stats.get("user_satisfied_rate"),
                     tool_stats.get("user_negative_feedback_rate"),
                     datetime.now(),
-                    sample_id,
+                    resolved_sample_uid,
                 ],
             )
-            for judgment in judgments:
-                self.insert_turn_judgment(judgment)
+            for judgment in response_judgments:
+                self.insert_assistant_response_judgment(judgment)
+            for judgment in episode_judgments:
+                self.insert_user_episode_judgment(judgment)
             self.conn.execute("COMMIT")
         except Exception:
             self.conn.execute("ROLLBACK")
             raise
 
-    def claim_unprocessed_samples(self, limit: int = 100) -> list[tuple[int, dict]]:
+    def claim_unprocessed_samples(self, limit: int = 100) -> list[tuple[str, dict]]:
         """Claim pending or failed samples for round feedback processing."""
         self.conn.execute("BEGIN TRANSACTION")
         try:
             rows = self.conn.execute(
                 """
-                SELECT id, raw_json
+                SELECT sample_uid, raw_json
                 FROM samples
                 WHERE COALESCE(processing_status, 'pending') IN ('pending', 'failed')
                                     AND session_merge_keep = TRUE
@@ -518,12 +972,12 @@ class DuckDBStore:
                 """,
                 [limit],
             ).fetchall()
-            sample_ids = [row[0] for row in rows]
-            if sample_ids:
-                placeholders = ", ".join(["?"] * len(sample_ids))
-                params = [datetime.now(), *sample_ids]
+            sample_uids = [row[0] for row in rows]
+            if sample_uids:
+                placeholders = ", ".join(["?"] * len(sample_uids))
+                params = [datetime.now(), *sample_uids]
                 self.conn.execute(
-                    f"UPDATE samples SET processing_status = 'processing', processing_updated_at = ? WHERE id IN ({placeholders})",
+                    f"UPDATE samples SET processing_status = 'processing', processing_updated_at = ? WHERE sample_uid IN ({placeholders})",
                     params,
                 )
             self.conn.execute("COMMIT")
@@ -533,11 +987,11 @@ class DuckDBStore:
 
         return [(row[0], json.loads(row[1])) for row in rows]
 
-    def get_unprocessed_samples(self, limit: int = 100) -> list[tuple[int, dict]]:
+    def get_unprocessed_samples(self, limit: int = 100) -> list[tuple[str, dict]]:
         """Get samples that haven't been processed for round judgments."""
         rows = self.conn.execute(
             """
-            SELECT s.id, s.raw_json
+            SELECT s.sample_uid, s.raw_json
             FROM samples s
             WHERE COALESCE(s.processing_status, 'pending') IN ('pending', 'failed')
                             AND s.session_merge_keep = TRUE
@@ -553,7 +1007,8 @@ class DuckDBStore:
         row = self.conn.execute(
             """
              SELECT id, sample_uid, raw_json, user_query, assistant_response, empty_response, num_turns, expected_judgment_count,
-                 num_tool_calls, response_helpful_rate, response_unhelpful_rate, user_satisfied_rate,
+                 expected_response_judgment_count, expected_episode_judgment_count, num_tool_calls,
+                 response_helpful_rate, response_unhelpful_rate, user_satisfied_rate,
                  user_negative_feedback_rate, tool_stats, session_merge_status, session_merge_keep,
                  session_merge_group_id, session_merge_group_size, session_merge_representative_id,
                  session_merge_reason, session_merge_updated_at, processing_status, processing_updated_at
@@ -561,6 +1016,22 @@ class DuckDBStore:
             WHERE id = ?
             """,
             [sample_id],
+        ).fetchone()
+        return self._build_sample_record(row) if row else None
+
+    def get_sample_by_uid(self, sample_uid: str) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            """
+             SELECT id, sample_uid, raw_json, user_query, assistant_response, empty_response, num_turns, expected_judgment_count,
+                 expected_response_judgment_count, expected_episode_judgment_count, num_tool_calls,
+                 response_helpful_rate, response_unhelpful_rate, user_satisfied_rate,
+                 user_negative_feedback_rate, tool_stats, session_merge_status, session_merge_keep,
+                 session_merge_group_id, session_merge_group_size, session_merge_representative_id,
+                 session_merge_reason, session_merge_updated_at, processing_status, processing_updated_at
+            FROM samples
+            WHERE sample_uid = ?
+            """,
+            [sample_uid],
         ).fetchone()
         return self._build_sample_record(row) if row else None
 
@@ -628,7 +1099,8 @@ class DuckDBStore:
 
         query = f"""
              SELECT id, sample_uid, raw_json, user_query, assistant_response, empty_response, num_turns, expected_judgment_count,
-                 num_tool_calls, response_helpful_rate, response_unhelpful_rate, user_satisfied_rate,
+                 expected_response_judgment_count, expected_episode_judgment_count, num_tool_calls,
+                 response_helpful_rate, response_unhelpful_rate, user_satisfied_rate,
                  user_negative_feedback_rate, tool_stats, session_merge_status, session_merge_keep,
                  session_merge_group_id, session_merge_group_size, session_merge_representative_id,
                  session_merge_reason, session_merge_updated_at, processing_status, processing_updated_at

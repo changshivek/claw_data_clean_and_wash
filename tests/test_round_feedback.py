@@ -67,6 +67,35 @@ def test_build_judgment_prompt():
     assert "system reminder、plan mode 提示、tool 框架提示、工具中断提示等系统/框架文本可能混在对话里" in prompt
 
 
+def test_extract_response_contexts_split_assistant_steps_by_feedback_block():
+    from claw_data_filter.processors.round_feedback import TurnContextBuilder
+
+    builder = TurnContextBuilder()
+    contexts = builder.extract_response_contexts("sample-1", SAMPLE_MESSAGES)
+
+    assert len(contexts) == 3
+    assert contexts[0].feedback_kind.value == "tool_result"
+    assert contexts[0].feedback_payload == ['{"result": "sunny, 25C"}']
+    assert contexts[1].feedback_kind.value == "user"
+    assert contexts[1].feedback_payload == ["Thanks!"]
+    assert contexts[2].feedback_kind.value == "none"
+
+
+def test_extract_episode_contexts_keep_user_episode_boundary():
+    from claw_data_filter.processors.round_feedback import TurnContextBuilder
+
+    builder = TurnContextBuilder()
+    contexts = builder.extract_episode_contexts("sample-1", SAMPLE_MESSAGES)
+
+    assert len(contexts) == 2
+    assert contexts[0].user_message == "What's the weather in Beijing?"
+    assert contexts[0].assistant_messages == ["Let me check...", "Beijing is sunny today, 25 degrees."]
+    assert contexts[0].tool_results == ['{"result": "sunny, 25C"}']
+    assert contexts[0].signal_from_users == ["Thanks!"]
+    assert contexts[1].user_message == "Thanks!"
+    assert contexts[1].assistant_messages == ["You're welcome!"]
+
+
 @pytest.mark.asyncio
 async def test_judge_success():
     """Test judgment returns parsed result"""
@@ -382,14 +411,16 @@ async def test_process_sample_marks_unirouter_sample_complete(tmp_path):
 
     judgments = await processor.process_sample(sample_id, raw_json)
 
-    assert len(judgments) == 1
+    assert judgments.sample_uid == store.get_sample_by_id(sample_id)["sample_uid"]
+    assert len(judgments.response_judgments) == 2
+    assert len(judgments.episode_judgments) == 1
     persisted = store.get_turn_judgments(sample_id)
     assert len(persisted) == 1
     row = store.conn.execute(
         "SELECT expected_judgment_count, tool_stats FROM samples WHERE id = ?",
         [sample_id],
     ).fetchone()
-    assert row[0] == 1
+    assert row[0] == 3
     assert json.loads(row[1])["response_helpful_rate"] == 1.0
     store.close()
 

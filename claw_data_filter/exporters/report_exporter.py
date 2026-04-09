@@ -34,46 +34,78 @@ def _validate_output_path(path: Path) -> None:
 
 
 class ReportExporter:
-    """Generate and export statistical reports from evaluations."""
+    """Generate and export dual-level statistical reports from samples."""
 
     def __init__(self, store: DuckDBStore):
         self.store = store
 
-    def generate_report(self) -> dict[str, Any]:
-        """Generate statistical report from samples and turn judgments.
+    def _collect_judgment_totals(self) -> dict[str, int]:
+        rows = self.store.conn.execute(
+            """
+            SELECT tool_stats
+            FROM samples
+            WHERE tool_stats IS NOT NULL
+            """
+        ).fetchall()
 
-        Returns:
-            Dictionary containing summary statistics
-        """
+        totals = {
+            "processed_samples": 0,
+            "assistant_response_count": 0,
+            "user_episode_count": 0,
+            "response_helpful_scored_steps": 0,
+            "user_feedback_scored_episodes": 0,
+        }
+        for (tool_stats_raw,) in rows:
+            tool_stats = json.loads(tool_stats_raw) if isinstance(tool_stats_raw, str) else (tool_stats_raw or {})
+            if not tool_stats:
+                continue
+            totals["processed_samples"] += 1
+            totals["assistant_response_count"] += int(tool_stats.get("assistant_response_count", 0) or 0)
+            totals["user_episode_count"] += int(tool_stats.get("user_episode_count", 0) or 0)
+            totals["response_helpful_scored_steps"] += int(tool_stats.get("response_helpful_scored_steps", 0) or 0)
+            totals["user_feedback_scored_episodes"] += int(tool_stats.get("user_feedback_scored_episodes", 0) or 0)
+        return totals
+
+    def _build_report_payload(self) -> dict[str, Any]:
         stats = self.store.get_stats()
+        judgment_totals = self._collect_judgment_totals()
 
-        report: dict[str, Any] = {
+        return {
             "summary": {
                 "total_samples": stats["total_samples"],
+                "processed_samples": judgment_totals["processed_samples"],
                 "avg_response_helpful_rate": round(stats["avg_response_helpful_rate"], 2),
                 "avg_response_unhelpful_rate": round(stats["avg_response_unhelpful_rate"], 2),
                 "avg_user_satisfied_rate": round(stats["avg_user_satisfied_rate"], 2),
                 "avg_user_negative_feedback_rate": round(stats["avg_user_negative_feedback_rate"], 2),
                 "error_count": stats["error_count"],
             },
+            "judgment_totals": {
+                "assistant_response_count": judgment_totals["assistant_response_count"],
+                "user_episode_count": judgment_totals["user_episode_count"],
+                "response_helpful_scored_steps": judgment_totals["response_helpful_scored_steps"],
+                "user_feedback_scored_episodes": judgment_totals["user_feedback_scored_episodes"],
+            },
+            "semantics": {
+                "num_turns": "samples.num_turns currently tracks user episode count",
+                "response_helpful_rate": "Computed from assistant response judgments with yes/no as scored denominator",
+                "user_satisfied_rate": "Computed from user episode judgments with yes/no/neutral as scored denominator",
+            },
         }
 
-        return report
+    def generate_report(self) -> dict[str, Any]:
+        """Generate a dual-level statistical report.
+
+        Returns:
+            Dictionary containing summary statistics
+        """
+        return self._build_report_payload()
 
     def export_report(self, output_path: Path) -> dict:
         """Export statistical report."""
         _validate_output_path(output_path)
-        stats = self.store.get_stats()
-
-        report = {
-            "total_samples": stats["total_samples"],
-            "avg_response_helpful_rate": stats["avg_response_helpful_rate"],
-            "avg_response_unhelpful_rate": stats["avg_response_unhelpful_rate"],
-            "avg_user_satisfied_rate": stats["avg_user_satisfied_rate"],
-            "avg_user_negative_feedback_rate": stats["avg_user_negative_feedback_rate"],
-            "error_count": stats["error_count"],
-            "generated_at": datetime.now().isoformat(),
-        }
+        report = self._build_report_payload()
+        report["generated_at"] = datetime.now().isoformat()
 
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(report, f, indent=2, ensure_ascii=False)

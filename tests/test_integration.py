@@ -81,7 +81,7 @@ def test_all_imports_work():
     from claw_data_filter.processors import ConversationFormatter
     from claw_data_filter.storage import DuckDBStore
     from claw_data_filter.filters import FilterQueryBuilder
-    from claw_data_filter.exporters import JSONLExporter, ReportExporter
+    from claw_data_filter.exporters import UnifiedExporter, ReportExporter
     from claw_data_filter.llm import LLMClient
 
     assert cli is not None
@@ -91,7 +91,7 @@ def test_all_imports_work():
     assert ConversationFormatter is not None
     assert DuckDBStore is not None
     assert FilterQueryBuilder is not None
-    assert JSONLExporter is not None
+    assert UnifiedExporter is not None
     assert ReportExporter is not None
     assert LLMClient is not None
 
