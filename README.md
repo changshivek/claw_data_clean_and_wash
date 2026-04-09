@@ -345,6 +345,8 @@ range 语义说明：
 - 如果规范化时在最前面新增了 `system` message，后续 assistant step 和 episode 的消息范围会相应后移。
 - `conversation.tools` 不参与 range 计算，因为它不在 `messages` 数组中。
 
+完整字段定义、示例记录、兼容性说明见 [docs/export-format.md](docs/export-format.md)。
+
 ## 老库回填
 
 对已存在的 DuckDB，可用一次性脚本按导入阶段同样的规则回填 empty_response：

@@ -169,6 +169,147 @@ agent 对话中经常出现：
 
 这些步骤对 helpful 和 satisfied 的归因粒度本来就不同。
 
+## 后续语义收束方向（未实施）
+
+以下内容是 2026-04-09 在双层设计稳定后追加确认的下一步方向，当前仅作为后续优化目标，不代表代码已经实现。
+
+### 背景
+
+当前 step 级指标名仍为 `response_helpful`，但在实践讨论中暴露出两个问题：
+
+- 名称过宽，容易被理解成“用户觉得有帮助”或“最终答案整体有帮助”。
+- 现有 prompt 更偏向基于紧邻反馈判断局部有效性，尚未稳定覆盖“工具选择是否正确”和“当前 step 是否推进问题状态”这类更工程化的判据。
+
+因此，后续更合理的方向不是继续扩大 `response_helpful` 的含义，而是将它收束为一个更明确的 step 级推进指标。
+
+### 推荐方向
+
+推荐将 step 级主指标从 `response_helpful` 逐步收束/重命名为 `response_progress`。
+
+其目标语义为：
+
+- 当前 assistant response unit 是否让当前问题状态发生了正向推进。
+
+它关注的是过程推进，而不是最终满意度；`user_satisfied` 仍保留为 episode 级整体评价。
+
+### response_progress 的推荐判据
+
+在不改变当前 response unit 边界的前提下，`response_progress` 推荐基于以下四类判据综合判断：
+
+1. 行动方向是否正确
+  - 是否选择了合理的处理路径或工具
+  - 是否没有明显跑偏到无关动作
+
+2. 执行结果是否有效
+  - 是否拿到了与当前目标相关的信息、状态或中间结果
+  - 如果没有工具调用，当前文本是否提供了真实可执行的下一步
+
+3. 任务状态是否前进
+  - 是否减少了不确定性
+  - 是否完成了必要中间步骤
+  - 是否把问题推进到更接近解决的状态
+
+4. 是否出现负向推进
+  - 是否把任务带偏
+  - 是否引入误导或增加返工成本
+
+### prompt 边界约束
+
+后续若实施 `response_progress`，在当前“不改 unit 边界”的前提下，prompt 输入边界建议如下：
+
+可以使用：
+
+- 当前 user request
+- 当前 assistant response unit
+- 当前 unit 内的 tool calls
+- 紧邻 feedback block
+- 当前 unit 之前的压缩执行背景（仅限当前 episode 内）
+
+不要使用：
+
+- next assistant text
+- next assistant reasoning
+- 更远的后续补救内容
+
+### 前序执行背景的推荐构造
+
+为了支持连续工具调用场景，允许在 prompt 中带入当前 unit 之前的有限执行背景，但推荐使用规则化压缩，而不是额外增加一次 LLM 摘要调用。
+
+推荐仅保留最近 3 个前序 response unit 的摘要，并且明确按 response unit 计数，而不是按单条 message 计数。
+
+每个前序 response unit 推荐只保留以下字段：
+
+- `assistant_text_excerpt`
+- `assistant_reason_excerpt`
+- `tool_use_summary`
+- `tool_result_status_hint`
+- `tool_result_excerpt_100`
+
+字段建议含义：
+
+- `assistant_text_excerpt`: 当前前序 step 的 assistant 文本截断版，用于表达当时显式对外动作或说明。
+- `assistant_reason_excerpt`: 当前前序 step 中显式保留的 reasoning/think 截断版；如果原始数据没有显式保留，则为空。
+- `tool_use_summary`: 工具调用摘要，至少包含 tool name 与少量关键参数；若参数体量很大，只保留参数名、类型/规模信息与短预览，不要求完整参数原文。
+- `tool_result_status_hint`: 工具结果状态的弱提示字段，推荐仅做高精度识别，取值优先限制为 `error` / `success` / `unknown`。
+- `tool_result_excerpt_100`: tool result 原文前 100 字截断，仅作辅助证据，不作为唯一摘要来源。
+
+其中：
+
+- `assistant_text_excerpt` 和 `assistant_reason_excerpt` 建议分别截断到 100 到 200 字。
+- `tool_result_excerpt_100` 建议固定前 100 字，不再额外扩展。
+- `tool_use_summary` 建议只保留 1 到 3 个最能表达意图的参数。
+- 单个参数若是长文本、大数组、大对象、文件内容或 patch/script 原文，应统一截断，并保留规模信息，例如字符数、元素数、key 数。
+- 对 `write_file`、`create_file`、`apply_patch` 一类工具，应优先保留 path、目标对象、操作类型、内容长度等高价值元信息，而不是正文全文。
+- `tool_use_summary` 本身也应有总长度上限；超过上限时，优先删除低信息密度参数，而不是删掉 tool name、path、url、query 等核心参数。
+- 若某个前序 step 没有 tool use / tool result，允许只保留 text/reason 字段。
+- 不建议带入前序 tool result 原文全文。
+- `tool_result_status_hint` 不表示“业务正确”或“结果对任务有用”，只表示程序从原始结果中抽出的弱执行状态线索。
+- 无法可靠判断时，应默认回落为 `unknown`，而不是做激进推断。
+
+关于 `tool_result_status_hint` 的使用约束：
+
+- 推荐用正则或规则仅提取显式 error 信息，优先识别报错。
+- 若结果中存在稳定、结构化的成功标志，可标记为 `success`。
+- `success` 只表示“未见明显失败且有成功迹象”，不等于工具选对了、参数正确、结果有用或当前 step 已推进问题。
+- 后续模型必须结合 `tool_result_excerpt_100` 与当前上下文自行判断，不能仅凭该 hint 下结论。
+
+推荐的 prompt 背景模板示意：
+
+```text
+=== 当前单元之前的执行背景（仅供理解当前阶段） ===
+Step -3:
+- assistant_text_excerpt: ...
+- assistant_reason_excerpt: ...
+- tool_use_summary: search_web(query=..., site=...)
+- tool_result_status_hint: success
+- tool_result_excerpt_100: 返回 3 条候选文档...
+
+Step -2:
+- assistant_text_excerpt: ...
+- assistant_reason_excerpt: ...
+- tool_use_summary: fetch_webpage(url=...)
+- tool_result_status_hint: error
+- tool_result_excerpt_100: HTTP 404 Not Found...
+
+Step -1:
+- assistant_text_excerpt: ...
+- assistant_reason_excerpt: ...
+- tool_use_summary: write_file(path=/tmp/report.md, content=<text:8421 chars, prefix="# Report ...">)
+- tool_result_status_hint: success
+- tool_result_excerpt_100: File written successfully...
+```
+
+该背景块仅用于帮助模型理解“当前 step 处于哪一阶段”，不用于把前序步骤的功劳或失败直接转嫁到当前 step。
+
+### 实施建议
+
+若后续推进该方向，建议按以下顺序执行：
+
+1. 先保持现有 response unit 边界不变。
+2. 先重写 step 级 prompt 的目标语义与判据。
+3. 再决定是否把数据模型、聚合字段、CLI/Web/导出字段名从 `response_helpful` 正式迁移为 `response_progress`。
+4. 仅在规则化前序背景明显不够用时，再评估是否增加更重的上下文压缩机制。
+
 ## 对数据模型的影响
 
 这是本方案最关键的工程影响。

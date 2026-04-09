@@ -19,7 +19,125 @@
 - 已完成: `RoundJudgment`、`RoundJudgmentProcessor`、`extract_turns`、`build_judgment_prompt` 与对应 legacy 测试已删除，当前只保留 response-step / user-episode 双层语义。
 - 已完成: README 与 implementation 文档已同步到 sample_uid-first 和 openai_round_feedback_v2 口径，不再把 turn_judgments / sample_id drill-down 当作当前实现。
 - 当前回归结果: 全量 pytest 已通过，116 passed。
-- 下一步: 提交本轮 sample_uid-first 一次性收口改动；后续若继续推进，仅需要按独立主题做增量优化。
+- 下一步: 在不改变 response unit 边界的前提下，评估并推进 step 级指标从 `response_helpful` 向 `response_progress` 的语义收束；该主题当前尚未实施。
+
+## 后续主题：response_progress 语义收束（未实施）
+
+这一主题是双层 round feedback 架构稳定后的增量优化，不是新的架构分叉，因此当前不单独新开文档，继续维护在本实施计划与对应设计文档中。
+
+### 目标
+
+- 保持当前 response unit 边界不变。
+- 将现有 `response_helpful` 的 step 级语义收束为更明确的“是否推进问题”的指标。
+- 评估是否将外显命名逐步迁移为 `response_progress`。
+- 不改变 `user_satisfied` 的 episode 级边界和职责。
+
+### 当前结论
+
+- 不纳入 `next assistant text`。
+- 不纳入 `next assistant reasoning`。
+- 允许带入当前 unit 之前的有限执行背景，但应使用规则化压缩，不额外增加独立 LLM 摘要调用。
+- 若后续正式实施，优先先改 prompt 语义，再决定是否全链路 rename 字段与 rate 名称。
+
+### 推荐范围
+
+本主题若推进，推荐分成两层：
+
+1. 最小语义改动
+	- 重写 step 级 prompt
+	- 将 judgment 目标从“helpful”收束为“progress”
+	- 保持上下文抽取边界、表结构和 episode 逻辑不变
+
+2. 全链路命名迁移
+	- `AssistantResponseJudgment.response_helpful` -> `response_progress`
+	- `response_helpful_rate` -> `response_progress_rate`
+	- CLI / Web / exporter / report / README / docs 同步迁移文案与字段名
+
+### prompt 构成建议
+
+若按当前讨论推进，新的 step 级 prompt 应包含：
+
+- 当前 user request
+- 当前 unit 之前的压缩执行背景（仅最近 2~3 个前序 steps）
+- 当前 assistant text
+- 当前 tool calls
+- 紧邻 feedback block 类型
+- 紧邻 feedback block 内容
+- progress 判定规则与单行输出格式
+
+### 前序背景压缩建议
+
+前序执行背景应由规则化逻辑生成，而不是增加新一轮 LLM。
+
+约束：
+
+- 只保留当前 unit 之前、同一 user episode 内的前序背景。
+- 最多保留最近 3 个前序 response units。
+- 明确按 response unit 计数，不按单条 message 计数。
+
+推荐每个前序 step 只保留：
+
+- `assistant_text_excerpt`
+- `assistant_reason_excerpt`
+- `tool_use_summary`
+- `tool_result_status_hint`
+- `tool_result_excerpt_100`
+
+推荐字段规则：
+
+- `assistant_text_excerpt`: 截断到 100 到 200 字。
+- `assistant_reason_excerpt`: 仅当原始数据显式保留 reasoning/think 时带入，并截断到 100 到 200 字。
+- `tool_use_summary`: 输出 tool name 与少量关键参数；对长文本、大对象、大数组、文件内容、脚本片段等巨量参数统一截断，不保留完整原文。
+- `tool_result_status_hint`: 仅作为弱提示，优先限制为 `error` / `success` / `unknown`。
+- `tool_result_excerpt_100`: 固定为 tool result 原文前 100 字，仅作辅助证据。
+
+实现注意：
+
+- `tool_result_excerpt_100` 不能替代 `tool_result_status_hint`，但后续模型也不能仅凭 hint 下结论。
+- 若某个前序 step 没有 tool 调用，则允许只输出 text/reason 摘要。
+- 不引入前序 tool result 原文全文。
+- 不新增独立 LLM 摘要调用。
+- `tool_result_status_hint` 的默认兜底值应为 `unknown`。
+- 正则/规则提取应追求高精度而非高召回，尤其避免把 `success` 误解释为“业务正确”或“结果有用”。
+- `tool_use_summary` 的目标是“让后续判别知道这个工具大致做了什么”，而不是复原完整调用参数。
+- 推荐只保留 1 到 3 个最能表达意图的参数；其余参数在不影响理解时可以省略。
+- 单个参数值若超过摘要阈值，应保留参数名，并输出截断后的预览加规模信息，例如 `content=<text:8421 chars, prefix=\"...\">`、`messages=<list:18 items>`、`payload=<dict:12 keys>`。
+- 像 `write_file`、`create_file`、`apply_patch` 这类可能携带大块内容的工具，优先保留目标路径、操作类型、内容长度等元信息，不展开完整正文。
+- 建议给 `tool_use_summary` 再加一个整体长度上限；超过上限时优先裁掉低价值参数，而不是压缩掉 tool name、path、query、url 这类高价值字段。
+
+建议的 execution background 输出模板：
+
+```text
+=== 当前单元之前的执行背景（仅供理解当前阶段） ===
+Step -3:
+- assistant_text_excerpt: ...
+- assistant_reason_excerpt: ...
+- tool_use_summary: search_web(query=..., site=...)
+- tool_result_status_hint: success
+- tool_result_excerpt_100: 返回 3 条候选文档...
+
+Step -2:
+- assistant_text_excerpt: ...
+- assistant_reason_excerpt: ...
+- tool_use_summary: fetch_webpage(url=...)
+- tool_result_status_hint: error
+- tool_result_excerpt_100: HTTP 404 Not Found...
+
+Step -1:
+- assistant_text_excerpt: ...
+- assistant_reason_excerpt: ...
+- tool_use_summary: write_file(path=/tmp/report.md, content=<text:8421 chars, prefix="# Report ...">)
+- tool_result_status_hint: success
+- tool_result_excerpt_100: File written successfully...
+```
+
+### 实施顺序建议
+
+- [ ] 先在设计/实现文档中固定 `response_progress` 的目标语义与 prompt 边界
+- [ ] 先实现规则化 execution background 压缩
+- [ ] 在不改表结构的情况下做 prompt A/B 验证，比较现有 `response_helpful` 与 `response_progress` 标签差异
+- [ ] 若验证通过，再决定是否推进字段名、聚合名、CLI/Web/导出 contract 的正式 rename
+- [ ] 若验证不通过，保留双层架构不动，只回滚 step 级 prompt 语义尝试
 
 ## 本次执行策略（单次收口）
 
