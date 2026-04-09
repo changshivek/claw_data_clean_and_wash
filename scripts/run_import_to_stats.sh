@@ -45,6 +45,12 @@ if [[ ! -f "${INPUT_FILE}" ]]; then
   exit 1
 fi
 
+if [[ "${INPUT_FILE}" == *.gz ]]; then
+  echo "Compressed input is not supported directly: ${INPUT_FILE}" >&2
+  echo "Please decompress items.jsonl.gz to a plain JSONL file first, then set INPUT_FILE to that .jsonl path." >&2
+  exit 1
+fi
+
 mkdir -p "$(dirname -- "${PROJECT_ROOT}/${DB_PATH}")"
 
 export LLM_ENDPOINT
@@ -59,7 +65,7 @@ run_cli() {
   "${PYTHON_BIN}" -m claw_data_filter.cli --db-path "${DB_PATH}" --llm-endpoint "${LLM_ENDPOINT}" --llm-model-id "${LLM_MODEL_ID}" "$@"
 }
 
-echo "[1/5] Importing data: ${INPUT_FILE}"
+echo "[1/5] Importing JSONL data: ${INPUT_FILE}"
 run_cli import "${INPUT_FILE}"
 echo "      Import step will also persist empty_response markers for user-only samples"
 

@@ -168,6 +168,8 @@ class DuckDBStore:
         # Sequences for auto-increment
         self.conn.execute("CREATE SEQUENCE IF NOT EXISTS sample_id_seq")
         self.conn.execute("CREATE SEQUENCE IF NOT EXISTS turn_judgment_id_seq")
+        self._sync_sequence_to_table_max("sample_id_seq", "samples", "id")
+        self._sync_sequence_to_table_max("turn_judgment_id_seq", "turn_judgments", "id")
 
         self.conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_samples_uid ON samples(sample_uid)")
 
@@ -177,7 +179,38 @@ class DuckDBStore:
             ON turn_judgments(sample_id)
         """)
 
-        self._refresh_tool_stats_from_turn_judgments()
+        if self._tool_stats_refresh_needed():
+            self._refresh_tool_stats_from_turn_judgments()
+
+    def _sync_sequence_to_table_max(self, sequence_name: str, table_name: str, id_column: str) -> None:
+        """Recreate a sequence so its next value is greater than current max(id)."""
+        max_id = self.conn.execute(
+            f"SELECT COALESCE(MAX({id_column}), 0) FROM {table_name}"
+        ).fetchone()[0]
+        next_value = int(max_id) + 1
+        self.conn.execute(f"DROP SEQUENCE IF EXISTS {sequence_name}")
+        self.conn.execute(f"CREATE SEQUENCE {sequence_name} START {next_value}")
+
+    def _tool_stats_refresh_needed(self) -> bool:
+        """Refresh tool_stats only when legacy rows still need backfill."""
+        has_judgments = self.conn.execute("SELECT 1 FROM turn_judgments LIMIT 1").fetchone()
+        if not has_judgments:
+            return False
+
+        needs_refresh = self.conn.execute(
+            """
+            SELECT 1
+            FROM samples
+            WHERE tool_stats IS NULL
+               OR response_helpful_rate IS NULL
+               OR response_unhelpful_rate IS NULL
+               OR user_satisfied_rate IS NULL
+               OR user_negative_feedback_rate IS NULL
+               OR expected_judgment_count IS NULL
+            LIMIT 1
+            """
+        ).fetchone()
+        return needs_refresh is not None
 
     def _refresh_tool_stats_from_turn_judgments(self) -> None:
         """Backfill tool_stats metrics using current turn_judgments semantics.
@@ -257,30 +290,42 @@ class DuckDBStore:
         if existing:
             return existing[0]
 
-        result = self.conn.execute("SELECT nextval('sample_id_seq')").fetchone()
-        sample_id = result[0]
+        insert_params = [
+            sample_uid,
+            json.dumps(sample.raw_json),
+            sample.user_query,
+            sample.assistant_response,
+            sample.empty_response,
+            sample.num_turns,
+            sample.expected_judgment_count,
+            sample.num_tool_calls,
+            datetime.now(),
+            "pending",
+            datetime.now(),
+        ]
 
-        self.conn.execute(
-            """
-            INSERT INTO samples (id, sample_uid, raw_json, user_query, assistant_response, empty_response, num_turns, expected_judgment_count, num_tool_calls, imported_at, processing_status, processing_updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            [
-                sample_id,
-                sample_uid,
-                json.dumps(sample.raw_json),
-                sample.user_query,
-                sample.assistant_response,
-                sample.empty_response,
-                sample.num_turns,
-                sample.expected_judgment_count,
-                sample.num_tool_calls,
-                datetime.now(),
-                "pending",
-                datetime.now(),
-            ],
-        )
-        return sample_id
+        for attempt in range(2):
+            result = self.conn.execute("SELECT nextval('sample_id_seq')").fetchone()
+            sample_id = result[0]
+            try:
+                self.conn.execute(
+                    """
+                    INSERT INTO samples (id, sample_uid, raw_json, user_query, assistant_response, empty_response, num_turns, expected_judgment_count, num_tool_calls, imported_at, processing_status, processing_updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [sample_id, *insert_params],
+                )
+                return sample_id
+            except Exception as exc:
+                existing = self.conn.execute("SELECT id FROM samples WHERE sample_uid = ?", [sample_uid]).fetchone()
+                if existing:
+                    return existing[0]
+                if attempt == 0 and "duplicate key" in str(exc).lower():
+                    self._sync_sequence_to_table_max("sample_id_seq", "samples", "id")
+                    continue
+                raise
+
+        raise RuntimeError("Failed to insert sample after retrying sequence synchronization")
 
     def _build_sample_record(self, row: tuple[Any, ...]) -> dict[str, Any]:
         tool_stats = json.loads(row[13]) if row[13] else None
@@ -467,7 +512,7 @@ class DuckDBStore:
                 SELECT id, raw_json
                 FROM samples
                 WHERE COALESCE(processing_status, 'pending') IN ('pending', 'failed')
-                                    AND COALESCE(session_merge_keep, TRUE) = TRUE
+                                    AND session_merge_keep = TRUE
                 ORDER BY id
                 LIMIT ?
                 """,
@@ -495,7 +540,7 @@ class DuckDBStore:
             SELECT s.id, s.raw_json
             FROM samples s
             WHERE COALESCE(s.processing_status, 'pending') IN ('pending', 'failed')
-                            AND COALESCE(s.session_merge_keep, TRUE) = TRUE
+                            AND s.session_merge_keep = TRUE
             ORDER BY s.id
             LIMIT ?
             """,

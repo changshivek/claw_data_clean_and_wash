@@ -63,6 +63,7 @@ def test_import_evaluate_export_pipeline():
 
     # Verify unprocessed samples
     store = DuckDBStore(db_path)
+    store.conn.execute("UPDATE samples SET session_merge_status = 'keep', session_merge_keep = TRUE")
     unprocessed = store.get_unprocessed_samples(limit=10)
     assert len(unprocessed) == 2
     store.close()

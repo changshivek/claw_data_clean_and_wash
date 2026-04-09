@@ -61,6 +61,46 @@ def test_insert_sample_deduplicates_by_sample_uid():
         store.close()
 
 
+def test_store_reopens_with_stale_sample_sequence_and_recovers():
+    """Test reopening a DB repairs sample_id_seq when it lags max(id)."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "stale_sequence.duckdb"
+        store = DuckDBStore(db_path)
+        first_id = store.insert_sample(
+            Sample.from_dict(
+                {
+                    "messages": [
+                        {"role": "user", "content": "Hello"},
+                        {"role": "assistant", "content": "Hi there!"},
+                    ]
+                }
+            )
+        )
+        assert first_id == 1
+        store.close()
+
+        reopened = DuckDBStore(db_path)
+        reopened.conn.execute("DROP SEQUENCE sample_id_seq")
+        reopened.conn.execute("CREATE SEQUENCE sample_id_seq START 1")
+        reopened.close()
+
+        repaired = DuckDBStore(db_path)
+        second_id = repaired.insert_sample(
+            Sample.from_dict(
+                {
+                    "messages": [
+                        {"role": "user", "content": "Another"},
+                        {"role": "assistant", "content": "Reply"},
+                    ]
+                }
+            )
+        )
+
+        assert second_id == 2
+        assert repaired.get_sample_count() == 2
+        repaired.close()
+
+
 def test_turn_judgments_table_created():
     """Test that turn_judgments table is created on init"""
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -152,6 +192,10 @@ def test_get_unprocessed_samples():
             assistant_response="test",
         )
         sample_id = store.insert_sample(sample)
+        store.conn.execute(
+            "UPDATE samples SET session_merge_status = 'keep', session_merge_keep = TRUE WHERE id = ?",
+            [sample_id],
+        )
 
         # Should be unprocessed
         unprocessed = store.get_unprocessed_samples(limit=10)
@@ -173,6 +217,10 @@ def test_claim_unprocessed_samples_marks_processing():
             ]
         })
         sample_id = store.insert_sample(sample)
+        store.conn.execute(
+            "UPDATE samples SET session_merge_status = 'keep', session_merge_keep = TRUE WHERE id = ?",
+            [sample_id],
+        )
 
         claimed = store.claim_unprocessed_samples(limit=10)
 
@@ -180,6 +228,28 @@ def test_claim_unprocessed_samples_marks_processing():
         assert claimed[0][0] == sample_id
         row = store.conn.execute("SELECT processing_status FROM samples WHERE id = ?", [sample_id]).fetchone()
         assert row[0] == "processing"
+        store.close()
+
+
+def test_claim_unprocessed_samples_skips_unmarked_rows():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "claim_unmarked.db"
+        store = DuckDBStore(db_path)
+        sample_id = store.insert_sample(Sample.from_dict({
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi"},
+            ]
+        }))
+
+        claimed = store.claim_unprocessed_samples(limit=10)
+
+        assert claimed == []
+        row = store.conn.execute(
+            "SELECT processing_status, session_merge_status, session_merge_keep FROM samples WHERE id = ?",
+            [sample_id],
+        ).fetchone()
+        assert row == ("pending", None, None)
         store.close()
 
 
@@ -223,6 +293,10 @@ def test_partially_processed_sample_remains_unprocessed():
             ]
         })
         sample_id = store.insert_sample(sample)
+        store.conn.execute(
+            "UPDATE samples SET session_merge_status = 'keep', session_merge_keep = TRUE WHERE id = ?",
+            [sample_id],
+        )
         store.insert_turn_judgment(
             RoundJudgment(sample_id=sample_id, turn_index=0, response_helpful="yes", user_satisfied="yes")
         )

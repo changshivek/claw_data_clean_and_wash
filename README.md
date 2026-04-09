@@ -113,7 +113,11 @@ UniRouter 格式自动从 request.bodyJson.messages 提取:
 - 导入阶段会统一提取消息并生成 user_query、assistant_response、num_turns、expected_judgment_count、empty_response 等派生字段。
 - 导入阶段还会基于原始 payload 生成 SHA-256 的 sample_uid，用作稳定、低碰撞的导入身份；整数 id 继续作为本地关系键。
 - 当导入数据中存在 user 消息但没有 assistant 消息时，会标记 empty_response=true，便于后续筛除这类样本。
-- judged turn 不是简单按 assistant 消息数计算，而是按同一 user 下的 assistant/tool/assistant 序列合并后的轮次计算。
+- 当前代码中的 expected_judgment_count 和 judged turn 仍按单层 user-anchor 逻辑计算：同一 user 下的 assistant/tool/assistant 序列会被合并成一轮。
+- 下一版 round feedback 目标设计会拆成两层粒度：assistant 级 response_helpful，与 user-episode 级 user_satisfied；详见 docs/superpowers 下的设计文档与实现计划。
+- importer 当前直接读取的是普通 `.jsonl` 文件，不会自动解压 `.gz`。
+- 如果原始包内是 `items.jsonl.gz`，需要先解压为普通 `items.jsonl` 后再导入。
+- `scripts/run_import_to_stats.sh` 也要求 `INPUT_FILE` 指向普通 `.jsonl`，传入 `.gz` 会直接报错退出。
 
 ## 样本状态
 
@@ -128,7 +132,7 @@ samples 表当前使用显式处理状态:
 
 说明:
 - round feedback 使用 claim 模式领取 pending 和 failed 样本。
-- 如果 session merge 已执行，claim 时会自动跳过 session_merge_keep=false 的样本。
+- 如果 session merge 已执行，claim 时只会领取 session_merge_keep=true 的样本；unmarked/null 和 session_merge_keep=false 都不会进入 round feedback。
 - 结果写入采用原子替换，避免 sample 聚合结果和 turn_judgments 明细不一致。
 
 ## Session Merge
@@ -162,12 +166,23 @@ claw-filter session-merge --workers 4 --batch-size 512 --min-prefix-turns 2
 
 ## 评分维度
 
-每轮 assistant 回复判断两个指标：
+当前 round feedback 维护两个指标：
 
 | 维度 | 值 | 说明 |
 |------|-----|------|
-| **response_helpful** | yes/no/uncertain | 回复对用户是否有帮助 |
-| **user_satisfied** | yes/no/uncertain/neutral | 基于后续用户行为判断满意度 |
+| **response_helpful** | yes/no/uncertain | assistant 当前响应单元对用户是否有帮助 |
+| **user_satisfied** | yes/no/uncertain/neutral | 用户对完整 assistant 交互 episode 是否满意 |
+
+目标设计采用两层级判定，而不是共用同一分轮边界：
+
+- response_helpful: 以 assistant 响应单元为对象。当前 assistant 的 text、tool 选择、参数构造、调用命令都属于被评判内容；它只能使用紧邻的下一跳反馈块作为证据，下一跳要么是 tool result block，要么是 user 消息。
+- user_satisfied: 以上一轮 user 开始、到下一轮 user 之前结束的完整 assistant/tool 交互 episode 为对象；其证据窗口是该 episode 之后最多 3 条 user 文本消息，不包含后续 assistant。
+
+为什么要拆成两层：
+
+- response_helpful 关注的是 assistant 当下这一步是否做对了，证据应尽量局部、紧邻，避免把后续 assistant 的补救结果反向归功到前一跳。
+- user_satisfied 关注的是用户是否接受了整段交互结果，天然应该覆盖一个 user episode 内的多步 assistant/tool 往返。
+- 两个指标的评判对象和反馈信号窗口不同，继续共用一套 judged turn 会把粒度混在一起，导致归因失真。
 
 **user_satisfied 判定：**
 - 用户追问/澄清 → no
@@ -175,10 +190,10 @@ claw-filter session-merge --workers 4 --batch-size 512 --min-prefix-turns 2
 - 用户转新话题 → neutral
 - 无明确信号 → uncertain
 
-turn 语义说明:
-- 一个 judged turn 以 user 消息开始。
-- 同一 user 之后连续的 assistant、tool、assistant 消息会被合并为同一轮。
-- 这可以更准确地覆盖 agent 场景中的 tool call 和 final answer。
+边界说明:
+- response_helpful 的边界是 assistant -> 紧邻反馈块。若 assistant 后面紧跟 tool 消息，则该 tool block 是反馈；若 assistant 后面直接进入 user，则该 user 是反馈。
+- user_satisfied 的边界是 user episode：从某条 user 消息开始，到下一条 user 消息出现前的所有 assistant/tool 交互都属于同一 episode。
+- 当前代码实现尚未完成这次拆分，仍使用单层 user-anchor judged turn；本 README 这里记录的是目标语义和后续改造方向。
 
 ## 筛选字段
 
@@ -204,6 +219,10 @@ rate 计算说明:
   记录 sample_uid、原始 JSON、empty_response 在内的派生字段、四个显式 rate 列、session_merge 标记列、tool_stats、processing_status 等样本级信息。
 - turn_judgments
   记录每个 judged turn 的 response_helpful、user_satisfied、signal_from_users、llm_error。
+
+说明:
+- 当前数据库仍只有 turn_judgments 一张逐轮明细表，对应的是单层 judged turn 实现。
+- 如果按目标设计推进，response_helpful 和 user_satisfied 很可能需要拆成两类明细记录或两张表，否则一条记录无法同时准确承载 assistant-step 和 user-episode 两种粒度。
 
 ## 环境变量
 
