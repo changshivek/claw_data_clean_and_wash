@@ -48,7 +48,7 @@ class DuckDBStore:
                 session_merge_keep BOOLEAN,
                 session_merge_group_id TEXT,
                 session_merge_group_size INTEGER,
-                session_merge_representative_id INTEGER,
+                session_merge_representative_uid TEXT,
                 session_merge_reason TEXT,
                 session_merge_updated_at TIMESTAMP,
                 processing_status TEXT,
@@ -83,7 +83,7 @@ class DuckDBStore:
                 expected_episode_judgment_count, num_tool_calls, response_helpful_rate,
                 response_unhelpful_rate, user_satisfied_rate, user_negative_feedback_rate,
                 imported_at, tool_stats, session_merge_status, session_merge_keep,
-                session_merge_group_id, session_merge_group_size, session_merge_representative_id,
+                session_merge_group_id, session_merge_group_size, session_merge_representative_uid,
                 session_merge_reason, session_merge_updated_at, processing_status, processing_updated_at
             )
             SELECT
@@ -108,7 +108,7 @@ class DuckDBStore:
                 {existing('session_merge_keep', 'NULL')},
                 {existing('session_merge_group_id', 'NULL')},
                 {existing('session_merge_group_size', 'NULL')},
-                {existing('session_merge_representative_id', 'NULL')},
+                {existing('session_merge_representative_uid', 'NULL')},
                 {existing('session_merge_reason', 'NULL')},
                 {existing('session_merge_updated_at', 'NULL')},
                 {existing('processing_status', "'pending'")},
@@ -189,7 +189,7 @@ class DuckDBStore:
         except:
             pass
         try:
-            self.conn.execute("ALTER TABLE samples ADD COLUMN session_merge_representative_id INTEGER")
+            self.conn.execute("ALTER TABLE samples ADD COLUMN session_merge_representative_uid TEXT")
         except:
             pass
         try:
@@ -212,6 +212,19 @@ class DuckDBStore:
         self.conn.execute(
             "UPDATE samples SET expected_judgment_count = COALESCE(expected_judgment_count, num_turns, 0), expected_response_judgment_count = COALESCE(expected_response_judgment_count, 0), expected_episode_judgment_count = COALESCE(expected_episode_judgment_count, num_turns, 0)"
         )
+        try:
+            self.conn.execute(
+                """
+                UPDATE samples AS target
+                SET session_merge_representative_uid = source.sample_uid
+                FROM samples AS source
+                WHERE target.session_merge_representative_uid IS NULL
+                  AND target.session_merge_representative_id IS NOT NULL
+                  AND source.id = target.session_merge_representative_id
+                """
+            )
+        except:
+            pass
         self.conn.execute(
             """
             UPDATE samples
@@ -437,7 +450,7 @@ class DuckDBStore:
             "session_merge_keep": row[17],
             "session_merge_group_id": row[18],
             "session_merge_group_size": row[19],
-            "session_merge_representative_id": row[20],
+            "session_merge_representative_uid": row[20],
             "session_merge_reason": row[21],
             "session_merge_updated_at": row[22],
             "processing_status": row[23] or "pending",
@@ -493,9 +506,6 @@ class DuckDBStore:
             "SELECT COUNT(*) FROM samples WHERE COALESCE(processing_status, 'pending') = 'completed'"
         ).fetchone()
         return result[0] if result else 0
-
-    def _sample_lookup_column(self, sample_ref: int | str) -> str:
-        return "sample_uid" if isinstance(sample_ref, str) else "id"
 
     def _build_tool_stats(
         self,
@@ -648,11 +658,10 @@ class DuckDBStore:
             for row in rows
         ]
 
-    def update_sample_tool_stats(self, sample_ref: int | str, tool_stats: dict) -> None:
+    def update_sample_tool_stats(self, sample_uid: str, tool_stats: dict) -> None:
         """Update tool_stats for a sample."""
-        sample_column = self._sample_lookup_column(sample_ref)
         self.conn.execute(
-            f"UPDATE samples SET tool_stats = ?, response_helpful_rate = ?, response_unhelpful_rate = ?, user_satisfied_rate = ?, user_negative_feedback_rate = ?, processing_updated_at = ? WHERE {sample_column} = ?",
+            "UPDATE samples SET tool_stats = ?, response_helpful_rate = ?, response_unhelpful_rate = ?, user_satisfied_rate = ?, user_negative_feedback_rate = ?, processing_updated_at = ? WHERE sample_uid = ?",
             [
                 json.dumps(tool_stats),
                 tool_stats.get("response_helpful_rate"),
@@ -660,26 +669,25 @@ class DuckDBStore:
                 tool_stats.get("user_satisfied_rate"),
                 tool_stats.get("user_negative_feedback_rate"),
                 datetime.now(),
-                sample_ref,
+                sample_uid,
             ],
         )
 
-    def mark_sample_processing_failed(self, sample_ref: int | str, error_reason: str | None = None) -> None:
+    def mark_sample_processing_failed(self, sample_uid: str, error_reason: str | None = None) -> None:
         """Mark sample as failed and persist error reason in tool_stats."""
-        sample_column = self._sample_lookup_column(sample_ref)
-        existing = self.conn.execute(f"SELECT tool_stats FROM samples WHERE {sample_column} = ?", [sample_ref]).fetchone()
+        existing = self.conn.execute("SELECT tool_stats FROM samples WHERE sample_uid = ?", [sample_uid]).fetchone()
         tool_stats = json.loads(existing[0]) if existing and existing[0] else {}
         tool_stats["has_error"] = True
         if error_reason:
             tool_stats["error_reason"] = error_reason
         self.conn.execute(
-            f"UPDATE samples SET tool_stats = ?, processing_status = 'failed', processing_updated_at = ? WHERE {sample_column} = ?",
-            [json.dumps(tool_stats), datetime.now(), sample_ref],
+            "UPDATE samples SET tool_stats = ?, processing_status = 'failed', processing_updated_at = ? WHERE sample_uid = ?",
+            [json.dumps(tool_stats), datetime.now(), sample_uid],
         )
 
     def replace_round_feedback_results(
         self,
-        sample_uid: str | int,
+        sample_uid: str,
         expected_response_judgment_count: int,
         expected_episode_judgment_count: int,
         response_judgments: list[AssistantResponseJudgment],
@@ -687,17 +695,10 @@ class DuckDBStore:
         tool_stats: dict,
     ) -> None:
         """Atomically replace a sample's round feedback results."""
-        if isinstance(sample_uid, int):
-            sample = self.get_sample_by_id(sample_uid)
-            if not sample or not sample.get("sample_uid"):
-                raise ValueError(f"Unknown sample id: {sample_uid}")
-            resolved_sample_uid = sample["sample_uid"]
-        else:
-            resolved_sample_uid = sample_uid
         self.conn.execute("BEGIN TRANSACTION")
         try:
-            self.conn.execute("DELETE FROM assistant_response_judgments WHERE sample_uid = ?", [resolved_sample_uid])
-            self.conn.execute("DELETE FROM user_episode_judgments WHERE sample_uid = ?", [resolved_sample_uid])
+            self.conn.execute("DELETE FROM assistant_response_judgments WHERE sample_uid = ?", [sample_uid])
+            self.conn.execute("DELETE FROM user_episode_judgments WHERE sample_uid = ?", [sample_uid])
             self.conn.execute(
                 """
                 UPDATE samples
@@ -725,7 +726,7 @@ class DuckDBStore:
                     tool_stats.get("user_satisfied_rate"),
                     tool_stats.get("user_negative_feedback_rate"),
                     datetime.now(),
-                    resolved_sample_uid,
+                    sample_uid,
                 ],
             )
             for judgment in response_judgments:
@@ -788,9 +789,9 @@ class DuckDBStore:
             """
              SELECT id, sample_uid, raw_json, user_query, assistant_response, empty_response, num_turns, expected_judgment_count,
                  expected_response_judgment_count, expected_episode_judgment_count, num_tool_calls,
-                 response_helpful_rate, response_unhelpful_rate, user_satisfied_rate,
-                 user_negative_feedback_rate, tool_stats, session_merge_status, session_merge_keep,
-                 session_merge_group_id, session_merge_group_size, session_merge_representative_id,
+                  response_helpful_rate, response_unhelpful_rate, user_satisfied_rate,
+                  user_negative_feedback_rate, tool_stats, session_merge_status, session_merge_keep,
+                  session_merge_group_id, session_merge_group_size, session_merge_representative_uid,
                  session_merge_reason, session_merge_updated_at, processing_status, processing_updated_at
             FROM samples
             WHERE id = ?
@@ -804,9 +805,9 @@ class DuckDBStore:
             """
              SELECT id, sample_uid, raw_json, user_query, assistant_response, empty_response, num_turns, expected_judgment_count,
                  expected_response_judgment_count, expected_episode_judgment_count, num_tool_calls,
-                 response_helpful_rate, response_unhelpful_rate, user_satisfied_rate,
-                 user_negative_feedback_rate, tool_stats, session_merge_status, session_merge_keep,
-                 session_merge_group_id, session_merge_group_size, session_merge_representative_id,
+                  response_helpful_rate, response_unhelpful_rate, user_satisfied_rate,
+                  user_negative_feedback_rate, tool_stats, session_merge_status, session_merge_keep,
+                  session_merge_group_id, session_merge_group_size, session_merge_representative_uid,
                  session_merge_reason, session_merge_updated_at, processing_status, processing_updated_at
             FROM samples
             WHERE sample_uid = ?
@@ -880,9 +881,9 @@ class DuckDBStore:
         query = f"""
              SELECT id, sample_uid, raw_json, user_query, assistant_response, empty_response, num_turns, expected_judgment_count,
                  expected_response_judgment_count, expected_episode_judgment_count, num_tool_calls,
-                 response_helpful_rate, response_unhelpful_rate, user_satisfied_rate,
-                 user_negative_feedback_rate, tool_stats, session_merge_status, session_merge_keep,
-                 session_merge_group_id, session_merge_group_size, session_merge_representative_id,
+                  response_helpful_rate, response_unhelpful_rate, user_satisfied_rate,
+                  user_negative_feedback_rate, tool_stats, session_merge_status, session_merge_keep,
+                  session_merge_group_id, session_merge_group_size, session_merge_representative_uid,
                  session_merge_reason, session_merge_updated_at, processing_status, processing_updated_at
             FROM samples s
             WHERE {combined_where}

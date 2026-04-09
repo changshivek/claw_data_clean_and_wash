@@ -4,7 +4,7 @@ from collections.abc import MutableMapping
 from claw_data_filter.web.state.models import DEFAULT_PAGE, DETAIL_PAGE, MAIN_PAGES, RouteState
 
 
-CONTROLLED_KEYS = ("page", "sample_id", "return_to")
+CONTROLLED_KEYS = ("page", "sample_uid", "return_to")
 
 
 def _normalize_page(page: str | None) -> str:
@@ -15,25 +15,25 @@ def _normalize_page(page: str | None) -> str:
     return DEFAULT_PAGE
 
 
-def _parse_optional_int(value: object) -> int | None:
+def _parse_optional_text(value: object) -> str | None:
     if value is None:
         return None
-    try:
-        return int(str(value))
-    except (TypeError, ValueError):
+    text = str(value).strip()
+    if not text:
         return None
+    return text
 
 
 def read_route(params: MutableMapping[str, object]) -> RouteState:
     """Build a route state from query params."""
     page = _normalize_page(str(params.get("page", DEFAULT_PAGE)))
-    sample_id = _parse_optional_int(params.get("sample_id"))
+    sample_uid = _parse_optional_text(params.get("sample_uid"))
     return_to = str(params.get("return_to")) if params.get("return_to") else None
     if return_to not in MAIN_PAGES:
         return_to = None
     if page != DETAIL_PAGE:
-        sample_id = None
-    return RouteState(page=page, sample_id=sample_id, return_to=return_to)
+        sample_uid = None
+    return RouteState(page=page, sample_uid=sample_uid, return_to=return_to)
 
 
 def write_route(params: MutableMapping[str, object], route: RouteState) -> None:
@@ -42,8 +42,8 @@ def write_route(params: MutableMapping[str, object], route: RouteState) -> None:
         if key in params:
             params.pop(key)
     params["page"] = route.page
-    if route.sample_id is not None:
-        params["sample_id"] = str(route.sample_id)
+    if route.sample_uid is not None:
+        params["sample_uid"] = route.sample_uid
     if route.return_to:
         params["return_to"] = route.return_to
 
@@ -55,10 +55,10 @@ def go_to_page(params: MutableMapping[str, object], page: str) -> RouteState:
     return route
 
 
-def go_to_detail(params: MutableMapping[str, object], sample_id: int, return_to: str | None) -> RouteState:
+def go_to_detail(params: MutableMapping[str, object], sample_uid: str, return_to: str | None) -> RouteState:
     """Navigate to the detail page while preserving the source page."""
     target = return_to if return_to in MAIN_PAGES else "filter"
-    route = RouteState(page=DETAIL_PAGE, sample_id=sample_id, return_to=target)
+    route = RouteState(page=DETAIL_PAGE, sample_uid=sample_uid, return_to=target)
     write_route(params, route)
     return route
 

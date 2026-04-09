@@ -31,7 +31,8 @@ WHITESPACE_RE = re.compile(r"\s+")
 
 @dataclass(frozen=True)
 class SessionMergeCandidate:
-    sample_id: int
+    sample_uid: str
+    local_id: int
     grouping_key: str | None
     user_turns: tuple[str, ...]
     message_count: int
@@ -40,12 +41,13 @@ class SessionMergeCandidate:
 
 @dataclass(frozen=True)
 class SessionMergeDecision:
-    sample_id: int
+    sample_uid: str
+    local_id: int
     status: str
     keep: bool
     group_id: str | None
     group_size: int
-    representative_id: int
+    representative_uid: str
     reason: str
 
 
@@ -99,14 +101,15 @@ def _hash_group_key(grouping_key: str) -> str:
     return hashlib.sha1(grouping_key.encode("utf-8")).hexdigest()[:16]
 
 
-def analyze_sample_row(row: tuple[int, str, int | None]) -> SessionMergeCandidate:
-    sample_id, raw_json, num_turns = row
+def analyze_sample_row(row: tuple[str, int, str, int | None]) -> SessionMergeCandidate:
+    sample_uid, local_id, raw_json, num_turns = row
     payload = json.loads(raw_json)
     user_turns = extract_real_user_turns(payload)
     first_turn = user_turns[0] if user_turns else None
     message_count = len(extract_messages_from_payload(payload))
     return SessionMergeCandidate(
-        sample_id=sample_id,
+        sample_uid=sample_uid,
+        local_id=local_id,
         grouping_key=first_turn,
         user_turns=user_turns,
         message_count=message_count,
@@ -119,7 +122,7 @@ def _candidate_sort_key(candidate: SessionMergeCandidate) -> tuple[int, int, int
         len(candidate.user_turns),
         candidate.num_turns,
         candidate.message_count,
-        candidate.sample_id,
+        candidate.local_id,
     )
 
 
@@ -127,14 +130,14 @@ def _choose_best_candidate(candidates: Iterable[SessionMergeCandidate]) -> Sessi
     return max(candidates, key=_candidate_sort_key)
 
 
-def _resolve_representative(decisions: dict[int, SessionMergeDecision], sample_id: int) -> int:
-    representative_id = decisions[sample_id].representative_id
-    while representative_id in decisions and not decisions[representative_id].keep:
-        next_id = decisions[representative_id].representative_id
-        if next_id == representative_id:
+def _resolve_representative(decisions: dict[str, SessionMergeDecision], sample_uid: str) -> str:
+    representative_uid = decisions[sample_uid].representative_uid
+    while representative_uid in decisions and not decisions[representative_uid].keep:
+        next_uid = decisions[representative_uid].representative_uid
+        if next_uid == representative_uid:
             break
-        representative_id = next_id
-    return representative_id
+        representative_uid = next_uid
+    return representative_uid
 
 
 def plan_session_merge(
@@ -142,18 +145,19 @@ def plan_session_merge(
     min_prefix_turns: int = 2,
 ) -> list[SessionMergeDecision]:
     """Plan which samples to keep or collapse as content-prefix snapshots."""
-    decisions: dict[int, SessionMergeDecision] = {}
+    decisions: dict[str, SessionMergeDecision] = {}
     grouped: dict[str, list[SessionMergeCandidate]] = defaultdict(list)
 
     for candidate in candidates:
         if not candidate.user_turns:
-            decisions[candidate.sample_id] = SessionMergeDecision(
-                sample_id=candidate.sample_id,
+            decisions[candidate.sample_uid] = SessionMergeDecision(
+                sample_uid=candidate.sample_uid,
+                local_id=candidate.local_id,
                 status="skipped",
                 keep=True,
                 group_id=None,
                 group_size=1,
-                representative_id=candidate.sample_id,
+                representative_uid=candidate.sample_uid,
                 reason="no_user_turns",
             )
             continue
@@ -165,13 +169,14 @@ def plan_session_merge(
 
         if group_size == 1:
             only = group_candidates[0]
-            decisions[only.sample_id] = SessionMergeDecision(
-                sample_id=only.sample_id,
+            decisions[only.sample_uid] = SessionMergeDecision(
+                sample_uid=only.sample_uid,
+                local_id=only.local_id,
                 status="keep",
                 keep=True,
                 group_id=group_id,
                 group_size=1,
-                representative_id=only.sample_id,
+                representative_uid=only.sample_uid,
                 reason="singleton_group",
             )
             continue
@@ -185,15 +190,16 @@ def plan_session_merge(
             representative = _choose_best_candidate(same_sequence_candidates)
             unique_representatives[sequence] = representative
             for candidate in same_sequence_candidates:
-                if candidate.sample_id == representative.sample_id:
+                if candidate.sample_uid == representative.sample_uid:
                     continue
-                decisions[candidate.sample_id] = SessionMergeDecision(
-                    sample_id=candidate.sample_id,
+                decisions[candidate.sample_uid] = SessionMergeDecision(
+                    sample_uid=candidate.sample_uid,
+                    local_id=candidate.local_id,
                     status="merged",
                     keep=False,
                     group_id=group_id,
                     group_size=group_size,
-                    representative_id=representative.sample_id,
+                    representative_uid=representative.sample_uid,
                     reason="exact_duplicate_sequence",
                 )
 
@@ -208,58 +214,61 @@ def plan_session_merge(
 
         for sequence in sorted(sequences, key=len):
             representative = unique_representatives[sequence]
-            if representative.sample_id in decisions:
+            if representative.sample_uid in decisions:
                 continue
 
             if len(sequence) < min_prefix_turns:
-                decisions[representative.sample_id] = SessionMergeDecision(
-                    sample_id=representative.sample_id,
+                decisions[representative.sample_uid] = SessionMergeDecision(
+                    sample_uid=representative.sample_uid,
+                    local_id=representative.local_id,
                     status="keep",
                     keep=True,
                     group_id=group_id,
                     group_size=group_size,
-                    representative_id=representative.sample_id,
+                    representative_uid=representative.sample_uid,
                     reason="below_prefix_threshold",
                 )
                 continue
 
             winner = best_descendant_by_prefix.get(sequence)
             if winner is not None:
-                decisions[representative.sample_id] = SessionMergeDecision(
-                    sample_id=representative.sample_id,
+                decisions[representative.sample_uid] = SessionMergeDecision(
+                    sample_uid=representative.sample_uid,
+                    local_id=representative.local_id,
                     status="merged",
                     keep=False,
                     group_id=group_id,
                     group_size=group_size,
-                    representative_id=winner.sample_id,
+                    representative_uid=winner.sample_uid,
                     reason="strict_prefix_of_longer_sequence",
                 )
                 continue
 
-            decisions[representative.sample_id] = SessionMergeDecision(
-                sample_id=representative.sample_id,
+            decisions[representative.sample_uid] = SessionMergeDecision(
+                sample_uid=representative.sample_uid,
+                local_id=representative.local_id,
                 status="keep",
                 keep=True,
                 group_id=group_id,
                 group_size=group_size,
-                representative_id=representative.sample_id,
+                representative_uid=representative.sample_uid,
                 reason="leaf_sequence",
             )
 
     resolved: list[SessionMergeDecision] = []
-    for sample_id in sorted(decisions):
-        decision = decisions[sample_id]
-        representative_id = decision.representative_id
+    for sample_uid, decision in sorted(decisions.items(), key=lambda item: item[1].local_id):
+        representative_uid = decision.representative_uid
         if not decision.keep:
-            representative_id = _resolve_representative(decisions, sample_id)
+            representative_uid = _resolve_representative(decisions, sample_uid)
         resolved.append(
             SessionMergeDecision(
-                sample_id=decision.sample_id,
+                sample_uid=decision.sample_uid,
+                local_id=decision.local_id,
                 status=decision.status,
                 keep=decision.keep,
                 group_id=decision.group_id,
                 group_size=decision.group_size,
-                representative_id=representative_id,
+                representative_uid=representative_uid,
                 reason=decision.reason,
             )
         )
@@ -273,7 +282,7 @@ def ensure_session_merge_schema(conn: duckdb.DuckDBPyConnection) -> None:
         "ALTER TABLE samples ADD COLUMN session_merge_keep BOOLEAN",
         "ALTER TABLE samples ADD COLUMN session_merge_group_id TEXT",
         "ALTER TABLE samples ADD COLUMN session_merge_group_size INTEGER",
-        "ALTER TABLE samples ADD COLUMN session_merge_representative_id INTEGER",
+        "ALTER TABLE samples ADD COLUMN session_merge_representative_uid TEXT",
         "ALTER TABLE samples ADD COLUMN session_merge_reason TEXT",
         "ALTER TABLE samples ADD COLUMN session_merge_updated_at TIMESTAMP",
     ]
@@ -302,7 +311,7 @@ def _load_candidates(
     with executor:
         for offset in range(0, total, batch_size):
             rows = conn.execute(
-                "SELECT id, CAST(raw_json AS VARCHAR), num_turns FROM samples ORDER BY id LIMIT ? OFFSET ?",
+                "SELECT sample_uid, id, CAST(raw_json AS VARCHAR), num_turns FROM samples ORDER BY id LIMIT ? OFFSET ?",
                 [batch_size, offset],
             ).fetchall()
             candidates.extend(executor.map(analyze_sample_row, rows))
@@ -360,7 +369,7 @@ def run_session_merge(
                     session_merge_keep = NULL,
                     session_merge_group_id = NULL,
                     session_merge_group_size = NULL,
-                    session_merge_representative_id = NULL,
+                    session_merge_representative_uid = NULL,
                     session_merge_reason = NULL,
                     session_merge_updated_at = NULL
                 """
@@ -372,10 +381,10 @@ def run_session_merge(
                     session_merge_keep = ?,
                     session_merge_group_id = ?,
                     session_merge_group_size = ?,
-                    session_merge_representative_id = ?,
+                    session_merge_representative_uid = ?,
                     session_merge_reason = ?,
                     session_merge_updated_at = ?
-                WHERE id = ?
+                WHERE sample_uid = ?
                 """,
                 [
                     (
@@ -383,10 +392,10 @@ def run_session_merge(
                         decision.keep,
                         decision.group_id,
                         decision.group_size,
-                        decision.representative_id,
+                        decision.representative_uid,
                         decision.reason,
                         updated_at,
-                        decision.sample_id,
+                        decision.sample_uid,
                     )
                     for decision in decisions
                 ],

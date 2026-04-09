@@ -48,15 +48,15 @@ def render(route: RouteState):
         "Detail",
     )
 
-    if route.sample_id is None:
-        st.error("未指定 sample_id")
+    if route.sample_uid is None:
+        st.error("未指定 sample_uid")
         return
 
     store = DuckDBStore(get_active_db_path(st.session_state), read_only=True)
-    sample = store.get_sample_by_id(route.sample_id)
+    sample = store.get_sample_by_uid(route.sample_uid)
 
     if not sample:
-        st.error(f"Sample {route.sample_id} 不存在")
+        st.error(f"Sample {route.sample_uid} 不存在")
         store.close()
         return
 
@@ -67,7 +67,7 @@ def render(route: RouteState):
     )
 
     col1, col2, col3, col4, col5, col6 = st.columns(6)
-    col1.markdown(f"**sample_id:** {detail.sample_id}")
+    col1.markdown(f"**sample_uid:** {detail.sample_uid}")
     col2.markdown(f"**episodes:** {detail.expected_episode_judgment_count}")
     col3.markdown(f"**response_steps:** {detail.expected_response_judgment_count}")
     col4.markdown(f"**stored_expected_judgments:** {detail.expected_judgment_count}")
@@ -76,7 +76,7 @@ def render(route: RouteState):
     col7, _ = st.columns([1, 5])
     col7.markdown(f"**num_tool_calls:** {detail.num_tool_calls}")
 
-    st.caption(f"sample_uid: {detail.sample_uid}")
+    st.caption(f"local sample_id: {detail.sample_id}")
     st.caption(f"processing_status: {detail.processing_status}")
     st.caption(f"empty_response: {detail.empty_response}")
     st.caption(
@@ -84,7 +84,7 @@ def render(route: RouteState):
         f"status={detail.session_merge_status or 'unmarked'}, "
         f"keep={detail.session_merge_keep if detail.session_merge_keep is not None else 'n/a'}, "
         f"reason={detail.session_merge_reason or '-'}, "
-        f"representative_id={detail.session_merge_representative_id or detail.sample_id}, "
+        f"representative_uid={detail.session_merge_representative_uid or detail.sample_uid}, "
         f"group_size={detail.session_merge_group_size or '-'}"
     )
 

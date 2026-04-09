@@ -7,7 +7,7 @@ def render_samples_table(
     samples: list[dict],
     page: int,
     total_pages: int,
-    on_detail_click: Callable[[int], None],
+    on_detail_click: Callable[[str], None],
     on_page_change: Callable[[int], None] | None = None,
     on_selection_change: Callable[[set[int]], None] | None = None,
     selected_ids: set[int] | None = None,
@@ -20,7 +20,7 @@ def render_samples_table(
         samples: List of sample dicts with id, num_turns, helpful_rate, etc.
         page: Current page number (1-indexed)
         total_pages: Total number of pages
-        on_detail_click: Callback(sample_id) when detail is clicked
+        on_detail_click: Callback(sample_uid) when detail is clicked
         show_checkboxes: If True, show checkboxes for row selection
     """
     if not samples:
@@ -70,8 +70,8 @@ def render_samples_table(
             cols[6].write(sample.get("processing_status", "pending"))
             cols[7].write(f"{sample.get('satisfied_rate', 0):.2f}")
             cols[8].write("✓" if sample.get("has_error") else "-")
-            if cols[9].button("详情", key=f"detail_{sample['id']}"):
-                on_detail_click(sample["id"])
+            if cols[9].button("详情", key=f"detail_{sample['sample_uid']}"):
+                on_detail_click(sample["sample_uid"])
         else:
             cols = st.columns([0.7, 0.8, 0.9, 1.2, 0.8, 1, 0.8, 0.8, 1])
             cols[0].write(sample["id"])
@@ -82,8 +82,8 @@ def render_samples_table(
             cols[5].write(sample.get("processing_status", "pending"))
             cols[6].write(f"{sample.get('satisfied_rate', 0):.2f}")
             cols[7].write("✓" if sample.get("has_error") else "-")
-            if cols[8].button("详情", key=f"detail_{sample['id']}"):
-                on_detail_click(sample["id"])
+            if cols[8].button("详情", key=f"detail_{sample['sample_uid']}"):
+                on_detail_click(sample["sample_uid"])
 
     if on_selection_change and next_selected != current_selected:
         on_selection_change(next_selected)

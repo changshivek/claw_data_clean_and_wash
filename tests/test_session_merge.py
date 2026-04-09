@@ -39,41 +39,41 @@ def test_extract_real_user_turns_skips_tool_result_only_user_blocks():
 
 def test_plan_session_merge_keeps_leaf_sequences_and_merges_prefixes():
     candidates = [
-        SessionMergeCandidate(1, "a", ("a", "b"), 10, 2),
-        SessionMergeCandidate(2, "a", ("a", "b", "c"), 12, 3),
-        SessionMergeCandidate(3, "a", ("a", "b", "d"), 13, 3),
-        SessionMergeCandidate(4, "a", ("a", "b", "c"), 14, 3),
-        SessionMergeCandidate(5, "x", ("x",), 2, 1),
+        SessionMergeCandidate("uid-1", 1, "a", ("a", "b"), 10, 2),
+        SessionMergeCandidate("uid-2", 2, "a", ("a", "b", "c"), 12, 3),
+        SessionMergeCandidate("uid-3", 3, "a", ("a", "b", "d"), 13, 3),
+        SessionMergeCandidate("uid-4", 4, "a", ("a", "b", "c"), 14, 3),
+        SessionMergeCandidate("uid-5", 5, "x", ("x",), 2, 1),
     ]
 
-    decisions = {decision.sample_id: decision for decision in plan_session_merge(candidates, min_prefix_turns=2)}
+    decisions = {decision.sample_uid: decision for decision in plan_session_merge(candidates, min_prefix_turns=2)}
 
-    assert decisions[1].keep is False
-    assert decisions[1].reason == "strict_prefix_of_longer_sequence"
-    assert decisions[1].representative_id == 4
-    assert decisions[2].keep is False
-    assert decisions[2].reason == "exact_duplicate_sequence"
-    assert decisions[2].representative_id == 4
-    assert decisions[3].keep is True
-    assert decisions[3].reason == "leaf_sequence"
-    assert decisions[4].keep is True
-    assert decisions[4].reason == "leaf_sequence"
-    assert decisions[5].keep is True
-    assert decisions[5].reason == "singleton_group"
+    assert decisions["uid-1"].keep is False
+    assert decisions["uid-1"].reason == "strict_prefix_of_longer_sequence"
+    assert decisions["uid-1"].representative_uid == "uid-4"
+    assert decisions["uid-2"].keep is False
+    assert decisions["uid-2"].reason == "exact_duplicate_sequence"
+    assert decisions["uid-2"].representative_uid == "uid-4"
+    assert decisions["uid-3"].keep is True
+    assert decisions["uid-3"].reason == "leaf_sequence"
+    assert decisions["uid-4"].keep is True
+    assert decisions["uid-4"].reason == "leaf_sequence"
+    assert decisions["uid-5"].keep is True
+    assert decisions["uid-5"].reason == "singleton_group"
 
 
 def test_plan_session_merge_preserves_short_prefixes_below_threshold():
     candidates = [
-        SessionMergeCandidate(1, "hello", ("hello",), 2, 1),
-        SessionMergeCandidate(2, "hello", ("hello", "follow up"), 4, 2),
+        SessionMergeCandidate("uid-1", 1, "hello", ("hello",), 2, 1),
+        SessionMergeCandidate("uid-2", 2, "hello", ("hello", "follow up"), 4, 2),
     ]
 
-    decisions = {decision.sample_id: decision for decision in plan_session_merge(candidates, min_prefix_turns=2)}
+    decisions = {decision.sample_uid: decision for decision in plan_session_merge(candidates, min_prefix_turns=2)}
 
-    assert decisions[1].keep is True
-    assert decisions[1].reason == "below_prefix_threshold"
-    assert decisions[2].keep is True
-    assert decisions[2].reason == "leaf_sequence"
+    assert decisions["uid-1"].keep is True
+    assert decisions["uid-1"].reason == "below_prefix_threshold"
+    assert decisions["uid-2"].keep is True
+    assert decisions["uid-2"].reason == "leaf_sequence"
 
 
 def test_run_session_merge_writes_markers_into_duckdb():
@@ -84,6 +84,7 @@ def test_run_session_merge_writes_markers_into_duckdb():
             """
             CREATE TABLE samples (
                 id INTEGER PRIMARY KEY,
+                sample_uid TEXT,
                 raw_json JSON,
                 num_turns INTEGER,
                 processing_status TEXT
@@ -111,8 +112,8 @@ def test_run_session_merge_writes_markers_into_duckdb():
 
         for index, payload in enumerate(payloads, start=1):
             conn.execute(
-                "INSERT INTO samples (id, raw_json, num_turns, processing_status) VALUES (?, ?, ?, 'pending')",
-                [index, json.dumps(payload, ensure_ascii=False), 3],
+                "INSERT INTO samples (id, sample_uid, raw_json, num_turns, processing_status) VALUES (?, ?, ?, ?, 'pending')",
+                [index, f"uid-{index}", json.dumps(payload, ensure_ascii=False), 3],
             )
         conn.close()
 
@@ -124,10 +125,10 @@ def test_run_session_merge_writes_markers_into_duckdb():
 
         conn = duckdb.connect(str(db_path), read_only=True)
         rows = conn.execute(
-            "SELECT id, session_merge_status, session_merge_keep, session_merge_representative_id, session_merge_reason FROM samples ORDER BY id"
+            "SELECT sample_uid, session_merge_status, session_merge_keep, session_merge_representative_uid, session_merge_reason FROM samples ORDER BY id"
         ).fetchall()
         conn.close()
 
-        assert rows[0] == (1, "merged", False, 2, "strict_prefix_of_longer_sequence")
-        assert rows[1] == (2, "keep", True, 2, "leaf_sequence")
-        assert rows[2] == (3, "keep", True, 3, "singleton_group")
+        assert rows[0] == ("uid-1", "merged", False, "uid-2", "strict_prefix_of_longer_sequence")
+        assert rows[1] == ("uid-2", "keep", True, "uid-2", "leaf_sequence")
+        assert rows[2] == ("uid-3", "keep", True, "uid-3", "singleton_group")

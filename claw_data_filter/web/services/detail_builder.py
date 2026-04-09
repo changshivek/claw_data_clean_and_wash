@@ -77,7 +77,7 @@ def build_sample_detail_view(
         session_merge_keep=sample_record.get("session_merge_keep"),
         session_merge_group_id=sample_record.get("session_merge_group_id"),
         session_merge_group_size=sample_record.get("session_merge_group_size"),
-        session_merge_representative_id=sample_record.get("session_merge_representative_id"),
+        session_merge_representative_uid=sample_record.get("session_merge_representative_uid"),
         session_merge_reason=sample_record.get("session_merge_reason"),
         response_steps=response_steps,
         user_episodes=user_episodes,

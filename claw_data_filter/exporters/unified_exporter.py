@@ -269,8 +269,8 @@ class UnifiedExporter:
         imported_at = sample_row.get("imported_at")
         tool_stats = sample_row.get("tool_stats") or {}
         return {
-            "sample_id": sample_row["id"],
             "sample_uid": sample_row.get("sample_uid"),
+            "local_sample_id": sample_row["id"],
             "imported_at": imported_at.isoformat() if isinstance(imported_at, datetime) else imported_at,
             "processing_status": sample_row.get("processing_status"),
             "empty_response": sample_row.get("empty_response", False),

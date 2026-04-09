@@ -50,7 +50,7 @@ class SampleDetailView:
     session_merge_keep: bool | None = None
     session_merge_group_id: str | None = None
     session_merge_group_size: int | None = None
-    session_merge_representative_id: int | None = None
+    session_merge_representative_uid: str | None = None
     session_merge_reason: str | None = None
     response_steps: list[ResponseStepDetailView] = field(default_factory=list)
     user_episodes: list[EpisodeDetailView] = field(default_factory=list)

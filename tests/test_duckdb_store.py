@@ -194,10 +194,11 @@ def test_update_sample_tool_stats():
             assistant_response="test",
         )
         sample_id = store.insert_sample(sample)
+        sample_uid = store.get_sample_by_id(sample_id)["sample_uid"]
 
         # Update tool stats
         tool_stats = {"response_helpful_rate": 0.8, "user_satisfied_rate": 0.9, "total_turns": 3, "has_error": False}
-        store.update_sample_tool_stats(sample_id, tool_stats)
+        store.update_sample_tool_stats(sample_uid, tool_stats)
 
         # Verify
         result = store.conn.execute("SELECT tool_stats FROM samples WHERE id = ?", [sample_id]).fetchone()
@@ -293,9 +294,10 @@ def test_claim_unprocessed_samples_skips_session_merged_rows():
                 {"role": "assistant", "content": "Hi"},
             ]
         }))
+        sample_uid = store.get_sample_by_id(sample_id)["sample_uid"]
         store.conn.execute(
-            "UPDATE samples SET session_merge_keep = false, session_merge_status = 'merged', session_merge_representative_id = ? WHERE id = ?",
-            [sample_id, sample_id],
+            "UPDATE samples SET session_merge_keep = false, session_merge_status = 'merged', session_merge_representative_uid = ? WHERE id = ?",
+            [sample_uid, sample_id],
         )
 
         claimed = store.claim_unprocessed_samples(limit=10)
@@ -422,7 +424,7 @@ def test_replace_round_feedback_results_replaces_stale_dual_judgments():
             "has_error": False,
         }
 
-        store.replace_round_feedback_results(sample_id, 2, 1, response_judgments, episode_judgments, tool_stats)
+        store.replace_round_feedback_results(sample_uid, 2, 1, response_judgments, episode_judgments, tool_stats)
 
         stored_response = store.get_assistant_response_judgments(sample_uid)
         stored_episode = store.get_user_episode_judgments(sample_uid)
@@ -450,8 +452,9 @@ def test_mark_sample_processing_failed_sets_failed_status():
                 {"role": "assistant", "content": "Hi"},
             ]
         }))
+        sample_uid = store.get_sample_by_id(sample_id)["sample_uid"]
 
-        store.mark_sample_processing_failed(sample_id, "boom")
+        store.mark_sample_processing_failed(sample_uid, "boom")
 
         row = store.conn.execute(
             "SELECT processing_status, tool_stats FROM samples WHERE id = ?",
@@ -473,8 +476,9 @@ def test_filter_samples_returns_sample_dicts():
                 {"role": "assistant", "content": "Hi"},
             ]
         }))
+        sample_uid = store.get_sample_by_id(sample_id)["sample_uid"]
         store.update_sample_tool_stats(
-            sample_id,
+            sample_uid,
             {"response_helpful_rate": 0.9, "user_satisfied_rate": 0.8, "total_turns": 1, "has_error": False},
         )
 
@@ -624,7 +628,7 @@ def test_samples_schema_removed_unused_columns_and_added_uid():
         assert "session_merge_keep" in column_names
         assert "session_merge_group_id" in column_names
         assert "session_merge_group_size" in column_names
-        assert "session_merge_representative_id" in column_names
+        assert "session_merge_representative_uid" in column_names
         assert "session_merge_reason" in column_names
         assert "session_merge_updated_at" in column_names
         assert "task_type" not in column_names

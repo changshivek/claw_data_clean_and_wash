@@ -217,8 +217,8 @@ def render(route: RouteState):
                     except Exception as exc:
                         st.error(f"导出失败: {str(exc)}")
 
-    def on_detail(sample_id: int) -> None:
-        go_to_detail(st.query_params, sample_id, route.active_main_page)
+    def on_detail(sample_uid: str) -> None:
+        go_to_detail(st.query_params, sample_uid, route.active_main_page)
         st.rerun()
 
     def on_page_change(page_index: int) -> None:

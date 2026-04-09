@@ -9,9 +9,9 @@ LLM-powered agent conversation data filtering tool. Import JSONL files, run roun
 3. 对导入消息中只有 user、没有 assistant 的样本打标 empty_response=true。
 4. session merge 按真实 user turns 检测并折叠会话快照重复，只保留应继续流转的样本。
 5. round feedback 以 claim 模式批量领取 pending 或 failed 且 session_merge_keep 为 true 的样本。
-6. 按统一 turn 语义做逐轮判断，并以原子方式写回结果。
+6. 按双层语义分别生成 assistant response judgments 和 user episode judgments，并以 sample_uid 为键原子写回结果。
 7. 样本进入 completed 或 failed 状态。
-8. 通过 CLI 或 Web 筛选页按统一导出服务导出 raw_json JSONL，或导出带 round feedback 侧挂信息的 OpenAI 兼容 JSONL。
+8. 通过 CLI 或 Web 筛选页按统一导出服务导出 raw_json JSONL，或导出带双层 round feedback 侧挂信息的 OpenAI 兼容 JSONL。
 
 ## Quick Start
 
@@ -113,8 +113,8 @@ UniRouter 格式自动从 request.bodyJson.messages 提取:
 - 导入阶段会统一提取消息并生成 user_query、assistant_response、num_turns、expected_judgment_count、empty_response 等派生字段。
 - 导入阶段还会基于原始 payload 生成 SHA-256 的 sample_uid，用作稳定、低碰撞的导入身份；整数 id 继续作为本地关系键。
 - 当导入数据中存在 user 消息但没有 assistant 消息时，会标记 empty_response=true，便于后续筛除这类样本。
-- 当前代码中的 expected_judgment_count 和 judged turn 仍按单层 user-anchor 逻辑计算：同一 user 下的 assistant/tool/assistant 序列会被合并成一轮。
-- 下一版 round feedback 目标设计会拆成两层粒度：assistant 级 response_helpful，与 user-episode 级 user_satisfied；详见 docs/superpowers 下的设计文档与实现计划。
+- 当前代码中的 expected_judgment_count 等于 expected_response_judgment_count + expected_episode_judgment_count。
+- response judgments 以 assistant 响应单元计数；episode judgments 以完整 user episode 计数。
 - importer 当前直接读取的是普通 `.jsonl` 文件，不会自动解压 `.gz`。
 - 如果原始包内是 `items.jsonl.gz`，需要先解压为普通 `items.jsonl` 后再导入。
 - `scripts/run_import_to_stats.sh` 也要求 `INPUT_FILE` 指向普通 `.jsonl`，传入 `.gz` 会直接报错退出。
@@ -133,7 +133,7 @@ samples 表当前使用显式处理状态:
 说明:
 - round feedback 使用 claim 模式领取 pending 和 failed 样本。
 - 如果 session merge 已执行，claim 时只会领取 session_merge_keep=true 的样本；unmarked/null 和 session_merge_keep=false 都不会进入 round feedback。
-- 结果写入采用原子替换，避免 sample 聚合结果和 turn_judgments 明细不一致。
+- 结果写入采用按 sample_uid 的原子替换，避免 sample 聚合结果与双 judgment 明细不一致。
 
 ## Session Merge
 
@@ -150,7 +150,7 @@ session merge 会在 samples 表写入以下字段：
 - session_merge_keep
 - session_merge_group_id
 - session_merge_group_size
-- session_merge_representative_id
+- session_merge_representative_uid
 - session_merge_reason
 - session_merge_updated_at
 
@@ -183,6 +183,7 @@ claw-filter session-merge --workers 4 --batch-size 512 --min-prefix-turns 2
 - response_helpful 关注的是 assistant 当下这一步是否做对了，证据应尽量局部、紧邻，避免把后续 assistant 的补救结果反向归功到前一跳。
 - user_satisfied 关注的是用户是否接受了整段交互结果，天然应该覆盖一个 user episode 内的多步 assistant/tool 往返。
 - 两个指标的评判对象和反馈信号窗口不同，继续共用一套 judged turn 会把粒度混在一起，导致归因失真。
+- 当前实现已经去掉这层共用 judged turn，分别落到 response-step 与 user-episode 两种明细记录上。
 
 **user_satisfied 判定：**
 - 用户追问/澄清 → no
@@ -193,7 +194,7 @@ claw-filter session-merge --workers 4 --batch-size 512 --min-prefix-turns 2
 边界说明:
 - response_helpful 的边界是 assistant -> 紧邻反馈块。若 assistant 后面紧跟 tool 消息，则该 tool block 是反馈；若 assistant 后面直接进入 user，则该 user 是反馈。
 - user_satisfied 的边界是 user episode：从某条 user 消息开始，到下一条 user 消息出现前的所有 assistant/tool 交互都属于同一 episode。
-- 当前代码实现尚未完成这次拆分，仍使用单层 user-anchor judged turn；本 README 这里记录的是目标语义和后续改造方向。
+- 导出、Web detail、样本级 rate 聚合与测试都已经按这套双层边界运行。
 
 ## 筛选字段
 
@@ -217,12 +218,14 @@ rate 计算说明:
 
 - samples
   记录 sample_uid、原始 JSON、empty_response 在内的派生字段、四个显式 rate 列、session_merge 标记列、tool_stats、processing_status 等样本级信息。
-- turn_judgments
-  记录每个 judged turn 的 response_helpful、user_satisfied、signal_from_users、llm_error。
+- assistant_response_judgments
+  记录每个 assistant 响应单元的 response_helpful、feedback_kind、反馈块范围和 llm_error。
+- user_episode_judgments
+  记录每个 user episode 的 user_satisfied、signal_from_users、消息范围和 llm_error。
 
 说明:
-- 当前数据库仍只有 turn_judgments 一张逐轮明细表，对应的是单层 judged turn 实现。
-- 如果按目标设计推进，response_helpful 和 user_satisfied 很可能需要拆成两类明细记录或两张表，否则一条记录无法同时准确承载 assistant-step 和 user-episode 两种粒度。
+- 双 judgment 明细表都以 sample_uid 作为跨表关联键。
+- samples.id 仍然存在，但不再承担 Web drill-down、round feedback 写回或 session merge 代表关系的业务主键职责。
 
 ## 环境变量
 
@@ -301,31 +304,45 @@ claw-filter filter --response-helpful-rate ">=0.7" --export-format openai_round_
   每行直接导出一个 sample 的原始 `raw_json`。
 - `openai_round_feedback`
   每行导出一个包装后的 JSON 对象，包含：
-  - `schema`: 固定为 `openai_round_feedback_v1`
+  - `schema`: 固定为 `openai_round_feedback_v2`
   - `metadata`: sample 级派生字段和处理状态
   - `source_metadata`: 从原始载荷中提取的时间、model requested、user agent、request id、trace id、metadata 等来源信息
   - `conversation.messages`: 规范化后的 OpenAI 兼容消息数组
   - `conversation.tools`: 规范化后的工具定义数组；OpenAI 原生 `tools` 会原样保留，Anthropic request-level `tools` 会被转换为 OpenAI function tools
-  - `round_feedback.turns`: 每个 turn 的消息范围和 round feedback 结论
+  - `round_feedback.response_helpful_steps`: 每个 assistant 响应单元的范围和 helpful judgment
+  - `round_feedback.user_satisfied_episodes`: 每个 user episode 的范围和 satisfied judgment
+
+`metadata` 当前采用 sample_uid-first 口径：
+- `sample_uid`: 对外稳定样本键
+- `local_sample_id`: 本地整数辅助键
 
 `conversation.messages` 的规范化规则：
 - 如果源数据本身是 OpenAI 风格，原有 `messages` 会直接保留。
 - 如果源数据来自 UniRouter/Anthropic request body，顶层 `system` 会被前置转换为 OpenAI `system` message。
 - Anthropic `tool_use` / `tool_result` block 会被转换为 OpenAI 风格的 `assistant.tool_calls` 和 `tool` message。
 
-`round_feedback.turns` 中仅保留轻量侧挂信息：
-- `turn_index`
-- `message_start_index`
-- `message_end_index`
+`round_feedback.response_helpful_steps` 中仅保留轻量侧挂信息：
+- `response_index`
+- `episode_index`
+- `assistant_message_index`
+- `feedback_kind`
+- `feedback_message_start_index`
+- `feedback_message_end_index`
+- `feedback_payload`
 - `response_helpful`
-- `user_satisfied`
-- `signal_from_users`
 - `llm_error`
 
-turn range 语义说明：
-- `turn_index` 仍按 judged turn 顺序编号，不会因为前置 `system` message 改变。
-- `message_start_index` 和 `message_end_index` 是基于最终导出的 `conversation.messages` 重新计算的真实数组索引。
-- 因此，如果规范化时在最前面新增了 `system` message，后续 turn 的消息范围会相应后移。
+`round_feedback.user_satisfied_episodes` 中仅保留轻量侧挂信息：
+- `episode_index`
+- `message_start_index`
+- `message_end_index`
+- `signal_from_users`
+- `user_satisfied`
+- `llm_error`
+
+range 语义说明：
+- 所有 message index 都基于最终导出的 `conversation.messages` 重新计算。
+- 如果规范化时在最前面新增了 `system` message，后续 assistant step 和 episode 的消息范围会相应后移。
 - `conversation.tools` 不参与 range 计算，因为它不在 `messages` 数组中。
 
 ## 老库回填
@@ -342,7 +359,7 @@ turn range 语义说明：
 
 ## Web 页面
 
-项目已包含基于 Streamlit 的单入口可视化工作台，页面与后端使用同一套查询和 turn 语义。
+项目已包含基于 Streamlit 的单入口可视化工作台，页面与后端使用同一套查询和双层 judgment 语义。
 
 启动方式：
 
@@ -357,15 +374,16 @@ DB_PATH=data/unirouter_20260403_512.duckdb .venv/bin/streamlit run claw_data_fil
 - overview: 统计概览
 - filter: 数据筛选、勾选与统一导出
 - tables: 数据表预览
-- detail: 样本详情与逐轮 judgment 展示
+- detail: 样本详情、response steps 与 user episodes 展示
 
 Web 页面说明:
 - 只保留 `app.py` 这一个 Streamlit 入口；侧边栏导航由 query params 路由驱动，不再暴露默认多页标签。
-- detail 页复用与 round feedback 相同的 turn builder。
+- detail 页复用与 round feedback 相同的 dual-level context builder。
 - 导出功能已并入 filter 页，不再维护独立 export 页。
 - CLI 与 Web filter 页共用 UnifiedExporter，避免导出逻辑分叉。
 - overview/filter/detail/tables 页都可以查看 session merge 标记信息。
 - overview/filter/detail/tables 页都已接入 empty_response 信息或过滤能力。
+- detail 页 URL 使用 sample_uid 进行 drill-down，local sample_id 仅作辅助展示。
 
 ## 目录结构
 
@@ -412,4 +430,4 @@ SKIP_INTEGRATION=1 pytest tests/ -v  # 跳过集成测试
 
 当前建议:
 - 使用 sample_uid 作为稳定导入身份和去重依据。
-- 使用整数 id 作为本地主键、外键和页面详情路由参数。
+- 使用整数 id 作为本地辅助键，不再作为页面详情路由或跨表业务关联键。

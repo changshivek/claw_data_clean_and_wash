@@ -32,7 +32,7 @@ def test_build_sample_detail_view_uses_turn_context_grouping():
         "session_merge_keep": True,
         "session_merge_group_id": "group-1",
         "session_merge_group_size": 4,
-        "session_merge_representative_id": 3,
+        "session_merge_representative_uid": "uid-3",
         "session_merge_reason": "leaf_sequence",
         "processing_status": "completed",
     }
@@ -91,6 +91,7 @@ def test_build_sample_detail_view_uses_turn_context_grouping():
 
     assert detail.sample_id == 3
     assert detail.sample_uid == "uid-3"
+    assert detail.session_merge_representative_uid == "uid-3"
     assert detail.empty_response is False
     assert detail.session_merge_status == "keep"
     assert detail.session_merge_reason == "leaf_sequence"

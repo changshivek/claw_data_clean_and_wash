@@ -1,7 +1,9 @@
 import json
+from unittest.mock import AsyncMock
 
-# Sample conversation data for testing
 import pytest
+
+
 SAMPLE_MESSAGES = [
     {"role": "system", "content": "You are a helpful assistant."},
     {"role": "user", "content": "What's the weather in Beijing?"},
@@ -11,230 +13,6 @@ SAMPLE_MESSAGES = [
     {"role": "user", "content": "Thanks!"},
     {"role": "assistant", "content": "You're welcome!"},
 ]
-
-def test_extract_turns():
-    """Test extracting turns from messages"""
-    from claw_data_filter.processors.round_feedback import TurnContextBuilder
-
-    builder = TurnContextBuilder()
-    turns = builder.extract_turns(SAMPLE_MESSAGES)
-    # Tool-call assistant and final answer are grouped into one turn.
-    assert len(turns) == 2
-
-def test_extract_turns_no_system():
-    """Test that system messages are skipped"""
-    from claw_data_filter.processors.round_feedback import TurnContextBuilder
-
-    builder = TurnContextBuilder()
-    turns = builder.extract_turns(SAMPLE_MESSAGES)
-    # First turn should not include system message
-    assert "You are a helpful assistant" not in turns[0].user_message
-
-def test_turn_has_tool_calls():
-    """Test that tool calls are extracted"""
-    from claw_data_filter.processors.round_feedback import TurnContextBuilder
-
-    builder = TurnContextBuilder()
-    turns = builder.extract_turns(SAMPLE_MESSAGES)
-    # Turn 0 (weather question) should include the tool call in the same turn.
-    turn_with_tool = turns[0]
-    assert len(turn_with_tool.tool_calls) == 1
-    assert turn_with_tool.tool_calls[0]["name"] == "web_search"
-    assert "Beijing is sunny today" in turn_with_tool.assistant_message
-
-def test_signal_users_extraction():
-    """Test that signal users are extracted for each turn"""
-    from claw_data_filter.processors.round_feedback import TurnContextBuilder
-
-    builder = TurnContextBuilder()
-    turns = builder.extract_turns(SAMPLE_MESSAGES)
-    # Turn 0 (answer about weather) should have "Thanks!" as signal.
-    assert "Thanks!" in turns[0].signal_users
-
-def test_build_judgment_prompt():
-    """Test building simplified judgment prompt"""
-    from claw_data_filter.processors.round_feedback import TurnContextBuilder
-
-    builder = TurnContextBuilder()
-    turns = builder.extract_turns(SAMPLE_MESSAGES)
-    prompt = builder.build_judgment_prompt(turns[0], turns)
-    assert "=== 当前用户请求 ===" in prompt
-    assert "=== 当前assistant执行链 ===" in prompt
-    assert "=== 后续真实用户反馈" in prompt
-    assert "response_helpful:" in prompt
-    assert "user_satisfied:" in prompt
-    assert "[assistant_tool_use]: web_search({})" in prompt
-    assert "system reminder、plan mode 提示、tool 框架提示、工具中断提示等系统/框架文本可能混在对话里" in prompt
-
-
-def test_extract_response_contexts_split_assistant_steps_by_feedback_block():
-    from claw_data_filter.processors.round_feedback import TurnContextBuilder
-
-    builder = TurnContextBuilder()
-    contexts = builder.extract_response_contexts("sample-1", SAMPLE_MESSAGES)
-
-    assert len(contexts) == 3
-    assert contexts[0].feedback_kind.value == "tool_result"
-    assert contexts[0].feedback_payload == ['{"result": "sunny, 25C"}']
-    assert contexts[1].feedback_kind.value == "user"
-    assert contexts[1].feedback_payload == ["Thanks!"]
-    assert contexts[2].feedback_kind.value == "none"
-
-
-def test_extract_episode_contexts_keep_user_episode_boundary():
-    from claw_data_filter.processors.round_feedback import TurnContextBuilder
-
-    builder = TurnContextBuilder()
-    contexts = builder.extract_episode_contexts("sample-1", SAMPLE_MESSAGES)
-
-    assert len(contexts) == 2
-    assert contexts[0].user_message == "What's the weather in Beijing?"
-    assert contexts[0].assistant_messages == ["Let me check...", "Beijing is sunny today, 25 degrees."]
-    assert contexts[0].tool_results == ['{"result": "sunny, 25C"}']
-    assert contexts[0].signal_from_users == ["Thanks!"]
-    assert contexts[1].user_message == "Thanks!"
-    assert contexts[1].assistant_messages == ["You're welcome!"]
-
-
-@pytest.mark.asyncio
-async def test_judge_success():
-    """Test judgment returns parsed result"""
-    from unittest.mock import AsyncMock
-    from claw_data_filter.processors.round_feedback import RoundJudgmentProcessor
-    from claw_data_filter.llm.async_client import AsyncLLMClient
-
-    mock_llm = AsyncMock(spec=AsyncLLMClient)
-    mock_llm.chat = AsyncMock(return_value="response_helpful=yes; user_satisfied=no")
-
-    processor = RoundJudgmentProcessor(mock_llm)
-    result = await processor.judge("mock prompt")
-
-    assert result["response_helpful"] == "yes"
-    assert result["user_satisfied"] == "no"
-
-def test_parse_response():
-    """Test simplified response parsing"""
-    from unittest.mock import AsyncMock
-    from claw_data_filter.processors.round_feedback import RoundJudgmentProcessor
-    from claw_data_filter.llm.async_client import AsyncLLMClient
-
-    mock_llm = AsyncMock(spec=AsyncLLMClient)
-    processor = RoundJudgmentProcessor(mock_llm)
-
-    result = processor._parse_response("response_helpful=yes; user_satisfied=no")
-    assert result["response_helpful"] == "yes"
-    assert result["user_satisfied"] == "no"
-
-def test_parse_response_uncertain():
-    """Test response parsing with uncertain value"""
-    from unittest.mock import AsyncMock
-    from claw_data_filter.processors.round_feedback import RoundJudgmentProcessor
-    from claw_data_filter.llm.async_client import AsyncLLMClient
-
-    mock_llm = AsyncMock(spec=AsyncLLMClient)
-    processor = RoundJudgmentProcessor(mock_llm)
-
-    result = processor._parse_response("response_helpful=uncertain; user_satisfied=yes")
-    assert result["response_helpful"] == "uncertain"
-    assert result["user_satisfied"] == "yes"
-
-def test_parse_response_neutral():
-    """Test response parsing with neutral satisfaction"""
-    from unittest.mock import AsyncMock
-    from claw_data_filter.processors.round_feedback import RoundJudgmentProcessor
-    from claw_data_filter.llm.async_client import AsyncLLMClient
-
-    mock_llm = AsyncMock(spec=AsyncLLMClient)
-    processor = RoundJudgmentProcessor(mock_llm)
-
-    result = processor._parse_response("response_helpful=yes; user_satisfied=neutral")
-    assert result["response_helpful"] == "yes"
-    assert result["user_satisfied"] == "neutral"
-
-def test_parse_response_invalid():
-    """Test invalid response returns None"""
-    from unittest.mock import AsyncMock
-    from claw_data_filter.processors.round_feedback import RoundJudgmentProcessor
-    from claw_data_filter.llm.async_client import AsyncLLMClient
-
-    mock_llm = AsyncMock(spec=AsyncLLMClient)
-    processor = RoundJudgmentProcessor(mock_llm)
-
-    result = processor._parse_response("invalid response format")
-    assert result is None
-
-def test_tool_stats_aggregator():
-    """Test ToolStatsAggregator aggregates correctly for simplified judgments"""
-    from claw_data_filter.processors.round_feedback import ToolStatsAggregator
-    from claw_data_filter.models.round_judgment import RoundJudgment
-
-    aggregator = ToolStatsAggregator()
-
-    judgments = [
-        RoundJudgment(sample_id=1, turn_index=0, response_helpful="yes", user_satisfied="yes", llm_error=False),
-        RoundJudgment(sample_id=1, turn_index=1, response_helpful="yes", user_satisfied="no", llm_error=False),
-        RoundJudgment(sample_id=1, turn_index=2, response_helpful="no", user_satisfied="yes", llm_error=False),
-    ]
-
-    stats = aggregator.aggregate(judgments)
-
-    assert stats["response_helpful_rate"] == 2/3  # 2 out of 3 are helpful
-    assert stats["response_unhelpful_rate"] == 1/3
-    assert stats["user_satisfied_rate"] == 2/3  # 2 out of 3 are satisfied
-    assert stats["user_negative_feedback_rate"] == 1/3
-    assert stats["total_turns"] == 3
-    assert stats["has_error"] is False
-
-
-@pytest.mark.asyncio
-async def test_pressure_test_initialization():
-    """Test PressureTest can be initialized"""
-    from unittest.mock import AsyncMock
-    from claw_data_filter.processors.round_feedback import PressureTest
-    from claw_data_filter.llm.async_client import AsyncLLMClient
-
-    mock_llm = AsyncMock(spec=AsyncLLMClient)
-    pt = PressureTest(mock_llm)
-    assert pt.llm is mock_llm
-
-
-# Real conversation sample for integration test
-REAL_CONVERSATION = {
-    "request": {
-        "bodyJson": {
-            "messages": [
-                {"role": "user", "content": "Hello"},
-                {"role": "assistant", "content": "Hi! How can I help you?"},
-                {"role": "user", "content": "What's the weather in Beijing?"},
-                {"role": "assistant", "content": "Let me check...", "tool_calls": [{"function": {"name": "web_search", "arguments": "{}"}}]},
-                {"role": "tool", "content": "Sunny, 25C"},
-                {"role": "assistant", "content": "Beijing is sunny today, 25 degrees."},
-                {"role": "user", "content": "Thanks!"},
-                {"role": "assistant", "content": "You're welcome!"},
-            ]
-        }
-    }
-}
-
-def test_end_to_end_turn_extraction():
-    """Test full flow from raw messages to turns"""
-    from claw_data_filter.processors.round_feedback import TurnContextBuilder
-
-    builder = TurnContextBuilder()
-    turns = builder.extract_turns(REAL_CONVERSATION["request"]["bodyJson"]["messages"])
-
-    # Consecutive assistant/tool/assistant messages are grouped into one judged turn.
-    assert len(turns) == 3
-
-    # Check turn 1 keeps the weather question and merged assistant/tool response.
-    assert turns[1].tool_calls
-    assert turns[1].user_message == "What's the weather in Beijing?"
-    assert "Let me check..." in turns[1].assistant_message
-    assert "Beijing is sunny today, 25 degrees." in turns[1].assistant_message
-
-    # Check signal users for the weather turn.
-    assert "Thanks!" in turns[1].signal_users
-
 
 ANTHROPIC_TOOL_CHAIN_MESSAGES = [
     {"role": "user", "content": [{"type": "text", "text": "帮我看一下目录里有什么文件"}]},
@@ -253,144 +31,147 @@ ANTHROPIC_TOOL_CHAIN_MESSAGES = [
 ]
 
 
-def test_extract_turns_absorbs_tool_result_only_user_blocks():
+def test_extract_response_contexts_split_assistant_steps_by_feedback_block():
+    from claw_data_filter.processors.round_feedback import TurnContextBuilder
+
+    contexts = TurnContextBuilder().extract_response_contexts("sample-1", SAMPLE_MESSAGES)
+
+    assert len(contexts) == 3
+    assert contexts[0].feedback_kind.value == "tool_result"
+    assert contexts[0].feedback_payload == ['{"result": "sunny, 25C"}']
+    assert contexts[1].feedback_kind.value == "user"
+    assert contexts[1].feedback_payload == ["Thanks!"]
+    assert contexts[2].feedback_kind.value == "none"
+
+
+def test_extract_episode_contexts_keep_user_episode_boundary():
+    from claw_data_filter.processors.round_feedback import TurnContextBuilder
+
+    contexts = TurnContextBuilder().extract_episode_contexts("sample-1", SAMPLE_MESSAGES)
+
+    assert len(contexts) == 2
+    assert contexts[0].user_message == "What's the weather in Beijing?"
+    assert contexts[0].assistant_messages == ["Let me check...", "Beijing is sunny today, 25 degrees."]
+    assert contexts[0].tool_results == ['{"result": "sunny, 25C"}']
+    assert contexts[0].signal_from_users == ["Thanks!"]
+    assert contexts[1].assistant_messages == ["You're welcome!"]
+
+
+def test_build_response_helpful_prompt_uses_only_adjacent_feedback_block():
     from claw_data_filter.processors.round_feedback import TurnContextBuilder
 
     builder = TurnContextBuilder()
-    turns = builder.extract_turns(ANTHROPIC_TOOL_CHAIN_MESSAGES)
+    context = builder.extract_response_contexts("sample-1", SAMPLE_MESSAGES)[0]
+    prompt = builder.build_response_helpful_prompt(context)
 
-    assert len(turns) == 2
-    assert turns[0].user_message == "帮我看一下目录里有什么文件"
-    assert len(turns[0].tool_calls) == 1
-    assert turns[0].tool_calls[0]["name"] == "bash"
-    assert turns[0].tool_result == "a.txt\nb.txt"
-    assert "我先列一下文件。" in turns[0].assistant_message
-    assert "目录里有 a.txt 和 b.txt。" in turns[0].assistant_message
-    assert turns[0].signal_users == ["那 a.txt 里是什么？"]
+    assert "当前 assistant 响应单元" in prompt
+    assert "紧邻反馈块类型" in prompt
+    assert "web_search({})" in prompt
+    assert '{"result": "sunny, 25C"}' in prompt
+    assert "只输出一行：response_helpful=yes|no|uncertain" in prompt
 
 
-def test_build_prompt_includes_execution_chain_and_real_feedback_only():
+def test_build_user_satisfied_prompt_uses_episode_and_later_user_signals():
     from claw_data_filter.processors.round_feedback import TurnContextBuilder
 
     builder = TurnContextBuilder()
-    turns = builder.extract_turns(ANTHROPIC_TOOL_CHAIN_MESSAGES)
-    prompt = builder.build_judgment_prompt(turns[0], turns)
+    context = builder.extract_episode_contexts("sample-1", SAMPLE_MESSAGES)[0]
+    prompt = builder.build_user_satisfied_prompt(context)
 
-    assert "[assistant_tool_use]: bash({\"cmd\": \"ls\"})" in prompt
-    assert "[tool_result]: a.txt\nb.txt" in prompt
-    assert "目录里有 a.txt 和 b.txt。" in prompt
-    assert "那 a.txt 里是什么？" in prompt
+    assert "episode 起始用户请求" in prompt
+    assert "后续最多 3 条真实用户文本反馈" in prompt
+    assert "Thanks!" in prompt
+    assert "只输出一行：user_satisfied=yes|no|uncertain|neutral" in prompt
 
 
-def test_signal_users_skip_tool_result_only_user_blocks():
+def test_extract_contexts_skip_empty_messages():
     from claw_data_filter.processors.round_feedback import TurnContextBuilder
 
-    messages = [
-        {"role": "user", "content": [{"type": "text", "text": "先查天气"}]},
-        {"role": "assistant", "content": [
-            {"type": "text", "text": "我查一下。"},
-            {"type": "tool_use", "id": "call_1", "name": "weather", "input": {"city": "北京"}},
-        ]},
-        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_1", "content": "晴 25 度"}]},
-        {"role": "assistant", "content": [{"type": "text", "text": "北京现在晴，25度。"}]},
-        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_1", "content": "风力 3 级"}]},
-        {"role": "assistant", "content": [{"type": "text", "text": "风力 3 级。"}]},
-        {"role": "user", "content": [{"type": "text", "text": "要不要带伞？"}]},
-        {"role": "assistant", "content": "不用带伞。"},
-    ]
-
     builder = TurnContextBuilder()
-    turns = builder.extract_turns(messages)
+    assert builder.extract_response_contexts("sample-1", []) == []
+    assert builder.extract_episode_contexts("sample-1", []) == []
 
-    assert len(turns) == 2
-    assert turns[0].signal_users == ["要不要带伞？"]
 
-def test_tool_stats_aggregation_integration():
-    """Test tool stats aggregation from judgments"""
+def test_extract_response_contexts_absorb_tool_result_only_user_blocks():
+    from claw_data_filter.processors.round_feedback import TurnContextBuilder
+
+    contexts = TurnContextBuilder().extract_response_contexts("sample-2", ANTHROPIC_TOOL_CHAIN_MESSAGES)
+
+    assert len(contexts) == 3
+    assert contexts[0].feedback_kind.value == "tool_result"
+    assert contexts[0].feedback_payload == ["a.txt\nb.txt"]
+    assert contexts[1].feedback_kind.value == "user"
+    assert contexts[1].feedback_payload == ["那 a.txt 里是什么？"]
+
+
+def test_extract_episode_contexts_skip_tool_result_only_user_blocks():
+    from claw_data_filter.processors.round_feedback import TurnContextBuilder
+
+    contexts = TurnContextBuilder().extract_episode_contexts("sample-2", ANTHROPIC_TOOL_CHAIN_MESSAGES)
+
+    assert len(contexts) == 2
+    assert contexts[0].tool_results == ["a.txt\nb.txt"]
+    assert contexts[0].signal_from_users == ["那 a.txt 里是什么？"]
+
+
+def test_response_helpful_parser_accepts_expected_values():
+    from claw_data_filter.llm.async_client import AsyncLLMClient
+    from claw_data_filter.processors.round_feedback import ResponseHelpfulJudgmentProcessor
+
+    processor = ResponseHelpfulJudgmentProcessor(AsyncMock(spec=AsyncLLMClient))
+
+    assert processor._parse_response("response_helpful=yes") == "yes"
+    assert processor._parse_response("response_helpful=uncertain") == "uncertain"
+    assert processor._parse_response("invalid") is None
+
+
+def test_user_satisfied_parser_accepts_expected_values():
+    from claw_data_filter.llm.async_client import AsyncLLMClient
+    from claw_data_filter.processors.round_feedback import UserSatisfiedJudgmentProcessor
+
+    processor = UserSatisfiedJudgmentProcessor(AsyncMock(spec=AsyncLLMClient))
+
+    assert processor._parse_response("user_satisfied=yes") == "yes"
+    assert processor._parse_response("user_satisfied=neutral") == "neutral"
+    assert processor._parse_response("invalid") is None
+
+
+def test_tool_stats_aggregator_uses_dual_denominators():
+    from claw_data_filter.models.round_judgment import AssistantResponseJudgment, FeedbackKind, UserEpisodeJudgment
     from claw_data_filter.processors.round_feedback import ToolStatsAggregator
-    from claw_data_filter.models.round_judgment import RoundJudgment
 
-    aggregator = ToolStatsAggregator()
-
-    # Simulate judgments as they would come from processing
-    judgments = [
-        RoundJudgment(sample_id=1, turn_index=0, response_helpful="yes", user_satisfied="yes", llm_error=False),
-        RoundJudgment(sample_id=1, turn_index=1, response_helpful="yes", user_satisfied="yes", llm_error=False),
-        RoundJudgment(sample_id=1, turn_index=2, response_helpful="yes", user_satisfied="no", llm_error=False),
-        RoundJudgment(sample_id=1, turn_index=3, response_helpful="yes", user_satisfied="yes", llm_error=False),
+    response_judgments = [
+        AssistantResponseJudgment(sample_uid="s", response_index=0, episode_index=0, assistant_message_index=1, feedback_kind=FeedbackKind.NONE, response_helpful="yes", llm_error=False),
+        AssistantResponseJudgment(sample_uid="s", response_index=1, episode_index=0, assistant_message_index=2, feedback_kind=FeedbackKind.NONE, response_helpful="uncertain", llm_error=False),
+        AssistantResponseJudgment(sample_uid="s", response_index=2, episode_index=1, assistant_message_index=4, feedback_kind=FeedbackKind.NONE, response_helpful="no", llm_error=False),
+    ]
+    episode_judgments = [
+        UserEpisodeJudgment(sample_uid="s", episode_index=0, start_user_message_index=0, end_before_user_message_index=2, signal_from_users=["继续"], user_satisfied="yes", llm_error=False),
+        UserEpisodeJudgment(sample_uid="s", episode_index=1, start_user_message_index=3, end_before_user_message_index=4, signal_from_users=[], user_satisfied="neutral", llm_error=False),
+        UserEpisodeJudgment(sample_uid="s", episode_index=2, start_user_message_index=5, end_before_user_message_index=6, signal_from_users=[], user_satisfied="no", llm_error=False),
     ]
 
-    stats = aggregator.aggregate(judgments)
+    stats = ToolStatsAggregator.aggregate(response_judgments, episode_judgments)
 
-    assert stats["response_helpful_rate"] == 1.0  # All 4 are helpful
-    assert stats["response_unhelpful_rate"] == 0.0
-    assert stats["user_satisfied_rate"] == 0.75  # 3 out of 4 are satisfied
-    assert stats["user_negative_feedback_rate"] == 0.25
-    assert stats["total_turns"] == 4
-    assert stats["has_error"] is False
-
-
-def test_tool_stats_aggregator_excludes_uncertain_from_denominator():
-    from claw_data_filter.processors.round_feedback import ToolStatsAggregator
-    from claw_data_filter.models.round_judgment import RoundJudgment
-
-    aggregator = ToolStatsAggregator()
-    judgments = [
-        RoundJudgment(sample_id=1, turn_index=0, response_helpful="yes", user_satisfied="yes", llm_error=False),
-        RoundJudgment(sample_id=1, turn_index=1, response_helpful="uncertain", user_satisfied="uncertain", llm_error=False),
-        RoundJudgment(sample_id=1, turn_index=2, response_helpful="no", user_satisfied="neutral", llm_error=False),
-        RoundJudgment(sample_id=1, turn_index=3, response_helpful="yes", user_satisfied="no", llm_error=False),
-    ]
-
-    stats = aggregator.aggregate(judgments)
-
-    assert stats["response_helpful_rate"] == 2 / 3
-    assert stats["response_unhelpful_rate"] == 1 / 3
+    assert stats["response_helpful_rate"] == 0.5
+    assert stats["response_unhelpful_rate"] == 0.5
     assert stats["user_satisfied_rate"] == 1 / 3
     assert stats["user_negative_feedback_rate"] == 1 / 3
-    assert stats["response_helpful_scored_turns"] == 3
-    assert stats["user_feedback_scored_turns"] == 3
-
-def test_empty_messages_handling():
-    """Test handling of empty messages"""
-    from claw_data_filter.processors.round_feedback import TurnContextBuilder
-
-    builder = TurnContextBuilder()
-    turns = builder.extract_turns([])
-    assert len(turns) == 0
-
-def test_single_user_message():
-    """Test handling of single user message (no assistant)"""
-    from claw_data_filter.processors.round_feedback import TurnContextBuilder
-
-    builder = TurnContextBuilder()
-    turns = builder.extract_turns([{"role": "user", "content": "Hello"}])
-    # Single user with no assistant response should not create a turn
-    assert len(turns) == 0
-
-
-def test_parse_simplified_response():
-    """Test parsing simplified response with only 2 judgments"""
-    from claw_data_filter.processors.round_feedback import RoundJudgmentProcessor
-
-    class MockLLM:
-        async def chat(self, messages, max_tokens=50):
-            return "response_helpful=yes; user_satisfied=no"
-
-    processor = RoundJudgmentProcessor(MockLLM())
-    result = processor._parse_response("response_helpful=yes; user_satisfied=no")
-    assert result == {"response_helpful": "yes", "user_satisfied": "no"}
+    assert stats["response_helpful_scored_steps"] == 2
+    assert stats["user_feedback_scored_episodes"] == 3
 
 
 @pytest.mark.asyncio
 async def test_process_sample_marks_unirouter_sample_complete(tmp_path):
-    """Test process_sample handles UniRouter payload and writes full results atomically."""
+    from claw_data_filter.models.sample import Sample
     from claw_data_filter.processors.round_feedback import RoundFeedbackProcessor
     from claw_data_filter.storage.duckdb_store import DuckDBStore
 
     class MockLLM:
         async def chat(self, messages, max_tokens=50):
-            return "response_helpful=yes; user_satisfied=yes"
+            if "response_helpful" in messages[0]["content"]:
+                return "response_helpful=yes"
+            return "user_satisfied=yes"
 
     store = DuckDBStore(tmp_path / "round_feedback.duckdb")
     raw_json = {
@@ -406,32 +187,20 @@ async def test_process_sample_marks_unirouter_sample_complete(tmp_path):
         }
     }
 
-    sample_id = store.insert_sample(__import__("claw_data_filter.models.sample", fromlist=["Sample"]).Sample.from_dict(raw_json))
-    processor = RoundFeedbackProcessor(store, MockLLM(), max_concurrency=2)
+    sample_id = store.insert_sample(Sample.from_dict(raw_json))
+    sample_uid = store.get_sample_by_id(sample_id)["sample_uid"]
+    judgments = await RoundFeedbackProcessor(store, MockLLM(), max_concurrency=2).process_sample(sample_uid, raw_json)
 
-    judgments = await processor.process_sample(sample_id, raw_json)
-
-    assert judgments.sample_uid == store.get_sample_by_id(sample_id)["sample_uid"]
+    assert judgments.sample_uid == sample_uid
     assert len(judgments.response_judgments) == 2
     assert len(judgments.episode_judgments) == 1
-    persisted_response = store.get_assistant_response_judgments(judgments.sample_uid)
-    persisted_episode = store.get_user_episode_judgments(judgments.sample_uid)
-    assert len(persisted_response) == 2
-    assert len(persisted_episode) == 1
+    assert len(store.get_assistant_response_judgments(sample_uid)) == 2
+    assert len(store.get_user_episode_judgments(sample_uid)) == 1
+
     row = store.conn.execute(
-        "SELECT expected_judgment_count, tool_stats FROM samples WHERE id = ?",
-        [sample_id],
+        "SELECT expected_judgment_count, tool_stats FROM samples WHERE sample_uid = ?",
+        [sample_uid],
     ).fetchone()
     assert row[0] == 3
     assert json.loads(row[1])["response_helpful_rate"] == 1.0
     store.close()
-
-
-def test_count_expected_turns_matches_extraction():
-    """Test expected turn counting matches actual extracted turns."""
-    from claw_data_filter.processors.round_feedback import TurnContextBuilder
-
-    builder = TurnContextBuilder()
-    turns = builder.extract_turns(REAL_CONVERSATION["request"]["bodyJson"]["messages"])
-
-    assert builder.count_expected_turns(REAL_CONVERSATION["request"]["bodyJson"]["messages"]) == len(turns)

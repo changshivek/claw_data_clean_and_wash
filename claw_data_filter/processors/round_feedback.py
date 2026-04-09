@@ -1,4 +1,4 @@
-"""Dual-level round feedback processor with compatibility helpers."""
+"""Dual-level round feedback processor."""
 
 from __future__ import annotations
 
@@ -11,28 +11,10 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
-from claw_data_filter.models.round_judgment import (
-    AssistantResponseJudgment,
-    FeedbackKind,
-    RoundJudgment,
-    UserEpisodeJudgment,
-)
+from claw_data_filter.models.round_judgment import AssistantResponseJudgment, FeedbackKind, UserEpisodeJudgment
 from claw_data_filter.models.sample import extract_messages_from_payload, extract_normalized_messages
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass(slots=True)
-class TurnContext:
-    """Legacy user-anchored turn context kept for compatibility."""
-
-    turn_index: int
-    user_message: str
-    assistant_message: str
-    tool_calls: list[dict[str, Any]]
-    tool_result: str | None
-    signal_users: list[str]
-    execution_trace: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -90,95 +72,7 @@ class ConversationEvent:
 
 
 class TurnContextBuilder:
-    """Build both legacy turn contexts and new dual-level judgment contexts."""
-
-    def extract_turns(self, messages: list[dict[str, Any]]) -> list[TurnContext]:
-        """Build legacy user-anchored turns for compatibility paths."""
-        events = self._normalize_messages(messages)
-        turns: list[TurnContext] = []
-        index = 0
-
-        while index < len(events):
-            event = events[index]
-            if event.role != "user":
-                index += 1
-                continue
-
-            assistant_parts: list[str] = []
-            tool_calls: list[dict[str, Any]] = []
-            tool_results: list[str] = []
-            execution_trace: list[str] = []
-            next_index = index + 1
-
-            while next_index < len(events):
-                next_event = events[next_index]
-                if next_event.role == "user":
-                    break
-                if next_event.role == "assistant":
-                    if next_event.text:
-                        assistant_parts.append(next_event.text)
-                        execution_trace.append(self._format_message("assistant", next_event.text))
-                    for tool_call in next_event.tool_calls:
-                        tool_calls.append(tool_call)
-                        execution_trace.append(self._format_tool_call(tool_call))
-                elif next_event.role == "tool":
-                    if next_event.text:
-                        tool_results.append(next_event.text)
-                        execution_trace.append(self._format_tool_result(next_event.text))
-                next_index += 1
-
-            if assistant_parts or tool_calls or tool_results:
-                turns.append(
-                    TurnContext(
-                        turn_index=len(turns),
-                        user_message=event.text,
-                        assistant_message="\n".join(part for part in assistant_parts if part),
-                        tool_calls=tool_calls,
-                        tool_result="\n".join(tool_results) if tool_results else None,
-                        signal_users=[],
-                        execution_trace=execution_trace,
-                    )
-                )
-            index = next_index
-
-        for current_index, turn in enumerate(turns):
-            turn.signal_users = [
-                candidate.user_message
-                for candidate in turns[current_index + 1 : current_index + 4]
-                if candidate.user_message
-            ]
-        return turns
-
-    def count_expected_turns(self, messages: list[dict[str, Any]]) -> int:
-        return len(self.extract_turns(messages))
-
-    def build_judgment_prompt(self, turn: TurnContext, all_turns: list[TurnContext]) -> str:
-        """Legacy combined prompt kept for compatibility tests and tooling."""
-        current_user = self._format_message("user", turn.user_message) if turn.user_message else "(无当前用户请求)"
-        execution_section = "\n".join(turn.execution_trace) if turn.execution_trace else "(无执行结果)"
-        signal_section = (
-            "\n".join(self._format_message("user", user) for user in turn.signal_users)
-            if turn.signal_users
-            else "(无后续真实用户消息)"
-        )
-        return f"""=== 当前用户请求 ===
-{current_user}
-
-=== 当前assistant执行链 ===
-{execution_section}
-
-=== 后续真实用户反馈（最多3轮，已跳过仅tool_result轮）===
-{signal_section}
-
-请判断：
-1. response_helpful: 这次 assistant 响应单元对用户有帮助吗？（yes/no/uncertain）
-2. user_satisfied: 当前 user episode 的后续真实用户反馈是否体现满意？（yes/no/uncertain/neutral）
-
-答案格式：response_helpful=yes; user_satisfied=no
-
-注意：
-- system reminder、plan mode 提示、tool 框架提示、工具中断提示等系统/框架文本可能混在对话里；把它们视为上下文信息，只有在确实影响任务结果时才纳入判断，不要默认当作用户真实诉求或满意度反馈
-"""
+    """Build dual-level judgment contexts from normalized conversations."""
 
     def extract_response_contexts(self, sample_uid: str, messages: list[dict[str, Any]]) -> list[AssistantResponseContext]:
         events = self._normalize_messages(messages)
@@ -492,84 +386,14 @@ class UserSatisfiedJudgmentProcessor:
         return match.group(1).lower() if match else None
 
 
-class RoundJudgmentProcessor:
-    """Legacy combined processor retained for compatibility tests."""
-
-    def __init__(self, llm_client: Any, max_retries: int = 2):
-        self.llm = llm_client
-        self.max_retries = max_retries
-        self.response_processor = ResponseHelpfulJudgmentProcessor(llm_client, max_retries=max_retries)
-        self.user_processor = UserSatisfiedJudgmentProcessor(llm_client, max_retries=max_retries)
-
-    async def judge(self, prompt: str) -> dict[str, str] | None:
-        for attempt in range(self.max_retries + 1):
-            try:
-                response = await self.llm.chat([{"role": "user", "content": prompt}], max_tokens=50)
-                parsed = self._parse_response(response)
-                if parsed is not None:
-                    return parsed
-            except Exception as exc:
-                logger.warning("Attempt %s: combined round judgment LLM call failed: %s", attempt + 1, exc)
-                if attempt < self.max_retries:
-                    await asyncio.sleep(2**attempt)
-                else:
-                    return None
-        return None
-
-    def _parse_response(self, response: str) -> dict[str, str] | None:
-        response_helpful = self.response_processor._parse_response(response)
-        user_satisfied = self.user_processor._parse_response(response)
-        if not response_helpful or not user_satisfied:
-            return None
-        return {
-            "response_helpful": response_helpful,
-            "user_satisfied": user_satisfied,
-        }
-
-
 class ToolStatsAggregator:
-    """Aggregate dual-level or legacy judgments into sample-level stats."""
+    """Aggregate dual-level judgments into sample-level stats."""
 
     @staticmethod
     def aggregate(
-        response_judgments: list[AssistantResponseJudgment] | list[RoundJudgment],
-        episode_judgments: list[UserEpisodeJudgment] | None = None,
+        response_judgments: list[AssistantResponseJudgment],
+        episode_judgments: list[UserEpisodeJudgment],
     ) -> dict[str, Any]:
-        if episode_judgments is None:
-            legacy_judgments = response_judgments  # type: ignore[assignment]
-            helpful_yes = sum(1 for row in legacy_judgments if row.response_helpful == "yes")
-            helpful_no = sum(1 for row in legacy_judgments if row.response_helpful == "no")
-            helpful_uncertain = sum(1 for row in legacy_judgments if row.response_helpful == "uncertain")
-            satisfied_yes = sum(1 for row in legacy_judgments if row.user_satisfied == "yes")
-            satisfied_no = sum(1 for row in legacy_judgments if row.user_satisfied == "no")
-            satisfied_neutral = sum(1 for row in legacy_judgments if row.user_satisfied == "neutral")
-            satisfied_uncertain = sum(1 for row in legacy_judgments if row.user_satisfied == "uncertain")
-            helpful_scored = helpful_yes + helpful_no
-            satisfied_scored = satisfied_yes + satisfied_no + satisfied_neutral
-            return {
-                "response_helpful_rate": helpful_yes / helpful_scored if helpful_scored else 0.0,
-                "response_unhelpful_rate": helpful_no / helpful_scored if helpful_scored else 0.0,
-                "user_satisfied_rate": satisfied_yes / satisfied_scored if satisfied_scored else 0.0,
-                "user_negative_feedback_rate": satisfied_no / satisfied_scored if satisfied_scored else 0.0,
-                "response_helpful_scored_turns": helpful_scored,
-                "user_feedback_scored_turns": satisfied_scored,
-                "total_turns": len(legacy_judgments),
-                "has_error": any(row.llm_error for row in legacy_judgments),
-                "response_helpful": {
-                    "yes": helpful_yes,
-                    "no": helpful_no,
-                    "uncertain": helpful_uncertain,
-                    "rate": helpful_yes / helpful_scored if helpful_scored else 0.0,
-                },
-                "user_satisfied": {
-                    "yes": satisfied_yes,
-                    "no": satisfied_no,
-                    "neutral": satisfied_neutral,
-                    "uncertain": satisfied_uncertain,
-                    "rate": satisfied_yes / satisfied_scored if satisfied_scored else 0.0,
-                },
-            }
-
         helpful_yes = sum(1 for row in response_judgments if row.response_helpful == "yes")
         helpful_no = sum(1 for row in response_judgments if row.response_helpful == "no")
         helpful_uncertain = sum(1 for row in response_judgments if row.response_helpful == "uncertain")
@@ -620,8 +444,7 @@ class RoundFeedbackProcessor:
         self.episode_processor = UserSatisfiedJudgmentProcessor(llm_client)
         self.stats_aggregator = ToolStatsAggregator()
 
-    async def process_sample(self, sample_ref: int | str, raw_json: dict[str, Any]) -> SampleJudgmentResult:
-        sample_uid = self._resolve_sample_uid(sample_ref)
+    async def process_sample(self, sample_uid: str, raw_json: dict[str, Any]) -> SampleJudgmentResult:
         messages = extract_messages_from_payload(raw_json)
         if not messages:
             tool_stats = {
@@ -686,14 +509,6 @@ class RoundFeedbackProcessor:
         results = await asyncio.gather(*(process_one(sample_uid, raw_json) for sample_uid, raw_json in sample_batch))
         success = sum(1 for item in results if item)
         return success, len(results) - success
-
-    def _resolve_sample_uid(self, sample_ref: int | str) -> str:
-        if isinstance(sample_ref, str):
-            return sample_ref
-        record = self.store.get_sample_by_id(sample_ref)
-        if not record or not record.get("sample_uid"):
-            raise ValueError(f"Unknown sample reference: {sample_ref}")
-        return record["sample_uid"]
 
     def _build_launch_plan(
         self,

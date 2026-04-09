@@ -67,8 +67,8 @@ def render(route: RouteState):
             preview_rows, total = get_samples_preview_page(store, current_page, page_size)
         st.markdown(f"**数据预览 ({total} 条中的第 {(current_page - 1) * page_size + 1} - {min(current_page * page_size, total)} 条)**")
 
-        def on_detail(sample_id: int) -> None:
-            go_to_detail(st.query_params, sample_id, route.active_main_page)
+        def on_detail(sample_uid: str) -> None:
+            go_to_detail(st.query_params, sample_uid, route.active_main_page)
             st.rerun()
 
         render_samples_table(preview_rows, page=1, total_pages=total_pages, on_detail_click=on_detail, show_pagination=False)

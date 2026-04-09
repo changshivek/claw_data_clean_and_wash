@@ -15,17 +15,168 @@
 - 已完成: Web 详情页已切换为 user_satisfied episodes / response_helpful steps 双视图，detail_builder 与 sample_detail_view 不再把单个 turn 作为主展示结构。
 - 已完成: sample_query_service 已支持 assistant_response_judgments / user_episode_judgments 明细预览，旧 turn_judgments 表预览入口已移除，Web 测试已替换为直接验证双层语义的测试。
 - 已完成: report_exporter 已补齐双层统计摘要与语义说明；CLI stats、overview、filter、sample table 文案已明确区分 assistant steps 与 user episodes。
-- 当前回归结果: 全量 pytest 已通过，130 passed。
-- 下一步: 继续收缩 sample_id 在 Web 路由与外显字段中的残留依赖，并评估是否继续下线 RoundJudgment / RoundJudgmentProcessor 兼容入口。
+- 已完成: session merge 决策/写回、Web drill-down、DuckDBStore 写接口、导出 metadata 与测试主断言已统一切到 sample_uid-first / session_merge_representative_uid。
+- 已完成: `RoundJudgment`、`RoundJudgmentProcessor`、`extract_turns`、`build_judgment_prompt` 与对应 legacy 测试已删除，当前只保留 response-step / user-episode 双层语义。
+- 已完成: README 与 implementation 文档已同步到 sample_uid-first 和 openai_round_feedback_v2 口径，不再把 turn_judgments / sample_id drill-down 当作当前实现。
+- 当前回归结果: 全量 pytest 已通过，116 passed。
+- 下一步: 提交本轮 sample_uid-first 一次性收口改动；后续若继续推进，仅需要按独立主题做增量优化。
+
+## 本次执行策略（单次收口）
+
+本轮不再按多个 phase 分批落地，而是按一次性收口执行：
+
+- 直接把 session merge、Web drill-down、存储写接口、导出 metadata 和测试主断言统一切到新键/新表体系。
+- 只保留 `samples.id` 作为本地展示与排序辅助列，不再让任何业务流、跨表关系或 URL 路由依赖它。
+- 在确认新键链路完整可运行后，立刻删除 `RoundJudgment`、`RoundJudgmentProcessor`、legacy turn helper 和对应旧测试，避免继续维护两套语义。
+- 实施完成后，以“代码中不存在过时主键路径、测试不再验证过时语义、文档口径一致”为验收标准。
+
+### 本次收口清单
+
+- [x] session merge 决策与写回切到 `sample_uid` / `session_merge_representative_uid`
+- [x] samples 读取模型与详情视图切到 `representative_uid` 主展示
+- [x] Web 路由、列表详情跳转和 query params 切到 `sample_uid`
+- [x] DuckDBStore 写接口改成 `sample_uid` 单一入口
+- [x] 导出 metadata 明确为 `sample_uid-first`，`sample_id` 仅保留辅助定位信息或下线
+- [x] 删除 `RoundJudgment`、`RoundJudgmentProcessor`、`extract_turns`、`build_judgment_prompt`、legacy 聚合分支
+- [x] 重写或删除对应旧测试，只保留双层 response/episode 语义测试
+- [x] 跑全量 pytest，确认结构清理后无残留回归
 
 ## 本轮推进结果
 
+- 已把 session merge 全链路切到 `sample_uid` / `session_merge_representative_uid`，写回不再依赖整数样本主键。
+- 已把 Web router、query params、列表 drill-down 和 detail 拉取统一切到 `sample_uid`，`samples.id` 仅保留为本地展示字段。
+- 已把 DuckDBStore 的 round feedback 写接口统一为 `sample_uid` 单入口，测试里不再验证 `int | str` 兼容调用。
+- 已把 `tests/test_round_feedback.py`、`tests/test_session_merge.py`、`tests/test_web_router.py` 等过时测试重写为双层语义版本，并同步更新 store/exporter/detail builder 断言。
+- 已把 README 中关于评分边界、存储结构、导出 schema、Web detail drill-down 和主键职责的说明同步到当前实现状态。
+- 已完成全量回归，当前测试基线为 `116 passed`。
 - 已把 Web detail 主视图从单层 turn 渲染切换为双层结构：先看 episode satisfaction，再看 response-step helpfulness。
 - 已补充 response_context / episode_context 直接测试，避免继续只靠兼容 turn 测试间接覆盖核心语义。
 - 已替换 Web detail/query 里对旧 turn 语义的过时断言，使测试直接反馈当前实现而不是历史兼容层。
 - 已把 report_exporter 从平铺旧 rate 字段升级为带 judgment_totals 和 semantics 的双层统计报告。
 - 已把 CLI stats、overview、filter、sample table 文案改为显式说明 response steps / user episodes 语义，减少“turn”口径误导。
 - 已移除 DuckDB 存储层的 turn_judgments 兼容写回、回填和查询接口，并将存储/导出/round feedback 相关测试改为直接验证双 judgment 表。
+
+## 主键/表切换历史影响范围与综合方案
+
+以下内容保留为本轮收口前的分析记录。对应影响项现已全部完成，不再代表当前代码状态。
+
+### 目标口径
+
+- `sample_uid` 作为业务主键、跨表关联键、Web drill-down 键和对外稳定标识。
+- `samples.id` 保留为本地自增辅助列，仅用于导入顺序、人工排查和 UI 展示，不再承担跨模块语义。
+- `assistant_response_judgments` / `user_episode_judgments` 继续以 `sample_uid` 为唯一关联键，不再回退到任何 `sample_id` 兼容路径。
+- session merge 从“以整数样本 id 标记代表样本”切换为“以 sample_uid 标记代表样本”，避免主键迁移只完成一半。
+
+### 当前尚未适配的影响范围
+
+1. session merge 仍以 `sample_id` 为决策主键。
+	- `claw_data_filter/session_merge.py` 中 `SessionMergeCandidate`、`SessionMergeDecision`、排序、去重和写回全部围绕整数 `sample_id` 组织。
+	- `samples.session_merge_representative_id` 仍是 `INTEGER`，代表样本关系没有切到 `sample_uid`。
+
+2. Web 路由和详情页仍以 `sample_id` 作为 drill-down 键。
+	- `claw_data_filter/web/state/models.py` 的 `RouteState` 仍持有 `sample_id`。
+	- `claw_data_filter/web/state/router.py` 仍通过 query param `sample_id` 导航详情页。
+	- `claw_data_filter/web/views/sample_detail.py` 仍以 `get_sample_by_id()` 取样本，并把 `sample_id` / `representative_id` 作为主要展示字段。
+	- `claw_data_filter/web/components/sample_table.py`、`web/views/filter.py`、`web/views/tables.py` 的详情回调签名仍是 `sample_id: int`。
+
+3. 存储层仍保留 `id` 优先或 `int | str` 混合接口。
+	- `DuckDBStore.replace_round_feedback_results()`、`update_sample_tool_stats()`、`mark_sample_processing_failed()` 等接口仍接受 `int | str`，继续允许调用方依赖旧路径。
+	- `get_sample_by_id()` 仍被 Web、测试和部分流程广泛使用；`get_sample_by_uid()` 虽已存在，但尚未成为默认入口。
+
+4. 兼容模型和兼容聚合分支仍存在。
+	- `claw_data_filter/models/round_judgment.py` 里的 `RoundJudgment` 仍保留 `sample_id` 字段。
+	- `claw_data_filter/processors/round_feedback.py` 里的 `RoundJudgmentProcessor` 和 `ToolStatsAggregator.aggregate(..., episode_judgments=None)` 仍是单层兼容入口。
+
+5. 导出与外部元数据仍双写 `sample_id` / `sample_uid`。
+	- `claw_data_filter/exporters/unified_exporter.py` 的 metadata 同时输出 `sample_id` 与 `sample_uid`。
+	- 这本身不是错误，但意味着对外 contract 还没有完成“sample_uid-first”收口。
+
+6. 测试仍有一批以 `sample_id` 为中心的断言。
+	- `tests/test_session_merge.py` 仍以 `sample_id` / `representative_id` 作为核心预期。
+	- `tests/test_web_router.py`、`tests/test_web_detail_builder.py`、`tests/test_round_feedback.py` 等仍保留不少 `sample_id` drill-down 断言。
+
+### 关联判断
+
+- 本轮已完成的双 judgment 表切换，与 session merge 没有直接表级耦合；session merge 不读 judgment 表。
+- 但两者共享 `samples` 表上的主键口径、`session_merge_*` 标记以及 Web 详情入口，因此后续主键迁移不能只做 round feedback，不动 session merge。
+- 结论：session merge 不是这轮表切换的 blocker，但它是下一轮 `sample_uid-first` 收口时必须一并处理的核心影响面。
+
+### 推荐切换方案
+
+#### Phase A: 先补齐 schema 和双写能力
+
+- 在 `samples` 表新增 `session_merge_representative_uid TEXT`。
+- 启动时为历史数据做一次 backfill：通过 `session_merge_representative_id -> samples.id -> samples.sample_uid` 映射填充新列。
+- 在过渡期保留 `session_merge_representative_id INTEGER`，但新逻辑优先读写 `session_merge_representative_uid`。
+
+验收标准：
+
+- 旧库启动后可自动补齐 `session_merge_representative_uid`。
+- 新写入不再依赖 `session_merge_representative_id` 才能读回代表样本。
+
+#### Phase B: 重构 session merge 到 sample_uid-first
+
+- 将 `SessionMergeCandidate` / `SessionMergeDecision` 的主标识从 `sample_id` 切换到 `sample_uid`。
+- 数据扫描可继续带出 `id` 作为排序 tie-breaker，但不再作为业务 identity。
+- 写回 `samples` 时改为 `WHERE sample_uid = ?`，代表样本改写到 `session_merge_representative_uid`。
+- 若仍需 UI 展示代表样本整数 id，则在读取层通过 `representative_uid -> id` 映射按需补出，而不是把 `id` 存成关系键。
+
+验收标准：
+
+- session merge 的 dry-run 与正式写回在语义上保持一致。
+- 同一批数据在迁移前后，keep/merged/skipped 结果不变。
+- `session_merge_representative_uid` 成为唯一可信的代表样本关联字段。
+
+#### Phase C: Web 路由与详情页切到 sample_uid
+
+- `RouteState` 新增或替换为 `sample_uid` 字段，query param 从 `sample_id` 切到 `sample_uid`。
+- filter/tables/sample_table 的详情回调统一改为 `on_detail(sample_uid: str)`。
+- sample detail 页面改为 `store.get_sample_by_uid()` 取数，并将 `sample_uid` 作为主显示键；`sample_id` 降级为辅助展示。
+- 详情页里的 session merge 展示改为优先显示 `representative_uid`，如需人工排查再附带代表样本 id。
+
+验收标准：
+
+- 从列表页进入详情页时不再依赖整数 id。
+- 手工修改 URL 时，`sample_uid` 可以稳定定位同一条样本。
+- Web 页面上 `sample_id` 不再承担任何导航或关联职责。
+
+#### Phase D: 收缩存储接口与兼容模型
+
+- 将 `DuckDBStore` 的对外写接口逐步收敛到 `sample_uid`，去掉 `int | str` 双态入口。
+- 评估 `insert_sample()` 是否继续返回 `id`，还是增加 `insert_sample_and_get_uid()` / 返回完整 sample record；推荐先保留返回 `id` 以减少导入链路波动，但新流程不再依赖它进行后续关联。
+- 删除 `RoundJudgment`、`RoundJudgmentProcessor` 和 `ToolStatsAggregator` 的 legacy 分支，彻底去掉单层模型的残留语义。
+
+验收标准：
+
+- 新代码路径中不再需要 `get_sample_by_id()` 才能完成业务流程。
+- round feedback 处理链、Web、导出都不再依赖单层兼容模型。
+
+#### Phase E: 导出 contract 与测试收口
+
+- 明确 `sample_id` 在导出 metadata 中的定位：
+  - 若只是排障辅助，则保留但标注 deprecated。
+  - 若希望完全对外稳定，则在下一版 schema 中仅保留 `sample_uid`。
+- 更新 `tests/test_session_merge.py`、`tests/test_web_router.py`、`tests/test_web_detail_builder.py` 等，把核心断言切到 `sample_uid` / `representative_uid`。
+- README 和 implementation 文档同步说明：`id` 是本地辅助列，不是业务主键。
+
+验收标准：
+
+- 测试主断言不再把 `sample_id` 当成跨模块唯一键。
+- 文档、Web、导出、存储对主键口径的描述一致。
+
+### 推荐执行顺序
+
+1. 先做 Phase A，为 session merge 迁移准备无损过渡列。
+2. 然后做 Phase B，把 session merge 的真实关联键切换到 `sample_uid`。
+3. 再做 Phase C，清掉 Web drill-down 对 `sample_id` 的依赖。
+4. 最后做 Phase D 和 Phase E，收缩兼容接口、导出 contract 与测试。
+
+### 关键风险与约束
+
+- `samples.id` 目前仍承担稳定排序和人工排障作用，不建议在这轮迁移中删除，只应降级为非业务键。
+- session merge 一旦改写代表样本字段，需要保证历史库自动 backfill，否则旧数据会出现详情页无法跳转或代表样本断链。
+- Web 路由切换若不兼顾旧链接，历史书签和人工分享链接会失效；可考虑在过渡期同时兼容 `sample_id` 和 `sample_uid` 读取，但写回统一输出 `sample_uid`。
+- `RoundJudgment` 兼容模型的清退要等相关测试和任何潜在外部脚本都切到双层语义后再做，避免一次性破坏排障工具。
 
 ## 实施原则
 

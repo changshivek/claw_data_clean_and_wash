@@ -19,7 +19,7 @@ class RouteState:
     """Canonical route state derived from query params."""
 
     page: str = DEFAULT_PAGE
-    sample_id: int | None = None
+    sample_uid: str | None = None
     return_to: str | None = None
 
     @property

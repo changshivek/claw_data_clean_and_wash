@@ -68,9 +68,10 @@ def test_raw_jsonl_export_with_filter():
         raw = {"messages": [{"role": "user", "content": f"Test {i}"}]}
         sample = Sample.from_dict(raw)
         sample_id = store.insert_sample(sample)
+        sample_uid = store.get_sample_by_id(sample_id)["sample_uid"]
         # Different response_helpful_rate for each
         tool_stats = {"response_helpful_rate": 0.5 + i * 0.2, "user_satisfied_rate": 0.8, "total_turns": 1, "has_error": False}
-        store.update_sample_tool_stats(sample_id, tool_stats)
+        store.update_sample_tool_stats(sample_uid, tool_stats)
 
     # Export with filter
     exporter = UnifiedExporter(store)
@@ -370,7 +371,7 @@ def test_report_generation():
         "user_feedback_scored_episodes": 2,
         "has_error": False,
     }
-    store.update_sample_tool_stats(sample_id, tool_stats)
+    store.update_sample_tool_stats(store.get_sample_by_id(sample_id)["sample_uid"], tool_stats)
 
     # Generate report
     exporter = ReportExporter(store)
@@ -484,13 +485,14 @@ def test_unified_export_preview_supports_estimation():
         raw = {"messages": [{"role": "user", "content": f"Test {i}"}]}
         sample = Sample.from_dict(raw)
         sample_id = store.insert_sample(sample)
+        sample_uid = store.get_sample_by_id(sample_id)["sample_uid"]
         tool_stats = {
             "response_helpful_rate": 0.6 + i * 0.3,
             "user_satisfied_rate": 0.8,
             "total_turns": 1,
             "has_error": False,
         }
-        store.update_sample_tool_stats(sample_id, tool_stats)
+        store.update_sample_tool_stats(sample_uid, tool_stats)
 
     exporter = UnifiedExporter(store)
     preview = exporter.preview(ExportFilterSpec(helpful_op=">=", helpful_val=0.8))
