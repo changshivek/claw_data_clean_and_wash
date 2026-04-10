@@ -13,8 +13,8 @@ def _state_key(name: str) -> str:
 
 @dataclass(slots=True)
 class FilterCriteria:
-    helpful_op: str = ">="
-    helpful_val: float | None = 0.7
+    progress_op: str = ">="
+    progress_val: float | None = 0.7
     satisfied_op: str = ">="
     satisfied_val: float | None = 0.5
     negative_feedback_op: str = ">="
@@ -29,8 +29,8 @@ class FilterCriteria:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "helpful_op": self.helpful_op,
-            "helpful_val": self.helpful_val,
+            "progress_op": self.progress_op,
+            "progress_val": self.progress_val,
             "satisfied_op": self.satisfied_op,
             "satisfied_val": self.satisfied_val,
             "negative_feedback_op": self.negative_feedback_op,
@@ -49,8 +49,8 @@ class FilterCriteria:
         if not data:
             return cls()
         return cls(
-            helpful_op=str(data.get("helpful_op", ">=")),
-            helpful_val=data.get("helpful_val", 0.7),
+            progress_op=str(data.get("progress_op", ">=")),
+            progress_val=data.get("progress_val", 0.7),
             satisfied_op=str(data.get("satisfied_op", ">=")),
             satisfied_val=data.get("satisfied_val", 0.5),
             negative_feedback_op=str(data.get("negative_feedback_op", ">=")),

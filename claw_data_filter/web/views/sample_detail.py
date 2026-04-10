@@ -66,15 +66,16 @@ def render(route: RouteState):
         store.get_user_episode_judgments(sample["sample_uid"]),
     )
 
-    col1, col2, col3, col4, col5, col6 = st.columns(6)
+    col1, col2, col3, col4, col5, col6, col7 = st.columns(7)
     col1.markdown(f"**sample_uid:** {detail.sample_uid}")
     col2.markdown(f"**episodes:** {detail.expected_episode_judgment_count}")
     col3.markdown(f"**response_steps:** {detail.expected_response_judgment_count}")
     col4.markdown(f"**stored_expected_judgments:** {detail.expected_judgment_count}")
-    col5.markdown(f"**helpful_rate:** {detail.helpful_rate:.2f}")
+    col5.markdown(f"**progress_rate:** {detail.progress_rate:.2f}")
     col6.markdown(f"**satisfied_rate:** {detail.satisfied_rate:.2f}")
-    col7, _ = st.columns([1, 5])
-    col7.markdown(f"**num_tool_calls:** {detail.num_tool_calls}")
+    col7.markdown(f"**regress_rate:** {detail.regress_rate:.2f}")
+    col8, _ = st.columns([1, 5])
+    col8.markdown(f"**num_tool_calls:** {detail.num_tool_calls}")
 
     st.caption(f"local sample_id: {detail.sample_id}")
     st.caption(f"processing_status: {detail.processing_status}")
@@ -141,15 +142,15 @@ def render(route: RouteState):
                 st.error("LLM Error")
 
     st.divider()
-    st.markdown("### Response Helpful Steps")
+    st.markdown("### Response Progress Steps")
 
     if not detail.response_steps:
-        st.info("当前没有 response_helpful step judgment。")
+        st.info("当前没有 response_progress step judgment。")
     for step in detail.response_steps:
-        helpful = step.response_helpful or "-"
+        progress = step.response_progress or "-"
         title = (
             f"Response {step.response_index} | episode={step.episode_index} | "
-            f"feedback={step.feedback_kind} | helpful: :{_response_color(helpful)}[{helpful}]"
+            f"feedback={step.feedback_kind} | progress: :{_response_color(progress)}[{progress}]"
         )
         with st.expander(title):
             _render_expandable_text("当前 User", step.user_message, 220, f"response_{step.response_index}_user")

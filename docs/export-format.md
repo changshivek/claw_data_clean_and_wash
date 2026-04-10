@@ -45,7 +45,7 @@ claw-filter filter \
 
 常用筛选参数：
 
-- `--response-helpful-rate`
+- `--response-progress-rate`
 - `--user-satisfied-rate`
 - `--user-negative-feedback-rate`
 - `--empty-response`
@@ -107,8 +107,8 @@ claw-filter filter \
 | `expected_response_judgment_count` | `integer` | 预期 assistant response judgment 数 |
 | `expected_episode_judgment_count` | `integer` | 预期 user episode judgment 数 |
 | `num_tool_calls` | `integer` | 样本中的工具调用数量 |
-| `response_helpful_rate` | `number \| null` | assistant response 级 helpful 比例 |
-| `response_unhelpful_rate` | `number \| null` | assistant response 级 unhelpful 比例 |
+| `response_progress_rate` | `number \| null` | assistant response 级 progress 比例 |
+| `response_regress_rate` | `number \| null` | assistant response 级 regress 比例 |
 | `user_satisfied_rate` | `number \| null` | user episode 级 satisfied 比例 |
 | `user_negative_feedback_rate` | `number \| null` | user episode 级负反馈比例 |
 | `has_error` | `boolean` | 样本是否被记录为有错误 |
@@ -158,10 +158,10 @@ claw-filter filter \
 
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |
-| `response_helpful_steps` | `array<object>` | assistant response 单元级 judgment |
+| `response_progress_steps` | `array<object>` | assistant response 单元级 judgment |
 | `user_satisfied_episodes` | `array<object>` | user episode 级 judgment |
 
-## response_helpful_steps
+## response_progress_steps
 
 每个元素对应一个 assistant response 单元。
 
@@ -175,8 +175,8 @@ claw-filter filter \
 | `feedback_kind` | `string` | 反馈块类型 |
 | `feedback_message_start_index` | `integer \| null` | 反馈块起始消息索引 |
 | `feedback_message_end_index` | `integer \| null` | 反馈块结束消息索引 |
-| `feedback_payload` | `array` | 用于判断 helpful 的反馈内容 |
-| `response_helpful` | `string \| null` | judgment 结果；通常为 `yes`、`no`、`uncertain`，未产出时为 `null` |
+| `feedback_payload` | `array` | 用于判断 progress 的反馈内容 |
+| `response_progress` | `string \| null` | judgment 结果；通常为 `yes`、`no`、`uncertain`，未产出时为 `null` |
 | `llm_error` | `boolean` | 本条 judgment 是否由 LLM 调用错误导致失败 |
 
 ## user_satisfied_episodes
@@ -215,8 +215,8 @@ claw-filter filter \
     "expected_response_judgment_count": 13,
     "expected_episode_judgment_count": 4,
     "num_tool_calls": 11,
-    "response_helpful_rate": 0.23076923076923078,
-    "response_unhelpful_rate": 0.7692307692307693,
+    "response_progress_rate": 0.23076923076923078,
+    "response_regress_rate": 0.7692307692307693,
     "user_satisfied_rate": 0.0,
     "user_negative_feedback_rate": 1.0,
     "has_error": false
@@ -241,7 +241,7 @@ claw-filter filter \
     ]
   },
   "round_feedback": {
-    "response_helpful_steps": [
+    "response_progress_steps": [
       {
         "response_index": 0,
         "episode_index": 0,
@@ -250,7 +250,7 @@ claw-filter filter \
         "feedback_message_start_index": 3,
         "feedback_message_end_index": 5,
         "feedback_payload": ["..."],
-        "response_helpful": "no",
+        "response_progress": "no",
         "llm_error": false
       }
     ],
@@ -284,5 +284,5 @@ claw-filter filter \
   - `metadata.session_merge_keep`
   - `metadata.has_error`
 - 若下游需要分层评估，请分别消费：
-  - `round_feedback.response_helpful_steps`
+  - `round_feedback.response_progress_steps`
   - `round_feedback.user_satisfied_episodes`

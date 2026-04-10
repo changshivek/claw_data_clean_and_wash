@@ -30,6 +30,49 @@ ANTHROPIC_TOOL_CHAIN_MESSAGES = [
     {"role": "assistant", "content": "我继续帮你看。"},
 ]
 
+PROGRESS_CHAIN_MESSAGES = [
+    {"role": "user", "content": "帮我生成日报并写到文件"},
+    {
+        "role": "assistant",
+        "content": "我先读取原始数据。",
+        "tool_calls": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "arguments": '{"path":"/tmp/source.txt"}',
+                },
+            }
+        ],
+    },
+    {"role": "tool", "content": "read success: line1\nline2\nline3"},
+    {
+        "role": "assistant",
+        "content": "我现在把日报写入文件。",
+        "tool_calls": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "write_file",
+                    "arguments": json.dumps(
+                        {
+                            "path": "/tmp/report.md",
+                            "content": "# Report\n" + "A" * 600,
+                            "mode": "overwrite",
+                            "encoding": "utf-8",
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
+            }
+        ],
+    },
+    {"role": "tool", "content": "File written successfully to /tmp/report.md"},
+    {"role": "assistant", "content": "日报已经生成好了。"},
+    {"role": "user", "content": "继续发给我摘要"},
+    {"role": "assistant", "content": "这是新的请求响应。"},
+]
+
 
 def test_extract_response_contexts_split_assistant_steps_by_feedback_block():
     from claw_data_filter.processors.round_feedback import TurnContextBuilder
@@ -57,18 +100,53 @@ def test_extract_episode_contexts_keep_user_episode_boundary():
     assert contexts[1].assistant_messages == ["You're welcome!"]
 
 
-def test_build_response_helpful_prompt_uses_only_adjacent_feedback_block():
+def test_build_response_progress_prompt_uses_only_adjacent_feedback_block():
     from claw_data_filter.processors.round_feedback import TurnContextBuilder
 
     builder = TurnContextBuilder()
     context = builder.extract_response_contexts("sample-1", SAMPLE_MESSAGES)[0]
-    prompt = builder.build_response_helpful_prompt(context)
+    prompt = builder.build_response_progress_prompt(context)
 
     assert "当前 assistant 响应单元" in prompt
     assert "紧邻反馈块类型" in prompt
     assert "web_search({})" in prompt
     assert '{"result": "sunny, 25C"}' in prompt
-    assert "只输出一行：response_helpful=yes|no|uncertain" in prompt
+    assert "是否让当前问题状态发生正向推进" in prompt
+    assert "只输出一行：response_progress=yes|no|uncertain" in prompt
+
+
+def test_extract_response_contexts_include_recent_execution_background_and_reset_by_episode():
+    from claw_data_filter.processors.round_feedback import TurnContextBuilder
+
+    contexts = TurnContextBuilder().extract_response_contexts("sample-3", PROGRESS_CHAIN_MESSAGES)
+
+    assert len(contexts) == 4
+    assert contexts[0].prior_execution_background == []
+    assert len(contexts[1].prior_execution_background) == 1
+    assert contexts[1].prior_execution_background[0].tool_use_summary == "read_file(path=/tmp/source.txt)"
+    assert contexts[1].prior_execution_background[0].tool_result_status_hint == "success"
+    assert contexts[2].prior_execution_background[-1].tool_use_summary.startswith(
+        "write_file(path=/tmp/report.md, content=<text:"
+    )
+    assert 'A' * 80 not in contexts[2].prior_execution_background[-1].tool_use_summary
+    assert contexts[2].prior_execution_background[-1].tool_result_status_hint == "success"
+    assert contexts[3].prior_execution_background == []
+
+
+def test_build_response_progress_prompt_includes_progress_background_summary():
+    from claw_data_filter.processors.round_feedback import TurnContextBuilder
+
+    builder = TurnContextBuilder()
+    context = builder.extract_response_contexts("sample-3", PROGRESS_CHAIN_MESSAGES)[2]
+    prompt = builder.build_response_progress_prompt(context)
+
+    assert "当前单元之前的执行背景（仅供理解当前阶段）" in prompt
+    assert "Step -2:" in prompt
+    assert "Step -1:" in prompt
+    assert "tool_result_status_hint: success" in prompt
+    assert "write_file(path=/tmp/report.md, content=<text:" in prompt
+    assert 'A' * 80 not in prompt
+    assert "不要把前序步骤的功劳或失败直接转嫁到当前 step" in prompt
 
 
 def test_build_user_satisfied_prompt_uses_episode_and_later_user_signals():
@@ -114,14 +192,16 @@ def test_extract_episode_contexts_skip_tool_result_only_user_blocks():
     assert contexts[0].signal_from_users == ["那 a.txt 里是什么？"]
 
 
-def test_response_helpful_parser_accepts_expected_values():
+def test_response_progress_parser_accepts_expected_values():
     from claw_data_filter.llm.async_client import AsyncLLMClient
-    from claw_data_filter.processors.round_feedback import ResponseHelpfulJudgmentProcessor
+    from claw_data_filter.processors.round_feedback import ResponseProgressJudgmentProcessor
 
-    processor = ResponseHelpfulJudgmentProcessor(AsyncMock(spec=AsyncLLMClient))
+    processor = ResponseProgressJudgmentProcessor(AsyncMock(spec=AsyncLLMClient))
 
-    assert processor._parse_response("response_helpful=yes") == "yes"
-    assert processor._parse_response("response_helpful=uncertain") == "uncertain"
+    assert processor._parse_response("response_progress=yes") == "yes"
+    assert processor._parse_response("response_progress=uncertain") == "uncertain"
+    assert processor._parse_response("<think>\n\n</think>\n\nno") == "no"
+    assert processor._parse_response("`yes`") == "yes"
     assert processor._parse_response("invalid") is None
 
 
@@ -133,6 +213,8 @@ def test_user_satisfied_parser_accepts_expected_values():
 
     assert processor._parse_response("user_satisfied=yes") == "yes"
     assert processor._parse_response("user_satisfied=neutral") == "neutral"
+    assert processor._parse_response("<think>\n\n</think>\n\nuncertain") == "uncertain"
+    assert processor._parse_response("'no'") == "no"
     assert processor._parse_response("invalid") is None
 
 
@@ -141,9 +223,9 @@ def test_tool_stats_aggregator_uses_dual_denominators():
     from claw_data_filter.processors.round_feedback import ToolStatsAggregator
 
     response_judgments = [
-        AssistantResponseJudgment(sample_uid="s", response_index=0, episode_index=0, assistant_message_index=1, feedback_kind=FeedbackKind.NONE, response_helpful="yes", llm_error=False),
-        AssistantResponseJudgment(sample_uid="s", response_index=1, episode_index=0, assistant_message_index=2, feedback_kind=FeedbackKind.NONE, response_helpful="uncertain", llm_error=False),
-        AssistantResponseJudgment(sample_uid="s", response_index=2, episode_index=1, assistant_message_index=4, feedback_kind=FeedbackKind.NONE, response_helpful="no", llm_error=False),
+        AssistantResponseJudgment(sample_uid="s", response_index=0, episode_index=0, assistant_message_index=1, feedback_kind=FeedbackKind.NONE, response_progress="yes", llm_error=False),
+        AssistantResponseJudgment(sample_uid="s", response_index=1, episode_index=0, assistant_message_index=2, feedback_kind=FeedbackKind.NONE, response_progress="uncertain", llm_error=False),
+        AssistantResponseJudgment(sample_uid="s", response_index=2, episode_index=1, assistant_message_index=4, feedback_kind=FeedbackKind.NONE, response_progress="no", llm_error=False),
     ]
     episode_judgments = [
         UserEpisodeJudgment(sample_uid="s", episode_index=0, start_user_message_index=0, end_before_user_message_index=2, signal_from_users=["继续"], user_satisfied="yes", llm_error=False),
@@ -153,11 +235,11 @@ def test_tool_stats_aggregator_uses_dual_denominators():
 
     stats = ToolStatsAggregator.aggregate(response_judgments, episode_judgments)
 
-    assert stats["response_helpful_rate"] == 0.5
-    assert stats["response_unhelpful_rate"] == 0.5
+    assert stats["response_progress_rate"] == 0.5
+    assert stats["response_regress_rate"] == 0.5
     assert stats["user_satisfied_rate"] == 1 / 3
     assert stats["user_negative_feedback_rate"] == 1 / 3
-    assert stats["response_helpful_scored_steps"] == 2
+    assert stats["response_progress_scored_steps"] == 2
     assert stats["user_feedback_scored_episodes"] == 3
 
 
@@ -169,8 +251,8 @@ async def test_process_sample_marks_unirouter_sample_complete(tmp_path):
 
     class MockLLM:
         async def chat(self, messages, max_tokens=50):
-            if "response_helpful" in messages[0]["content"]:
-                return "response_helpful=yes"
+            if "response_progress" in messages[0]["content"]:
+                return "response_progress=yes"
             return "user_satisfied=yes"
 
     store = DuckDBStore(tmp_path / "round_feedback.duckdb")
@@ -202,5 +284,5 @@ async def test_process_sample_marks_unirouter_sample_complete(tmp_path):
         [sample_uid],
     ).fetchone()
     assert row[0] == 3
-    assert json.loads(row[1])["response_helpful_rate"] == 1.0
+    assert json.loads(row[1])["response_progress_rate"] == 1.0
     store.close()

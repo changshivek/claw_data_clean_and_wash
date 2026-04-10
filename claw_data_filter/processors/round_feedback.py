@@ -31,8 +31,21 @@ class AssistantResponseContext:
     feedback_kind: FeedbackKind
     feedback_message_start_index: int | None
     feedback_message_end_index: int | None
+    assistant_reasoning: str = ""
     feedback_payload: list[str] = field(default_factory=list)
     execution_trace: list[str] = field(default_factory=list)
+    prior_execution_background: list["ExecutionBackgroundStep"] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class ExecutionBackgroundStep:
+    """Compressed summary for a prior assistant response step."""
+
+    assistant_text_excerpt: str = ""
+    assistant_reason_excerpt: str = ""
+    tool_use_summary: str = ""
+    tool_result_status_hint: str = "unknown"
+    tool_result_excerpt_100: str = ""
 
 
 @dataclass(slots=True)
@@ -68,11 +81,62 @@ class ConversationEvent:
     role: str
     message_index: int
     text: str = ""
+    reasoning: str = ""
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
 
 
 class TurnContextBuilder:
     """Build dual-level judgment contexts from normalized conversations."""
+
+    MAX_PRIOR_RESPONSE_STEPS = 3
+    TEXT_EXCERPT_MAX_LEN = 160
+    REASON_EXCERPT_MAX_LEN = 160
+    TOOL_RESULT_EXCERPT_MAX_LEN = 100
+    TOOL_ARG_TEXT_PREVIEW_LEN = 40
+    TOOL_ARG_STRING_LIMIT = 120
+    TOOL_USE_SUMMARY_LIMIT = 240
+    HIGH_VALUE_TOOL_ARG_KEYS = (
+        "path",
+        "file_path",
+        "target_path",
+        "url",
+        "urls",
+        "query",
+        "content",
+        "text",
+        "messages",
+        "payload",
+        "data",
+        "input",
+        "patch",
+        "cmd",
+        "command",
+        "operation",
+        "mode",
+        "site",
+        "pattern",
+    )
+    ERROR_PATTERNS = (
+        r"\btraceback\b",
+        r"\bexception\b",
+        r"\berror\b",
+        r"\bfailed\b",
+        r"\bnot found\b",
+        r"\bpermission denied\b",
+        r"\btimeout\b",
+        r"\bhttp\s+[45]\d\d\b",
+        r"\bstatus\s*[:=]\s*[45]\d\d\b",
+        r"\binvalid\b",
+    )
+    SUCCESS_PATTERNS = (
+        r"\bsuccess(?:ful|fully)?\b",
+        r"\bcompleted\b",
+        r"\bfile written successfully\b",
+        r"\bsaved successfully\b",
+        r'"success"\s*:\s*true',
+        r'"ok"\s*:\s*true',
+        r"\bexit code\s*[:=]?\s*0\b",
+    )
 
     def extract_response_contexts(self, sample_uid: str, messages: list[dict[str, Any]]) -> list[AssistantResponseContext]:
         events = self._normalize_messages(messages)
@@ -81,6 +145,7 @@ class TurnContextBuilder:
         active_user_text = ""
         active_user_index: int | None = None
         event_index = 0
+        prior_steps: deque[ExecutionBackgroundStep] = deque(maxlen=self.MAX_PRIOR_RESPONSE_STEPS)
 
         while event_index < len(events):
             event = events[event_index]
@@ -88,6 +153,7 @@ class TurnContextBuilder:
                 active_user_text = event.text
                 active_user_index = event.message_index
                 episode_index += 1
+                prior_steps.clear()
                 event_index += 1
                 continue
 
@@ -98,6 +164,8 @@ class TurnContextBuilder:
             execution_trace: list[str] = []
             if event.text:
                 execution_trace.append(self._format_message("assistant", event.text))
+            if event.reasoning:
+                execution_trace.append(self._format_reasoning(event.reasoning))
             for tool_call in event.tool_calls:
                 execution_trace.append(self._format_tool_call(tool_call))
 
@@ -132,22 +200,24 @@ class TurnContextBuilder:
                     break
                 scan_index += 1
 
-            contexts.append(
-                AssistantResponseContext(
-                    sample_uid=sample_uid,
-                    response_index=len(contexts),
-                    episode_index=max(episode_index, 0),
-                    assistant_message_index=event.message_index,
-                    user_message=active_user_text,
-                    assistant_message=event.text,
-                    tool_calls=event.tool_calls,
-                    feedback_kind=feedback_kind,
-                    feedback_message_start_index=feedback_start,
-                    feedback_message_end_index=feedback_end,
-                    feedback_payload=feedback_payload,
-                    execution_trace=execution_trace,
-                )
+            context = AssistantResponseContext(
+                sample_uid=sample_uid,
+                response_index=len(contexts),
+                episode_index=max(episode_index, 0),
+                assistant_message_index=event.message_index,
+                user_message=active_user_text,
+                assistant_message=event.text,
+                assistant_reasoning=event.reasoning,
+                tool_calls=event.tool_calls,
+                feedback_kind=feedback_kind,
+                feedback_message_start_index=feedback_start,
+                feedback_message_end_index=feedback_end,
+                feedback_payload=feedback_payload,
+                execution_trace=execution_trace,
+                prior_execution_background=list(prior_steps),
             )
+            contexts.append(context)
+            prior_steps.append(self._build_execution_background_step(context))
             event_index += 1
 
         return contexts
@@ -209,18 +279,22 @@ class TurnContextBuilder:
 
         return contexts
 
-    def build_response_helpful_prompt(self, context: AssistantResponseContext) -> str:
+    def build_response_progress_prompt(self, context: AssistantResponseContext) -> str:
         execution = "\n".join(context.execution_trace) if context.execution_trace else "(无 assistant 输出)"
         feedback_payload = "\n".join(context.feedback_payload) if context.feedback_payload else "(无紧邻反馈块)"
+        execution_background = self._render_execution_background(context.prior_execution_background)
         feedback_label = {
             FeedbackKind.TOOL_RESULT: "紧邻 tool result",
             FeedbackKind.USER: "紧邻 user 反馈",
             FeedbackKind.NONE: "无紧邻反馈",
         }[context.feedback_kind]
-        return f"""你要判断 assistant 的单个响应单元是否有帮助。
+        return f"""你要判断 assistant 的当前响应单元是否让当前问题状态发生正向推进。
 
 === 当前用户请求 ===
 {self._format_message('user', context.user_message)}
+
+=== 当前单元之前的执行背景（仅供理解当前阶段） ===
+{execution_background}
 
 === 当前 assistant 响应单元 ===
 {execution}
@@ -231,7 +305,14 @@ class TurnContextBuilder:
 === 紧邻反馈块内容 ===
 {feedback_payload}
 
-只输出一行：response_helpful=yes|no|uncertain"""
+=== 判定规则 ===
+- yes: 当前 step 方向基本正确，并拿到了有效信息、完成了必要中间步骤，或明确把问题推进到更接近解决的状态。
+- no: 当前 step 明显跑偏、执行无效、引入返工，或没有为当前问题带来正向推进。
+- uncertain: 证据不足，无法判断当前 step 是否真正推进了问题。
+- 允许参考前序执行背景理解当前阶段，但不要把前序步骤的功劳或失败直接转嫁到当前 step。
+- 不要脑补 next assistant 的补救内容，只基于当前 unit 与紧邻反馈块判断。
+
+只输出一行：response_progress=yes|no|uncertain"""
 
     def build_user_satisfied_prompt(self, context: UserEpisodeContext) -> str:
         episode_trace = "\n".join(context.execution_trace) if context.execution_trace else "(无 assistant 执行链)"
@@ -267,13 +348,15 @@ class TurnContextBuilder:
                 continue
             if role == "assistant":
                 text = self._extract_text_content(message.get("content"))
+                reasoning = self._extract_reasoning_content(message.get("content"))
                 tool_calls = self._extract_tool_calls(message)
-                if text or tool_calls:
+                if text or reasoning or tool_calls:
                     events.append(
                         ConversationEvent(
                             role="assistant",
                             message_index=message_index,
                             text=text,
+                            reasoning=reasoning,
                             tool_calls=tool_calls,
                         )
                     )
@@ -308,9 +391,25 @@ class TurnContextBuilder:
             return "".join(parts)
         return str(content) if content else ""
 
+    def _extract_reasoning_content(self, content: Any) -> str:
+        if not isinstance(content, list):
+            return ""
+        parts: list[str] = []
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            block_type = item.get("type")
+            if block_type in {"thinking", "reasoning", "thought"}:
+                parts.append(str(item.get("thinking") or item.get("text") or item.get("content") or ""))
+        return "".join(parts)
+
     def _format_message(self, role: str, content: str, max_len: int = 500) -> str:
         rendered = content[:max_len] + "..." if len(content) > max_len else content
         return f"[{role}]: {rendered}"
+
+    def _format_reasoning(self, content: str, max_len: int = 500) -> str:
+        rendered = content[:max_len] + "..." if len(content) > max_len else content
+        return f"[assistant_reasoning]: {rendered}"
 
     def _format_tool_call(self, tool_call: dict[str, Any], max_len: int = 500) -> str:
         arguments = tool_call.get("arguments", "")
@@ -323,9 +422,118 @@ class TurnContextBuilder:
         rendered = content[:max_len] + "..." if len(content) > max_len else content
         return f"[tool_result]: {rendered}"
 
+    def _build_execution_background_step(self, context: AssistantResponseContext) -> ExecutionBackgroundStep:
+        tool_result_excerpt = context.feedback_payload[0][: self.TOOL_RESULT_EXCERPT_MAX_LEN] if context.feedback_kind == FeedbackKind.TOOL_RESULT and context.feedback_payload else ""
+        tool_result_status_hint = (
+            self._infer_tool_result_status_hint(context.feedback_payload)
+            if context.feedback_kind == FeedbackKind.TOOL_RESULT
+            else "unknown"
+        )
+        tool_use_summary = "; ".join(self._summarize_tool_call(tool_call) for tool_call in context.tool_calls[:2])
+        return ExecutionBackgroundStep(
+            assistant_text_excerpt=self._make_excerpt(context.assistant_message, self.TEXT_EXCERPT_MAX_LEN),
+            assistant_reason_excerpt=self._make_excerpt(context.assistant_reasoning, self.REASON_EXCERPT_MAX_LEN),
+            tool_use_summary=tool_use_summary,
+            tool_result_status_hint=tool_result_status_hint,
+            tool_result_excerpt_100=tool_result_excerpt,
+        )
 
-class ResponseHelpfulJudgmentProcessor:
-    """LLM processor for assistant response helpfulness."""
+    def _render_execution_background(self, steps: list[ExecutionBackgroundStep]) -> str:
+        if not steps:
+            return "(无前序执行背景)"
+        rendered: list[str] = []
+        total = len(steps)
+        for offset, step in enumerate(steps):
+            rendered.append(f"Step -{total - offset}:")
+            if step.assistant_text_excerpt:
+                rendered.append(f"- assistant_text_excerpt: {step.assistant_text_excerpt}")
+            if step.assistant_reason_excerpt:
+                rendered.append(f"- assistant_reason_excerpt: {step.assistant_reason_excerpt}")
+            if step.tool_use_summary:
+                rendered.append(f"- tool_use_summary: {step.tool_use_summary}")
+            rendered.append(f"- tool_result_status_hint: {step.tool_result_status_hint}")
+            if step.tool_result_excerpt_100:
+                rendered.append(f"- tool_result_excerpt_100: {step.tool_result_excerpt_100}")
+            rendered.append("")
+        return "\n".join(rendered).rstrip()
+
+    def _make_excerpt(self, text: str, max_len: int) -> str:
+        if not text:
+            return ""
+        stripped = re.sub(r"\s+", " ", text).strip()
+        if len(stripped) <= max_len:
+            return stripped
+        return stripped[:max_len] + "..."
+
+    def _infer_tool_result_status_hint(self, feedback_payload: list[str]) -> str:
+        combined = "\n".join(item for item in feedback_payload if item).strip()
+        if not combined:
+            return "unknown"
+        for pattern in self.ERROR_PATTERNS:
+            if re.search(pattern, combined, re.IGNORECASE):
+                return "error"
+        for pattern in self.SUCCESS_PATTERNS:
+            if re.search(pattern, combined, re.IGNORECASE):
+                return "success"
+        return "unknown"
+
+    def _summarize_tool_call(self, tool_call: dict[str, Any]) -> str:
+        tool_name = tool_call.get("name", "unknown") or "unknown"
+        arguments = tool_call.get("arguments", "")
+        parsed_arguments = self._parse_tool_arguments(arguments)
+        if not isinstance(parsed_arguments, dict):
+            argument_summary = self._summarize_argument_value(parsed_arguments)
+            return self._clip_tool_use_summary(f"{tool_name}(arguments={argument_summary})")
+
+        selected_keys = self._select_tool_argument_keys(parsed_arguments)
+        rendered_parts = [f"{key}={self._summarize_argument_value(parsed_arguments.get(key))}" for key in selected_keys]
+        return self._clip_tool_use_summary(f"{tool_name}({', '.join(rendered_parts)})")
+
+    def _parse_tool_arguments(self, arguments: Any) -> Any:
+        if isinstance(arguments, (dict, list)):
+            return arguments
+        if not isinstance(arguments, str):
+            return arguments
+        stripped = arguments.strip()
+        if not stripped:
+            return {}
+        try:
+            return json.loads(stripped)
+        except json.JSONDecodeError:
+            return stripped
+
+    def _select_tool_argument_keys(self, arguments: dict[str, Any]) -> list[str]:
+        keys = [key for key in self.HIGH_VALUE_TOOL_ARG_KEYS if key in arguments]
+        if len(keys) < 3:
+            for key in arguments:
+                if key in keys:
+                    continue
+                keys.append(key)
+                if len(keys) == 3:
+                    break
+        return keys[:3]
+
+    def _summarize_argument_value(self, value: Any) -> str:
+        if isinstance(value, str):
+            compact = re.sub(r"\s+", " ", value).strip()
+            if len(compact) <= self.TOOL_ARG_STRING_LIMIT:
+                return compact
+            prefix = compact[: self.TOOL_ARG_TEXT_PREVIEW_LEN].replace('"', "\\\"")
+            return f'<text:{len(compact)} chars, prefix="{prefix}...">'
+        if isinstance(value, list):
+            return f"<list:{len(value)} items>"
+        if isinstance(value, dict):
+            return f"<dict:{len(value)} keys>"
+        return json.dumps(value, ensure_ascii=False)
+
+    def _clip_tool_use_summary(self, summary: str) -> str:
+        if len(summary) <= self.TOOL_USE_SUMMARY_LIMIT:
+            return summary
+        return summary[: self.TOOL_USE_SUMMARY_LIMIT - 3] + "..."
+
+
+class ResponseProgressJudgmentProcessor:
+    """LLM processor for assistant response progress."""
 
     def __init__(self, llm_client: Any, max_retries: int = 2):
         self.llm = llm_client
@@ -341,9 +549,9 @@ class ResponseHelpfulJudgmentProcessor:
                 result = parser(response)
                 if result is not None:
                     return result
-                logger.warning("Attempt %s: failed to parse response helpful output", attempt + 1)
+                logger.warning("Attempt %s: failed to parse response progress output", attempt + 1)
             except Exception as exc:
-                logger.warning("Attempt %s: response helpful LLM call failed: %s", attempt + 1, exc)
+                logger.warning("Attempt %s: response progress LLM call failed: %s", attempt + 1, exc)
                 if attempt < self.max_retries:
                     await asyncio.sleep(2**attempt)
                 else:
@@ -351,8 +559,7 @@ class ResponseHelpfulJudgmentProcessor:
         return None
 
     def _parse_response(self, response: str) -> str | None:
-        match = re.search(r"response_helpful\s*=\s*(yes|no|uncertain)", response.strip(), re.IGNORECASE)
-        return match.group(1).lower() if match else None
+        return _parse_judgment_label(response, "response_progress", ["yes", "no", "uncertain"])
 
 
 class UserSatisfiedJudgmentProcessor:
@@ -382,8 +589,24 @@ class UserSatisfiedJudgmentProcessor:
         return None
 
     def _parse_response(self, response: str) -> str | None:
-        match = re.search(r"user_satisfied\s*=\s*(yes|no|uncertain|neutral)", response.strip(), re.IGNORECASE)
-        return match.group(1).lower() if match else None
+        return _parse_judgment_label(response, "user_satisfied", ["yes", "no", "uncertain", "neutral"])
+
+
+def _parse_judgment_label(response: str, field_name: str, allowed_values: list[str]) -> str | None:
+    cleaned = re.sub(r"<think>.*?</think>", " ", response or "", flags=re.IGNORECASE | re.DOTALL).strip()
+    allowed_pattern = "|".join(re.escape(value) for value in allowed_values)
+
+    explicit_match = re.search(
+        rf"\b{re.escape(field_name)}\b\s*[:=]\s*({allowed_pattern})\b",
+        cleaned,
+        re.IGNORECASE,
+    )
+    if explicit_match:
+        return explicit_match.group(1).lower()
+
+    normalized = cleaned.strip().strip("`'\" ").strip()
+    bare_match = re.fullmatch(rf"({allowed_pattern})[。.!]?", normalized, re.IGNORECASE)
+    return bare_match.group(1).lower() if bare_match else None
 
 
 class ToolStatsAggregator:
@@ -394,30 +617,30 @@ class ToolStatsAggregator:
         response_judgments: list[AssistantResponseJudgment],
         episode_judgments: list[UserEpisodeJudgment],
     ) -> dict[str, Any]:
-        helpful_yes = sum(1 for row in response_judgments if row.response_helpful == "yes")
-        helpful_no = sum(1 for row in response_judgments if row.response_helpful == "no")
-        helpful_uncertain = sum(1 for row in response_judgments if row.response_helpful == "uncertain")
+        progress_yes = sum(1 for row in response_judgments if row.response_progress == "yes")
+        progress_no = sum(1 for row in response_judgments if row.response_progress == "no")
+        progress_uncertain = sum(1 for row in response_judgments if row.response_progress == "uncertain")
         satisfied_yes = sum(1 for row in episode_judgments if row.user_satisfied == "yes")
         satisfied_no = sum(1 for row in episode_judgments if row.user_satisfied == "no")
         satisfied_neutral = sum(1 for row in episode_judgments if row.user_satisfied == "neutral")
         satisfied_uncertain = sum(1 for row in episode_judgments if row.user_satisfied == "uncertain")
-        helpful_scored = helpful_yes + helpful_no
+        progress_scored = progress_yes + progress_no
         satisfied_scored = satisfied_yes + satisfied_no + satisfied_neutral
         return {
-            "response_helpful_rate": helpful_yes / helpful_scored if helpful_scored else 0.0,
-            "response_unhelpful_rate": helpful_no / helpful_scored if helpful_scored else 0.0,
+            "response_progress_rate": progress_yes / progress_scored if progress_scored else 0.0,
+            "response_regress_rate": progress_no / progress_scored if progress_scored else 0.0,
             "user_satisfied_rate": satisfied_yes / satisfied_scored if satisfied_scored else 0.0,
             "user_negative_feedback_rate": satisfied_no / satisfied_scored if satisfied_scored else 0.0,
-            "response_helpful_scored_steps": helpful_scored,
+            "response_progress_scored_steps": progress_scored,
             "user_feedback_scored_episodes": satisfied_scored,
             "assistant_response_count": len(response_judgments),
             "user_episode_count": len(episode_judgments),
             "has_error": any(row.llm_error for row in response_judgments) or any(row.llm_error for row in episode_judgments),
-            "response_helpful": {
-                "yes": helpful_yes,
-                "no": helpful_no,
-                "uncertain": helpful_uncertain,
-                "rate": helpful_yes / helpful_scored if helpful_scored else 0.0,
+            "response_progress": {
+                "yes": progress_yes,
+                "no": progress_no,
+                "uncertain": progress_uncertain,
+                "rate": progress_yes / progress_scored if progress_scored else 0.0,
             },
             "user_satisfied": {
                 "yes": satisfied_yes,
@@ -440,7 +663,7 @@ class RoundFeedbackProcessor:
         self.semaphore = asyncio.Semaphore(self.max_concurrency)
         self.write_lock = asyncio.Lock()
         self.context_builder = TurnContextBuilder()
-        self.response_processor = ResponseHelpfulJudgmentProcessor(llm_client)
+        self.response_processor = ResponseProgressJudgmentProcessor(llm_client)
         self.episode_processor = UserSatisfiedJudgmentProcessor(llm_client)
         self.stats_aggregator = ToolStatsAggregator()
 
@@ -448,8 +671,8 @@ class RoundFeedbackProcessor:
         messages = extract_messages_from_payload(raw_json)
         if not messages:
             tool_stats = {
-                "response_helpful_rate": 0.0,
-                "response_unhelpful_rate": 0.0,
+                "response_progress_rate": 0.0,
+                "response_regress_rate": 0.0,
                 "user_satisfied_rate": 0.0,
                 "user_negative_feedback_rate": 0.0,
                 "assistant_response_count": 0,
@@ -552,7 +775,7 @@ class RoundFeedbackProcessor:
             return await self._judge_episode_context(context)
 
     async def _judge_response_context(self, context: AssistantResponseContext) -> AssistantResponseJudgment:
-        prompt = self.context_builder.build_response_helpful_prompt(context)
+        prompt = self.context_builder.build_response_progress_prompt(context)
         result = await self.response_processor.judge(prompt)
         return AssistantResponseJudgment(
             sample_uid=context.sample_uid,
@@ -563,7 +786,7 @@ class RoundFeedbackProcessor:
             feedback_message_start_index=context.feedback_message_start_index,
             feedback_message_end_index=context.feedback_message_end_index,
             feedback_payload=context.feedback_payload,
-            response_helpful=result,
+            response_progress=result,
             llm_error=result is None,
         )
 

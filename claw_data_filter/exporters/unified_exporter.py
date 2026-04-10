@@ -28,8 +28,8 @@ ALLOWED_IO_DIRS = ["data", "."]
 class ExportFilterSpec:
     """Structured export filters shared by CLI and Web."""
 
-    helpful_op: str = ">="
-    helpful_val: float | None = None
+    progress_op: str = ">="
+    progress_val: float | None = None
     satisfied_op: str = ">="
     satisfied_val: float | None = None
     negative_feedback_op: str = ">="
@@ -123,7 +123,7 @@ class UnifiedExporter:
             SELECT id, sample_uid, raw_json, imported_at, empty_response,
                      num_turns, expected_judgment_count, expected_response_judgment_count,
                      expected_episode_judgment_count, num_tool_calls,
-                   response_helpful_rate, response_unhelpful_rate,
+                   response_progress_rate, response_regress_rate,
                    user_satisfied_rate, user_negative_feedback_rate,
                    tool_stats, session_merge_status, session_merge_keep,
                    session_merge_reason, processing_status
@@ -147,8 +147,8 @@ class UnifiedExporter:
                 "expected_response_judgment_count": row[7] or 0,
                 "expected_episode_judgment_count": row[8] or 0,
                 "num_tool_calls": row[9] or 0,
-                "response_helpful_rate": row[10],
-                "response_unhelpful_rate": row[11],
+                "response_progress_rate": row[10],
+                "response_regress_rate": row[11],
                 "user_satisfied_rate": row[12],
                 "user_negative_feedback_rate": row[13],
                 "tool_stats": json.loads(row[14]) if row[14] else {},
@@ -163,8 +163,8 @@ class UnifiedExporter:
     def _build_where_clause(self, filter_spec: ExportFilterSpec, table_name: str) -> tuple[str, list[Any]]:
         builder = FilterQueryBuilder()
 
-        if filter_spec.helpful_val is not None:
-            builder.add_condition("response_helpful_rate", ComparisonOp(filter_spec.helpful_op), filter_spec.helpful_val)
+        if filter_spec.progress_val is not None:
+            builder.add_condition("response_progress_rate", ComparisonOp(filter_spec.progress_op), filter_spec.progress_val)
         if filter_spec.satisfied_val is not None:
             builder.add_condition("user_satisfied_rate", ComparisonOp(filter_spec.satisfied_op), filter_spec.satisfied_val)
         if filter_spec.negative_feedback_val is not None:
@@ -235,7 +235,7 @@ class UnifiedExporter:
                     "feedback_message_start_index": context.feedback_message_start_index,
                     "feedback_message_end_index": context.feedback_message_end_index,
                     "feedback_payload": judgment.feedback_payload if judgment else context.feedback_payload,
-                    "response_helpful": None if judgment is None else judgment.response_helpful,
+                    "response_progress": None if judgment is None else judgment.response_progress,
                     "llm_error": False if judgment is None else judgment.llm_error,
                 }
             )
@@ -260,7 +260,7 @@ class UnifiedExporter:
             "source_metadata": self._build_source_metadata(raw_json),
             "conversation": conversation,
             "round_feedback": {
-                "response_helpful_steps": response_steps,
+                "response_progress_steps": response_steps,
                 "user_satisfied_episodes": episode_records,
             },
         }
@@ -282,8 +282,8 @@ class UnifiedExporter:
             "expected_response_judgment_count": sample_row.get("expected_response_judgment_count"),
             "expected_episode_judgment_count": sample_row.get("expected_episode_judgment_count"),
             "num_tool_calls": sample_row.get("num_tool_calls"),
-            "response_helpful_rate": sample_row.get("response_helpful_rate"),
-            "response_unhelpful_rate": sample_row.get("response_unhelpful_rate"),
+            "response_progress_rate": sample_row.get("response_progress_rate"),
+            "response_regress_rate": sample_row.get("response_regress_rate"),
             "user_satisfied_rate": sample_row.get("user_satisfied_rate"),
             "user_negative_feedback_rate": sample_row.get("user_negative_feedback_rate"),
             "has_error": tool_stats.get("has_error", False),

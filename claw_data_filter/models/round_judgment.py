@@ -28,7 +28,7 @@ class AssistantResponseJudgment(BaseModel):
     feedback_message_start_index: Optional[int] = None
     feedback_message_end_index: Optional[int] = None
     feedback_payload: list[str] = Field(default_factory=list)
-    response_helpful: Optional[str] = None
+    response_progress: Optional[str] = None
     llm_error: bool = False
     created_at: datetime = Field(default_factory=lambda: datetime.now())
     judgment_uid: str = ""

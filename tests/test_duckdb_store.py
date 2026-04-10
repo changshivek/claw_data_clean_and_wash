@@ -143,7 +143,7 @@ def test_insert_and_fetch_dual_judgments():
             feedback_message_start_index=2,
             feedback_message_end_index=2,
             feedback_payload=["谢谢"],
-            response_helpful="yes",
+            response_progress="yes",
         )
         episode_judgment = UserEpisodeJudgment(
             sample_uid=sample_uid,
@@ -162,7 +162,7 @@ def test_insert_and_fetch_dual_judgments():
         fetched_episode = store.get_user_episode_judgments(sample_uid)
         assert len(fetched_response) == 1
         assert len(fetched_episode) == 1
-        assert fetched_response[0].response_helpful == "yes"
+        assert fetched_response[0].response_progress == "yes"
         assert fetched_episode[0].user_satisfied == "yes"
         store.close()
 
@@ -197,14 +197,14 @@ def test_update_sample_tool_stats():
         sample_uid = store.get_sample_by_id(sample_id)["sample_uid"]
 
         # Update tool stats
-        tool_stats = {"response_helpful_rate": 0.8, "user_satisfied_rate": 0.9, "total_turns": 3, "has_error": False}
+        tool_stats = {"response_progress_rate": 0.8, "user_satisfied_rate": 0.9, "total_turns": 3, "has_error": False}
         store.update_sample_tool_stats(sample_uid, tool_stats)
 
         # Verify
         result = store.conn.execute("SELECT tool_stats FROM samples WHERE id = ?", [sample_id]).fetchone()
         import json
         assert result is not None
-        assert json.loads(result[0])["response_helpful_rate"] == 0.8
+        assert json.loads(result[0])["response_progress_rate"] == 0.8
         store.close()
 
 
@@ -337,7 +337,7 @@ def test_partially_processed_sample_remains_unprocessed():
                 episode_index=0,
                 assistant_message_index=1,
                 feedback_kind=FeedbackKind.NONE,
-                response_helpful="yes",
+                response_progress="yes",
             )
         )
 
@@ -372,7 +372,7 @@ def test_replace_round_feedback_results_replaces_stale_dual_judgments():
                 episode_index=0,
                 assistant_message_index=1,
                 feedback_kind=FeedbackKind.NONE,
-                response_helpful="no",
+                response_progress="no",
             )
         )
         store.insert_user_episode_judgment(
@@ -393,7 +393,7 @@ def test_replace_round_feedback_results_replaces_stale_dual_judgments():
                 episode_index=0,
                 assistant_message_index=1,
                 feedback_kind=FeedbackKind.NONE,
-                response_helpful="yes",
+                response_progress="yes",
             ),
             AssistantResponseJudgment(
                 sample_uid=sample_uid,
@@ -401,7 +401,7 @@ def test_replace_round_feedback_results_replaces_stale_dual_judgments():
                 episode_index=0,
                 assistant_message_index=2,
                 feedback_kind=FeedbackKind.NONE,
-                response_helpful="yes",
+                response_progress="yes",
             ),
         ]
         episode_judgments = [
@@ -415,9 +415,9 @@ def test_replace_round_feedback_results_replaces_stale_dual_judgments():
             )
         ]
         tool_stats = {
-            "response_helpful_rate": 1.0,
+            "response_progress_rate": 1.0,
             "user_satisfied_rate": 0.5,
-            "response_unhelpful_rate": 0.0,
+            "response_regress_rate": 0.0,
             "user_negative_feedback_rate": 0.0,
             "assistant_response_count": 2,
             "user_episode_count": 1,
@@ -479,15 +479,15 @@ def test_filter_samples_returns_sample_dicts():
         sample_uid = store.get_sample_by_id(sample_id)["sample_uid"]
         store.update_sample_tool_stats(
             sample_uid,
-            {"response_helpful_rate": 0.9, "user_satisfied_rate": 0.8, "total_turns": 1, "has_error": False},
+            {"response_progress_rate": 0.9, "user_satisfied_rate": 0.8, "total_turns": 1, "has_error": False},
         )
 
-        samples, total = store.filter_samples(helpful_rate_val=0.8, limit=10, offset=0)
+        samples, total = store.filter_samples(progress_rate_val=0.8, limit=10, offset=0)
 
         assert total == 1
         assert len(samples) == 1
         assert samples[0]["id"] == sample_id
-        assert samples[0]["helpful_rate"] == 0.9
+        assert samples[0]["progress_rate"] == 0.9
         store.close()
 
 
@@ -620,8 +620,8 @@ def test_samples_schema_removed_unused_columns_and_added_uid():
         column_names = {column[1] for column in columns}
         assert "sample_uid" in column_names
         assert "empty_response" in column_names
-        assert "response_helpful_rate" in column_names
-        assert "response_unhelpful_rate" in column_names
+        assert "response_progress_rate" in column_names
+        assert "response_regress_rate" in column_names
         assert "user_satisfied_rate" in column_names
         assert "user_negative_feedback_rate" in column_names
         assert "session_merge_status" in column_names
@@ -650,14 +650,14 @@ def test_evaluations_table_dropped():
 
 
 def test_get_stats_returns_new_fields():
-    """Test get_stats returns response_helpful_rate, user_satisfied_rate, error_count"""
+    """Test get_stats returns response_progress_rate, user_satisfied_rate, error_count"""
     import tempfile
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / "test.db"
         store = DuckDBStore(db_path)
         stats = store.get_stats()
-        assert "avg_response_helpful_rate" in stats
-        assert "avg_response_unhelpful_rate" in stats
+        assert "avg_response_progress_rate" in stats
+        assert "avg_response_regress_rate" in stats
         assert "avg_user_satisfied_rate" in stats
         assert "avg_user_negative_feedback_rate" in stats
         assert "error_count" in stats
@@ -701,7 +701,7 @@ def test_init_schema_backfills_num_turns_from_expected_judgment_count():
                 feedback_message_start_index INTEGER,
                 feedback_message_end_index INTEGER,
                 feedback_payload JSON,
-                response_helpful TEXT,
+                response_progress TEXT,
                 llm_error BOOLEAN,
                 created_at TIMESTAMP
             )
@@ -749,7 +749,7 @@ def test_init_schema_recomputes_tool_stats_from_dual_judgments():
                 feedback_message_start_index INTEGER,
                 feedback_message_end_index INTEGER,
                 feedback_payload JSON,
-                response_helpful TEXT,
+                response_progress TEXT,
                 llm_error BOOLEAN,
                 created_at TIMESTAMP
             )
@@ -771,7 +771,7 @@ def test_init_schema_recomputes_tool_stats_from_dual_judgments():
             """
         )
         conn.execute(
-            "INSERT INTO samples (id, sample_uid, raw_json, user_query, assistant_response, num_turns, expected_judgment_count, tool_stats) VALUES (1, 'u', '{\"messages\":[]}', '', '', 3, 3, '{\"response_helpful_rate\": 0.33, \"user_satisfied_rate\": 0.25, \"total_turns\": 4, \"has_error\": false}')"
+            "INSERT INTO samples (id, sample_uid, raw_json, user_query, assistant_response, num_turns, expected_judgment_count, tool_stats) VALUES (1, 'u', '{\"messages\":[]}', '', '', 3, 3, '{\"response_progress_rate\": 0.33, \"user_satisfied_rate\": 0.25, \"total_turns\": 4, \"has_error\": false}')"
         )
         conn.execute(
             "INSERT INTO assistant_response_judgments VALUES ('resp:u:0', 'u', 0, 0, 1, 'none', NULL, NULL, '[]', 'yes', false, CURRENT_TIMESTAMP)"
@@ -793,14 +793,14 @@ def test_init_schema_recomputes_tool_stats_from_dual_judgments():
         store = DuckDBStore(db_path)
         row = store.conn.execute("SELECT tool_stats FROM samples WHERE id = 1").fetchone()
         stats = __import__("json").loads(row[0])
-        assert stats["response_helpful_rate"] == 2 / 3
-        assert stats["response_unhelpful_rate"] == 1 / 3
+        assert stats["response_progress_rate"] == 2 / 3
+        assert stats["response_regress_rate"] == 1 / 3
         assert stats["user_satisfied_rate"] == 0.0
         assert stats["user_negative_feedback_rate"] == 0.5
-        assert stats["response_helpful_scored_steps"] == 3
+        assert stats["response_progress_scored_steps"] == 3
         assert stats["user_feedback_scored_episodes"] == 2
         rate_row = store.conn.execute(
-            "SELECT response_helpful_rate, response_unhelpful_rate, user_satisfied_rate, user_negative_feedback_rate FROM samples WHERE id = 1"
+            "SELECT response_progress_rate, response_regress_rate, user_satisfied_rate, user_negative_feedback_rate FROM samples WHERE id = 1"
         ).fetchone()
         assert rate_row == (2 / 3, 1 / 3, 0.0, 0.5)
         store.close()

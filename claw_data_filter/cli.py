@@ -60,7 +60,7 @@ def import_cmd(ctx, input_file):
 
 
 @cli.command()
-@click.option("--response-helpful-rate", type=str, help="Filter by response helpful rate (e.g., '>=0.7')")
+@click.option("--response-progress-rate", type=str, help="Filter by response progress rate (e.g., '>=0.7')")
 @click.option("--user-satisfied-rate", type=str, help="Filter by user satisfied rate (e.g., '>=0.7')")
 @click.option("--user-negative-feedback-rate", type=str, help="Filter by user negative feedback rate (e.g., '>=0.3')")
 @click.option("--empty-response", type=bool, help="Filter by empty response marker (true/false)")
@@ -78,7 +78,7 @@ def import_cmd(ctx, input_file):
 @click.option("--report", type=click.Path(), help="Output report JSON file")
 @click.option("--limit", type=int, help="Limit number of results")
 @click.pass_context
-def filter_cmd(ctx, response_helpful_rate, user_satisfied_rate, user_negative_feedback_rate, empty_response, session_merge_keep, session_merge_status, has_error, export_format, export, report, limit):
+def filter_cmd(ctx, response_progress_rate, user_satisfied_rate, user_negative_feedback_rate, empty_response, session_merge_keep, session_merge_status, has_error, export_format, export, report, limit):
     """Filter samples and export to JSONL with optional report."""
     config = ctx.obj["config"]
 
@@ -90,13 +90,13 @@ def filter_cmd(ctx, response_helpful_rate, user_satisfied_rate, user_negative_fe
         session_merge_status=session_merge_status,
         has_error=has_error,
     )
-    if response_helpful_rate:
-        match = RATE_PATTERN.match(response_helpful_rate.strip())
+    if response_progress_rate:
+        match = RATE_PATTERN.match(response_progress_rate.strip())
         if match:
-            filter_spec.helpful_op, value_str = match.groups()
-            filter_spec.helpful_val = float(value_str)
+            filter_spec.progress_op, value_str = match.groups()
+            filter_spec.progress_val = float(value_str)
         else:
-            raise ValueError(f"Invalid response-helpful-rate expression: {response_helpful_rate}")
+            raise ValueError(f"Invalid response-progress-rate expression: {response_progress_rate}")
     if user_satisfied_rate:
         match = RATE_PATTERN.match(user_satisfied_rate.strip())
         if match:
@@ -145,8 +145,8 @@ def stats(ctx):
         click.echo("=== Statistics ===")
         click.echo(f"Total samples: {stats_data['total_samples']}")
         if stats_data['total_samples'] > 0:
-            click.echo(f"Avg response helpful rate (assistant steps): {stats_data['avg_response_helpful_rate']:.2f}")
-            click.echo(f"Avg response unhelpful rate (assistant steps): {stats_data['avg_response_unhelpful_rate']:.2f}")
+            click.echo(f"Avg response progress rate (assistant steps): {stats_data['avg_response_progress_rate']:.2f}")
+            click.echo(f"Avg response regress rate (assistant steps): {stats_data['avg_response_regress_rate']:.2f}")
             click.echo(f"Avg user satisfied rate (user episodes): {stats_data['avg_user_satisfied_rate']:.2f}")
             click.echo(f"Avg user negative feedback rate (user episodes): {stats_data['avg_user_negative_feedback_rate']:.2f}")
             click.echo(f"Error count: {stats_data['error_count']}")

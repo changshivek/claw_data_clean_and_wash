@@ -15,7 +15,7 @@ class ResponseStepDetailView:
     feedback_message_start_index: int | None
     feedback_message_end_index: int | None
     feedback_payload: list[str] = field(default_factory=list)
-    response_helpful: str | None = None
+    response_progress: str | None = None
     llm_error: bool = False
 
 
@@ -43,7 +43,8 @@ class SampleDetailView:
     expected_response_judgment_count: int
     expected_episode_judgment_count: int
     num_tool_calls: int
-    helpful_rate: float
+    progress_rate: float
+    regress_rate: float
     satisfied_rate: float
     processing_status: str
     session_merge_status: str | None = None

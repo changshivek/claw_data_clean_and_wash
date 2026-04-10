@@ -6,8 +6,8 @@ from typing import Any, Optional
 
 
 ALLOWED_FIELDS = frozenset([
-    "response_helpful_rate",
-    "response_unhelpful_rate",
+    "response_progress_rate",
+    "response_regress_rate",
     "user_satisfied_rate",
     "user_negative_feedback_rate",
     "empty_response",
@@ -43,10 +43,10 @@ def _field_sql_expression(field: str, table_name: str = "samples") -> str:
     if field not in ALLOWED_FIELDS:
         raise ValueError(f"Invalid field name: {field}")
 
-    if field == "response_helpful_rate":
-        return f"{table_name}.response_helpful_rate"
-    if field == "response_unhelpful_rate":
-        return f"{table_name}.response_unhelpful_rate"
+    if field == "response_progress_rate":
+        return f"{table_name}.response_progress_rate"
+    if field == "response_regress_rate":
+        return f"{table_name}.response_regress_rate"
     if field == "user_satisfied_rate":
         return f"{table_name}.user_satisfied_rate"
     if field == "user_negative_feedback_rate":

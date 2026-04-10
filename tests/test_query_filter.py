@@ -70,9 +70,9 @@ def test_filter_tool_stats_fields():
     from claw_data_filter.filters.query import FilterQueryBuilder, ComparisonOp
 
     builder = FilterQueryBuilder()
-    builder.add_condition("response_helpful_rate", ComparisonOp(">="), 0.8)
+    builder.add_condition("response_progress_rate", ComparisonOp(">="), 0.8)
     sql = builder.build_where_clause()
-    assert "response_helpful_rate" in sql
+    assert "response_progress_rate" in sql
 
 
 def test_filter_builder_supports_negative_feedback_rate():
@@ -85,13 +85,13 @@ def test_filter_builder_supports_negative_feedback_rate():
     assert params == [0.3]
 
 
-def test_filter_builder_supports_unhelpful_rate():
+def test_filter_builder_supports_regress_rate():
     builder = FilterQueryBuilder()
-    builder.add_condition("response_unhelpful_rate", ComparisonOp.GTE, 0.2)
+    builder.add_condition("response_regress_rate", ComparisonOp.GTE, 0.2)
 
     sql, params = builder.build_parameterized_where_clause("s")
 
-    assert "response_unhelpful_rate" in sql
+    assert "response_regress_rate" in sql
     assert params == [0.2]
 
 
@@ -110,7 +110,7 @@ def test_filter_builder_supports_session_merge_fields():
 def test_filter_builder_parameterized_clause():
     """Test parameterized clause generation keeps values out of SQL text."""
     builder = FilterQueryBuilder()
-    builder.add_condition("response_helpful_rate", ComparisonOp.GTE, 0.8)
+    builder.add_condition("response_progress_rate", ComparisonOp.GTE, 0.8)
     builder.add_condition("num_turns", ComparisonOp.GTE, 2)
 
     sql, params = builder.build_parameterized_where_clause("s")

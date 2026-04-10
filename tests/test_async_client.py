@@ -39,7 +39,7 @@ async def test_chat_includes_model_when_configured():
     mock_response = MagicMock()
     mock_response.raise_for_status = MagicMock()
     mock_response.json.return_value = {
-        "choices": [{"message": {"content": "response_helpful=yes; user_satisfied=yes"}}]
+        "choices": [{"message": {"content": "response_progress=yes; user_satisfied=yes"}}]
     }
 
     with patch.object(client.client, 'post', return_value=mock_response) as post_mock:

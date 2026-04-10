@@ -27,7 +27,7 @@ def test_build_sample_detail_view_uses_turn_context_grouping():
         "expected_response_judgment_count": 3,
         "expected_episode_judgment_count": 2,
         "num_tool_calls": 1,
-        "tool_stats": {"response_helpful_rate": 1.0, "user_satisfied_rate": 0.5},
+        "tool_stats": {"response_progress_rate": 1.0, "user_satisfied_rate": 0.5},
         "session_merge_status": "keep",
         "session_merge_keep": True,
         "session_merge_group_id": "group-1",
@@ -46,7 +46,7 @@ def test_build_sample_detail_view_uses_turn_context_grouping():
             feedback_message_start_index=2,
             feedback_message_end_index=2,
             feedback_payload=["晴天 25 度"],
-            response_helpful="yes",
+            response_progress="yes",
         ),
         AssistantResponseJudgment(
             sample_uid="uid-3",
@@ -57,7 +57,7 @@ def test_build_sample_detail_view_uses_turn_context_grouping():
             feedback_message_start_index=4,
             feedback_message_end_index=4,
             feedback_payload=["谢谢"],
-            response_helpful="yes",
+            response_progress="yes",
         ),
         AssistantResponseJudgment(
             sample_uid="uid-3",
@@ -65,7 +65,7 @@ def test_build_sample_detail_view_uses_turn_context_grouping():
             episode_index=1,
             assistant_message_index=5,
             feedback_kind=FeedbackKind.NONE,
-            response_helpful="uncertain",
+            response_progress="uncertain",
         ),
     ]
     episode_judgments = [
@@ -133,6 +133,6 @@ def test_build_sample_detail_view_handles_missing_judgment():
     assert detail.sample_uid == "uid-8"
     assert detail.empty_response is True
     assert detail.session_merge_status is None
-    assert detail.response_steps[0].response_helpful is None
+    assert detail.response_steps[0].response_progress is None
     assert detail.user_episodes[0].user_satisfied is None
     assert detail.response_steps[0].llm_error is False

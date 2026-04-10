@@ -17,7 +17,7 @@ def render_samples_table(
     """Render a paginated sample table.
 
     Args:
-        samples: List of sample dicts with id, num_turns, helpful_rate, etc.
+        samples: List of sample dicts with id, num_turns, progress_rate, etc.
         page: Current page number (1-indexed)
         total_pages: Total number of pages
         on_detail_click: Callback(sample_uid) when detail is clicked
@@ -38,14 +38,14 @@ def render_samples_table(
         header_cols[2].markdown("**episodes**")
         header_cols[3].markdown("**empty**")
         header_cols[4].markdown("**merge**")
-        header_cols[5].markdown("**helpful**")
+        header_cols[5].markdown("**progress**")
         header_cols[6].markdown("**status**")
         header_cols[7].markdown("**satisfied**")
         header_cols[8].markdown("**has_error**")
         header_cols[9].markdown("**操作**")
     else:
         cols = st.columns([0.7, 0.8, 0.9, 1.2, 0.8, 1, 0.8, 0.8, 1])
-        headers = ["ID", "episodes", "empty", "merge", "helpful_rate", "status", "satisfied_rate", "has_error", "操作"]
+        headers = ["ID", "episodes", "empty", "merge", "progress_rate", "status", "satisfied_rate", "has_error", "操作"]
         for col, header in zip(cols, headers):
             col.markdown(f"**{header}**")
 
@@ -66,7 +66,7 @@ def render_samples_table(
             cols[2].write(sample.get("num_turns", 0))
             cols[3].write(empty_response_text)
             cols[4].write(merge_text)
-            cols[5].write(f"{sample.get('helpful_rate', 0):.2f}")
+            cols[5].write(f"{sample.get('progress_rate', 0):.2f}")
             cols[6].write(sample.get("processing_status", "pending"))
             cols[7].write(f"{sample.get('satisfied_rate', 0):.2f}")
             cols[8].write("✓" if sample.get("has_error") else "-")
@@ -78,7 +78,7 @@ def render_samples_table(
             cols[1].write(sample.get("num_turns", 0))
             cols[2].write(empty_response_text)
             cols[3].write(merge_text)
-            cols[4].write(f"{sample.get('helpful_rate', 0):.2f}")
+            cols[4].write(f"{sample.get('progress_rate', 0):.2f}")
             cols[5].write(sample.get("processing_status", "pending"))
             cols[6].write(f"{sample.get('satisfied_rate', 0):.2f}")
             cols[7].write("✓" if sample.get("has_error") else "-")

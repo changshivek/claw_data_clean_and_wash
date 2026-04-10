@@ -33,7 +33,7 @@ def _parse_date(value: str | None) -> date | None:
 def render(route: RouteState):
     render_page_header(
         "数据筛选",
-        "在一页内组合 response-step helpful、episode satisfied、session merge 和 empty response 条件，直接检查样本并按需导出选中记录。",
+        "在一页内组合 response-step progress、episode satisfied、session merge 和 empty response 条件，直接检查样本并按需导出选中记录。",
         "Filter",
     )
 
@@ -48,9 +48,9 @@ def render(route: RouteState):
 
         col1, col2, col3 = st.columns(3)
 
-        helpful_ops = [">=", "<=", "=", "!="]
-        helpful_op = col1.selectbox("Response Helpful Rate", helpful_ops, index=helpful_ops.index(criteria.helpful_op), key="filter.helpful_op")
-        helpful_val = col1.number_input("值", min_value=0.0, max_value=1.0, value=float(criteria.helpful_val or 0.0), step=0.1, key="filter.helpful_val")
+        progress_ops = [">=", "<=", "=", "!="]
+        progress_op = col1.selectbox("Response Progress Rate", progress_ops, index=progress_ops.index(criteria.progress_op), key="filter.progress_op")
+        progress_val = col1.number_input("值", min_value=0.0, max_value=1.0, value=float(criteria.progress_val or 0.0), step=0.1, key="filter.progress_val")
 
         satisfied_ops = [">=", "<=", "=", "!="]
         satisfied_op = col2.selectbox("User Satisfied Rate", satisfied_ops, index=satisfied_ops.index(criteria.satisfied_op), key="filter.satisfied_op")
@@ -117,8 +117,8 @@ def render(route: RouteState):
         date_from_val = str(date_range[0]) if len(date_range) > 0 and date_range[0] else None
         date_to_val = str(date_range[1]) if len(date_range) > 1 and date_range[1] else None
         view.criteria = FilterCriteria(
-            helpful_op=helpful_op,
-            helpful_val=helpful_val,
+            progress_op=progress_op,
+            progress_val=progress_val,
             satisfied_op=satisfied_op,
             satisfied_val=satisfied_val,
             negative_feedback_op=negative_feedback_op,
@@ -162,7 +162,7 @@ def render(route: RouteState):
         st.rerun()
 
     st.divider()
-    st.caption("当前 num_turns 筛选字段表示 user episode 数；response_helpful_rate 和 user_satisfied_rate 已使用双层 judgment 分母。")
+    st.caption("当前 num_turns 筛选字段表示 user episode 数；response_progress_rate 和 user_satisfied_rate 已使用双层 judgment 分母。")
     st.markdown(f"**共 {total} 条结果**")
 
     export_scope_options = ["filtered"]

@@ -23,15 +23,15 @@ def render():
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("总样本数", stats["total_samples"])
     col2.metric("已处理", processed_count)
-    col3.metric("平均 Response Helpful Rate", f"{stats['avg_response_helpful_rate']:.2f}")
+    col3.metric("平均 Response Progress Rate", f"{stats['avg_response_progress_rate']:.2f}")
     col4.metric("平均 User Satisfied Rate", f"{stats['avg_user_satisfied_rate']:.2f}")
 
-    st.caption("response_helpful_rate 基于 assistant response steps 统计；user_satisfied_rate 基于 user episodes 统计。")
+    st.caption("response_progress_rate 基于 assistant response steps 统计；user_satisfied_rate 基于 user episodes 统计。")
 
     st.divider()
 
     col5, col6, col7, col8 = st.columns(4)
-    col5.metric("平均 Response Unhelpful Rate", f"{stats['avg_response_unhelpful_rate']:.2f}")
+    col5.metric("平均 Response Regress Rate", f"{stats['avg_response_regress_rate']:.2f}")
     col6.metric("平均 User Negative Feedback Rate", f"{stats['avg_user_negative_feedback_rate']:.2f}")
     col7.metric("错误样本数", stats["error_count"])
     col8.metric("Failed", status_counts["failed"])

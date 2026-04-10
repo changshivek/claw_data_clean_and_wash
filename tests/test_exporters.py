@@ -69,8 +69,8 @@ def test_raw_jsonl_export_with_filter():
         sample = Sample.from_dict(raw)
         sample_id = store.insert_sample(sample)
         sample_uid = store.get_sample_by_id(sample_id)["sample_uid"]
-        # Different response_helpful_rate for each
-        tool_stats = {"response_helpful_rate": 0.5 + i * 0.2, "user_satisfied_rate": 0.8, "total_turns": 1, "has_error": False}
+        # Different response_progress_rate for each
+        tool_stats = {"response_progress_rate": 0.5 + i * 0.2, "user_satisfied_rate": 0.8, "total_turns": 1, "has_error": False}
         store.update_sample_tool_stats(sample_uid, tool_stats)
 
     # Export with filter
@@ -79,7 +79,7 @@ def test_raw_jsonl_export_with_filter():
         ExportRequest(
             output_path=output_path,
             export_format=RAW_JSONL,
-            filter_spec=ExportFilterSpec(helpful_op=">=", helpful_val=0.7),
+            filter_spec=ExportFilterSpec(progress_op=">=", progress_val=0.7),
         )
     )
 
@@ -126,7 +126,7 @@ def test_openai_round_feedback_export_includes_turn_ranges_and_judgments():
             feedback_message_start_index=2,
             feedback_message_end_index=2,
             feedback_payload=["next"],
-            response_helpful="yes",
+            response_progress="yes",
             llm_error=False,
         )
     )
@@ -148,7 +148,7 @@ def test_openai_round_feedback_export_includes_turn_ranges_and_judgments():
     payload = json.loads(output_path.read_text(encoding="utf-8").splitlines()[0])
     assert payload["schema"] == "openai_round_feedback_v2"
     assert payload["conversation"]["messages"][0]["role"] == "user"
-    assert payload["round_feedback"]["response_helpful_steps"][0] == {
+    assert payload["round_feedback"]["response_progress_steps"][0] == {
         "response_index": 0,
         "episode_index": 0,
         "assistant_message_index": 1,
@@ -156,7 +156,7 @@ def test_openai_round_feedback_export_includes_turn_ranges_and_judgments():
         "feedback_message_start_index": 2,
         "feedback_message_end_index": 2,
         "feedback_payload": ["next"],
-        "response_helpful": "yes",
+        "response_progress": "yes",
         "llm_error": False,
     }
     assert payload["round_feedback"]["user_satisfied_episodes"][0] == {
@@ -245,7 +245,7 @@ def test_openai_round_feedback_export_converts_anthropic_system_and_tools():
             feedback_message_start_index=2,
             feedback_message_end_index=2,
             feedback_payload=["demo"],
-            response_helpful="yes",
+            response_progress="yes",
             llm_error=False,
         )
     )
@@ -361,13 +361,13 @@ def test_report_generation():
     sample = Sample.from_dict(raw)
     sample_id = store.insert_sample(sample)
     tool_stats = {
-        "response_helpful_rate": 0.9,
-        "response_unhelpful_rate": 0.1,
+        "response_progress_rate": 0.9,
+        "response_regress_rate": 0.1,
         "user_satisfied_rate": 0.85,
         "user_negative_feedback_rate": 0.15,
         "assistant_response_count": 4,
         "user_episode_count": 2,
-        "response_helpful_scored_steps": 4,
+        "response_progress_scored_steps": 4,
         "user_feedback_scored_episodes": 2,
         "has_error": False,
     }
@@ -380,16 +380,16 @@ def test_report_generation():
     assert "summary" in report
     assert report["summary"]["total_samples"] == 1
     assert report["summary"]["processed_samples"] == 1
-    assert "avg_response_unhelpful_rate" in report["summary"]
+    assert "avg_response_regress_rate" in report["summary"]
     assert "avg_user_negative_feedback_rate" in report["summary"]
     assert report["judgment_totals"] == {
         "assistant_response_count": 4,
         "user_episode_count": 2,
-        "response_helpful_scored_steps": 4,
+        "response_progress_scored_steps": 4,
         "user_feedback_scored_episodes": 2,
     }
     assert "num_turns" in report["semantics"]
-    assert "assistant response judgments" in report["semantics"]["response_helpful_rate"]
+    assert "assistant response judgments" in report["semantics"]["response_progress_rate"]
 
     store.close()
     print("test_report_generation passed")
@@ -423,8 +423,8 @@ def test_report_export():
         assert "judgment_totals" in report
         assert "semantics" in report
         assert "generated_at" in report
-        assert "avg_response_helpful_rate" in report["summary"]
-        assert "avg_response_unhelpful_rate" in report["summary"]
+        assert "avg_response_progress_rate" in report["summary"]
+        assert "avg_response_regress_rate" in report["summary"]
         assert "avg_user_negative_feedback_rate" in report["summary"]
 
     store.close()
@@ -487,7 +487,7 @@ def test_unified_export_preview_supports_estimation():
         sample_id = store.insert_sample(sample)
         sample_uid = store.get_sample_by_id(sample_id)["sample_uid"]
         tool_stats = {
-            "response_helpful_rate": 0.6 + i * 0.3,
+            "response_progress_rate": 0.6 + i * 0.3,
             "user_satisfied_rate": 0.8,
             "total_turns": 1,
             "has_error": False,
@@ -495,7 +495,7 @@ def test_unified_export_preview_supports_estimation():
         store.update_sample_tool_stats(sample_uid, tool_stats)
 
     exporter = UnifiedExporter(store)
-    preview = exporter.preview(ExportFilterSpec(helpful_op=">=", helpful_val=0.8))
+    preview = exporter.preview(ExportFilterSpec(progress_op=">=", progress_val=0.8))
 
     assert preview["count"] == 1
     assert preview["estimated_bytes"] > 0

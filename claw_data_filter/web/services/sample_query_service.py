@@ -29,12 +29,12 @@ def get_filtered_samples(
         session_merge_status = criteria.session_merge_status
 
     return store.filter_samples(
-        helpful_rate_op=criteria.helpful_op,
-        helpful_rate_val=criteria.helpful_val,
-        satisfied_rate_op=criteria.satisfied_op,
-        satisfied_rate_val=criteria.satisfied_val,
-        negative_feedback_rate_op=criteria.negative_feedback_op,
-        negative_feedback_rate_val=criteria.negative_feedback_val,
+        progress_op=criteria.progress_op,
+        progress_val=criteria.progress_val,
+        satisfied_op=criteria.satisfied_op,
+        satisfied_val=criteria.satisfied_val,
+        negative_feedback_op=criteria.negative_feedback_op,
+        negative_feedback_val=criteria.negative_feedback_val,
         empty_response=empty_response,
         session_merge_keep=session_merge_keep,
         session_merge_status=session_merge_status,
@@ -75,7 +75,7 @@ def get_table_preview(
                                      expected_response_judgment_count, expected_episode_judgment_count, num_tool_calls,
                  empty_response, processing_status, session_merge_status, session_merge_keep,
                    session_merge_reason, imported_at,
-                   response_helpful_rate AS helpful_rate,
+                   response_progress_rate AS progress_rate,
                    user_satisfied_rate AS satisfied_rate
             FROM samples
             ORDER BY id
@@ -97,7 +97,7 @@ def get_table_preview(
             "session_merge_keep",
             "session_merge_reason",
             "imported_at",
-            "helpful_rate",
+            "progress_rate",
             "satisfied_rate",
         ]
         return columns, rows, total
@@ -106,7 +106,7 @@ def get_table_preview(
             SELECT judgment_uid, sample_uid, response_index, episode_index,
                    assistant_message_index, feedback_kind,
                    feedback_message_start_index, feedback_message_end_index,
-                   response_helpful, llm_error, created_at
+                   response_progress, llm_error, created_at
             FROM assistant_response_judgments
             ORDER BY sample_uid, response_index
             LIMIT ? OFFSET ?
@@ -122,7 +122,7 @@ def get_table_preview(
             "feedback_kind",
             "feedback_message_start_index",
             "feedback_message_end_index",
-            "response_helpful",
+            "response_progress",
             "llm_error",
             "created_at",
         ]

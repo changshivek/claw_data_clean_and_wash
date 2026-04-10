@@ -6,52 +6,67 @@
 
 ## 当前执行状态
 
-更新时间: 2026-04-09
+更新时间: 2026-04-10
 
-- 已完成: 基线提交已建立，旧单层 round feedback 设计文档已清理，双层级设计与并发原则已补齐。
-- 已完成: claw_data_filter/processors/round_feedback.py 已重建为双层处理器，并实现全局并发池、双队列软配额和按 sample_uid 原子写回。
-- 已完成: claw_data_filter/storage/duckdb_store.py 已接入 assistant_response_judgments / user_episode_judgments 双表、schema migration、sample_uid 查询接口，并已移除 turn_judgments 兼容写回/回填壳。
-- 已完成: claw_data_filter/exporters/unified_exporter.py 已切换到 openai_round_feedback_v2，直接导出双层 judgment 明细。
-- 已完成: Web 详情页已切换为 user_satisfied episodes / response_helpful steps 双视图，detail_builder 与 sample_detail_view 不再把单个 turn 作为主展示结构。
-- 已完成: sample_query_service 已支持 assistant_response_judgments / user_episode_judgments 明细预览，旧 turn_judgments 表预览入口已移除，Web 测试已替换为直接验证双层语义的测试。
-- 已完成: report_exporter 已补齐双层统计摘要与语义说明；CLI stats、overview、filter、sample table 文案已明确区分 assistant steps 与 user episodes。
-- 已完成: session merge 决策/写回、Web drill-down、DuckDBStore 写接口、导出 metadata 与测试主断言已统一切到 sample_uid-first / session_merge_representative_uid。
-- 已完成: `RoundJudgment`、`RoundJudgmentProcessor`、`extract_turns`、`build_judgment_prompt` 与对应 legacy 测试已删除，当前只保留 response-step / user-episode 双层语义。
-- 已完成: README 与 implementation 文档已同步到 sample_uid-first 和 openai_round_feedback_v2 口径，不再把 turn_judgments / sample_id drill-down 当作当前实现。
-- 当前回归结果: 全量 pytest 已通过，116 passed。
-- 下一步: 在不改变 response unit 边界的前提下，评估并推进 step 级指标从 `response_helpful` 向 `response_progress` 的语义收束；该主题当前尚未实施。
+### 冻结结论
 
-## 后续主题：response_progress 语义收束（未实施）
+- 已完成: `response_helpful -> response_progress`、`response_unhelpful -> response_regress`、对应 rate / exporter / CLI / Web / tests / README / export-format 文档的全链路 rename。
+- 已完成: `claw_data_filter/processors/round_feedback.py`、`claw_data_filter/storage/duckdb_store.py`、`claw_data_filter/exporters/unified_exporter.py`、`claw_data_filter/exporters/report_exporter.py`、`claw_data_filter/web/**` 和相关测试已统一到 progress/regress 语义。
+- 已完成: DuckDB 存储层补齐旧库迁移桥接。历史 `assistant_response_judgments.response_helpful` 列可在新代码启动时回填到 `response_progress`，用于把旧验证库无损迁移到新 schema。
+- 已完成: 全量 pytest 再次通过，当前基线为 `118 passed`。
+- 已完成: `scripts/validate_pipeline_100.sh` 已安全化，新增端点 preflight 与临时 DB 原子替换逻辑；端点不可达时不再先删正式验证库。
+- 已完成: 100 条真实端点复验已在 `http://182.242.159.76:31870/v1`、模型 `qwen35`、并发 `16` 条件下重新跑通；当前正式使用库为 `data/pipeline_e2e/e2e_100_progress.duckdb`。
+- 已完成: 本轮 live 复验重新导出了 `data/pipeline_e2e/validation_progress/exported_round_feedback.jsonl`、`data/pipeline_e2e/validation_progress/exported_raw.jsonl` 与 `data/pipeline_e2e/validation_progress/export_report_round_feedback.json`；导出内容保持 `response_progress_rate` / `response_regress_rate` / `response_progress_steps`。
+- 已确认: 本轮 live 复验结果为 100 条样本导入、26 条 `session_merge_keep=true` 样本、round-feedback `26 success / 0 failures`；stats 摘要显示 `avg_response_progress_rate = 0.18`、`avg_response_regress_rate = 0.09`、`avg_user_satisfied_rate = 0.01`、`avg_user_negative_feedback_rate = 0.18`、`error_count = 0`。
+- 已确认: Web 界面继续使用 `data/pipeline_e2e/e2e_100_progress.duckdb`，并运行在 `http://127.0.0.1:5000`。
 
-这一主题是双层 round feedback 架构稳定后的增量优化，不是新的架构分叉，因此当前不单独新开文档，继续维护在本实施计划与对应设计文档中。
+### 当前阻塞
 
-### 目标
+- 当前没有代码或流程级阻塞。真实端点已恢复，100 条 live 闭环已经按目标并发跑通。
+- 剩余事项主要是是否继续扩大样本规模、是否补充更多统计维度，以及是否需要把当前基线再做一次 git 固定。
 
-- 保持当前 response unit 边界不变。
-- 将现有 `response_helpful` 的 step 级语义收束为更明确的“是否推进问题”的指标。
-- 评估是否将外显命名逐步迁移为 `response_progress`。
-- 不改变 `user_satisfied` 的 episode 级边界和职责。
+### 当前固定现状
+
+- 代码现状以“progress/regress 全链路 rename 已完成，118 passed”为准。
+- 数据现状以“live 复验写出的 `e2e_100_progress.duckdb` + 最新 validation_progress 导出产物”为准。
+- 验证现状以“100 条真实 LLM 闭环已重新跑通，26 条 keep 样本完成 round-feedback，0 错误”为准。
+
+### 下一步行动
+
+1. 若需要继续压测，优先在当前安全版 `scripts/validate_pipeline_100.sh` 基础上扩大样本量或调整并发，而不是回退脚本。
+2. 若需要评估效果稳定性，补做多轮 live 复验并比较 `avg_response_progress_rate`、`avg_response_regress_rate` 与 user episode 指标波动。
+3. 视需要把当前 live 基线产物和文档状态一起做 git 固定，作为后续 prompt 或规则调优的起点。
+
+## 后续主题：response_progress 语义收束（本轮已完成全链路迁移）
+
+这一主题的核心代码迁移在本轮已经完成：step 级 prompt、模型字段、DB 列、聚合字段、CLI/Web/导出 contract 已统一切到 `response_progress` / `response_regress`。
+
+当前还未完成的，不再是 rename，而是“在真实端点恢复后重新跑一遍完整 100 条闭环，并固定新的实时验证结果”。
+
+### 当前目标
+
+- 保持当前 response unit / user episode 边界不变。
+- 维持已经完成的 progress/regress 命名与实现收敛，不再回退到 helpful/unhelpful。
+- 在真实端点恢复后，补齐一份由新 schema 原生生成的 100 条实时验证结果。
 
 ### 当前结论
 
 - 不纳入 `next assistant text`。
 - 不纳入 `next assistant reasoning`。
-- 允许带入当前 unit 之前的有限执行背景，但应使用规则化压缩，不额外增加独立 LLM 摘要调用。
-- 若后续正式实施，优先先改 prompt 语义，再决定是否全链路 rename 字段与 rate 名称。
+- 允许带入当前 unit 之前的有限执行背景，并继续使用规则化压缩，不增加独立 LLM 摘要调用。
+- 全链路字段 rename 已完成，后续不再把“是否 rename”作为开放议题。
 
-### 推荐范围
+### 本主题剩余范围
 
-本主题若推进，推荐分成两层：
+本主题当前只剩两件事：
 
-1. 最小语义改动
-	- 重写 step 级 prompt
-	- 将 judgment 目标从“helpful”收束为“progress”
-	- 保持上下文抽取边界、表结构和 episode 逻辑不变
+1. 更大规模或多轮次验证
+	- 在当前 100 条 live 基线之上继续扩大覆盖
+	- 记录 progress/regress 与 episode 指标波动
 
-2. 全链路命名迁移
-	- `AssistantResponseJudgment.response_helpful` -> `response_progress`
-	- `response_helpful_rate` -> `response_progress_rate`
-	- CLI / Web / exporter / report / README / docs 同步迁移文案与字段名
+2. 后续规则/Prompt 调优验证
+	- 以当前 live 基线作为对照组
+	- 重新比对导出 report 与抽样样本细节
 
 ### prompt 构成建议
 
@@ -133,8 +148,8 @@ Step -1:
 
 ### 实施顺序建议
 
-- [ ] 先在设计/实现文档中固定 `response_progress` 的目标语义与 prompt 边界
-- [ ] 先实现规则化 execution background 压缩
+- [x] 先在设计/实现文档中固定 `response_progress` 的目标语义与 prompt 边界
+- [x] 先实现规则化 execution background 压缩
 - [ ] 在不改表结构的情况下做 prompt A/B 验证，比较现有 `response_helpful` 与 `response_progress` 标签差异
 - [ ] 若验证通过，再决定是否推进字段名、聚合名、CLI/Web/导出 contract 的正式 rename
 - [ ] 若验证不通过，保留双层架构不动，只回滚 step 级 prompt 语义尝试

@@ -52,7 +52,7 @@ class ReportExporter:
             "processed_samples": 0,
             "assistant_response_count": 0,
             "user_episode_count": 0,
-            "response_helpful_scored_steps": 0,
+            "response_progress_scored_steps": 0,
             "user_feedback_scored_episodes": 0,
         }
         for (tool_stats_raw,) in rows:
@@ -62,7 +62,7 @@ class ReportExporter:
             totals["processed_samples"] += 1
             totals["assistant_response_count"] += int(tool_stats.get("assistant_response_count", 0) or 0)
             totals["user_episode_count"] += int(tool_stats.get("user_episode_count", 0) or 0)
-            totals["response_helpful_scored_steps"] += int(tool_stats.get("response_helpful_scored_steps", 0) or 0)
+            totals["response_progress_scored_steps"] += int(tool_stats.get("response_progress_scored_steps", 0) or 0)
             totals["user_feedback_scored_episodes"] += int(tool_stats.get("user_feedback_scored_episodes", 0) or 0)
         return totals
 
@@ -74,8 +74,8 @@ class ReportExporter:
             "summary": {
                 "total_samples": stats["total_samples"],
                 "processed_samples": judgment_totals["processed_samples"],
-                "avg_response_helpful_rate": round(stats["avg_response_helpful_rate"], 2),
-                "avg_response_unhelpful_rate": round(stats["avg_response_unhelpful_rate"], 2),
+                "avg_response_progress_rate": round(stats["avg_response_progress_rate"], 2),
+                "avg_response_regress_rate": round(stats["avg_response_regress_rate"], 2),
                 "avg_user_satisfied_rate": round(stats["avg_user_satisfied_rate"], 2),
                 "avg_user_negative_feedback_rate": round(stats["avg_user_negative_feedback_rate"], 2),
                 "error_count": stats["error_count"],
@@ -83,12 +83,12 @@ class ReportExporter:
             "judgment_totals": {
                 "assistant_response_count": judgment_totals["assistant_response_count"],
                 "user_episode_count": judgment_totals["user_episode_count"],
-                "response_helpful_scored_steps": judgment_totals["response_helpful_scored_steps"],
+                "response_progress_scored_steps": judgment_totals["response_progress_scored_steps"],
                 "user_feedback_scored_episodes": judgment_totals["user_feedback_scored_episodes"],
             },
             "semantics": {
                 "num_turns": "samples.num_turns currently tracks user episode count",
-                "response_helpful_rate": "Computed from assistant response judgments with yes/no as scored denominator",
+                "response_progress_rate": "Computed from assistant response judgments with yes/no as scored denominator",
                 "user_satisfied_rate": "Computed from user episode judgments with yes/no/neutral as scored denominator",
             },
         }

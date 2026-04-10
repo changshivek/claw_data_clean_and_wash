@@ -38,7 +38,7 @@ def build_sample_detail_view(
                 feedback_message_start_index=context.feedback_message_start_index,
                 feedback_message_end_index=context.feedback_message_end_index,
                 feedback_payload=judgment.feedback_payload if judgment else list(context.feedback_payload),
-                response_helpful=judgment.response_helpful if judgment else None,
+                response_progress=judgment.response_progress if judgment else None,
                 llm_error=judgment.llm_error if judgment else False,
             )
         )
@@ -70,7 +70,8 @@ def build_sample_detail_view(
         expected_response_judgment_count=sample_record.get("expected_response_judgment_count") or len(response_steps),
         expected_episode_judgment_count=sample_record.get("expected_episode_judgment_count") or len(user_episodes),
         num_tool_calls=sample_record.get("num_tool_calls") or 0,
-        helpful_rate=tool_stats.get("response_helpful_rate", 0.0),
+        progress_rate=tool_stats.get("response_progress_rate", 0.0),
+        regress_rate=tool_stats.get("response_regress_rate", 0.0),
         satisfied_rate=tool_stats.get("user_satisfied_rate", 0.0),
         processing_status=sample_record.get("processing_status") or "pending",
         session_merge_status=sample_record.get("session_merge_status"),

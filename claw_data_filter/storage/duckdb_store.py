@@ -38,8 +38,8 @@ class DuckDBStore:
                 expected_response_judgment_count INTEGER,
                 expected_episode_judgment_count INTEGER,
                 num_tool_calls INTEGER,
-                response_helpful_rate DOUBLE,
-                response_unhelpful_rate DOUBLE,
+                response_progress_rate DOUBLE,
+                response_regress_rate DOUBLE,
                 user_satisfied_rate DOUBLE,
                 user_negative_feedback_rate DOUBLE,
                 imported_at TIMESTAMP,
@@ -80,8 +80,8 @@ class DuckDBStore:
             INSERT INTO samples_v2 (
                 sample_uid, id, raw_json, user_query, assistant_response, empty_response,
                 num_turns, expected_judgment_count, expected_response_judgment_count,
-                expected_episode_judgment_count, num_tool_calls, response_helpful_rate,
-                response_unhelpful_rate, user_satisfied_rate, user_negative_feedback_rate,
+                expected_episode_judgment_count, num_tool_calls, response_progress_rate,
+                response_regress_rate, user_satisfied_rate, user_negative_feedback_rate,
                 imported_at, tool_stats, session_merge_status, session_merge_keep,
                 session_merge_group_id, session_merge_group_size, session_merge_representative_uid,
                 session_merge_reason, session_merge_updated_at, processing_status, processing_updated_at
@@ -98,8 +98,8 @@ class DuckDBStore:
                 {existing('expected_response_judgment_count', 'NULL')},
                 {existing('expected_episode_judgment_count', 'NULL')},
                 COALESCE({existing('num_tool_calls', '0')}, 0),
-                {existing('response_helpful_rate', 'NULL')},
-                {existing('response_unhelpful_rate', 'NULL')},
+                {existing('response_progress_rate', 'NULL')},
+                {existing('response_regress_rate', 'NULL')},
                 {existing('user_satisfied_rate', 'NULL')},
                 {existing('user_negative_feedback_rate', 'NULL')},
                 {existing('imported_at', 'CURRENT_TIMESTAMP')},
@@ -157,11 +157,11 @@ class DuckDBStore:
         except:
             pass  # Column may already exist (ignore error)
         try:
-            self.conn.execute("ALTER TABLE samples ADD COLUMN response_helpful_rate DOUBLE")
+            self.conn.execute("ALTER TABLE samples ADD COLUMN response_progress_rate DOUBLE")
         except:
             pass
         try:
-            self.conn.execute("ALTER TABLE samples ADD COLUMN response_unhelpful_rate DOUBLE")
+            self.conn.execute("ALTER TABLE samples ADD COLUMN response_regress_rate DOUBLE")
         except:
             pass
         try:
@@ -228,8 +228,8 @@ class DuckDBStore:
         self.conn.execute(
             """
             UPDATE samples
-            SET response_helpful_rate = COALESCE(response_helpful_rate, CAST(json_extract(tool_stats, '$.response_helpful_rate') AS DOUBLE)),
-                response_unhelpful_rate = COALESCE(response_unhelpful_rate, CAST(json_extract(tool_stats, '$.response_unhelpful_rate') AS DOUBLE)),
+            SET response_progress_rate = COALESCE(response_progress_rate, CAST(json_extract(tool_stats, '$.response_progress_rate') AS DOUBLE)),
+                response_regress_rate = COALESCE(response_regress_rate, CAST(json_extract(tool_stats, '$.response_regress_rate') AS DOUBLE)),
                 user_satisfied_rate = COALESCE(user_satisfied_rate, CAST(json_extract(tool_stats, '$.user_satisfied_rate') AS DOUBLE)),
                 user_negative_feedback_rate = COALESCE(user_negative_feedback_rate, CAST(json_extract(tool_stats, '$.user_negative_feedback_rate') AS DOUBLE))
             WHERE tool_stats IS NOT NULL
@@ -260,12 +260,19 @@ class DuckDBStore:
                 feedback_message_start_index INTEGER,
                 feedback_message_end_index INTEGER,
                 feedback_payload JSON,
-                response_helpful TEXT,
+                response_progress TEXT,
                 llm_error BOOLEAN,
                 created_at TIMESTAMP
             )
             """
         )
+        assistant_columns = {row[1] for row in self.conn.execute("PRAGMA table_info('assistant_response_judgments')").fetchall()}
+        if "response_progress" not in assistant_columns:
+            self.conn.execute("ALTER TABLE assistant_response_judgments ADD COLUMN response_progress TEXT")
+        if "response_helpful" in assistant_columns:
+            self.conn.execute(
+                "UPDATE assistant_response_judgments SET response_progress = COALESCE(response_progress, response_helpful)"
+            )
         self.conn.execute(
             """
             CREATE TABLE IF NOT EXISTS user_episode_judgments (
@@ -327,8 +334,8 @@ class DuckDBStore:
             SELECT 1
             FROM samples
             WHERE tool_stats IS NULL
-               OR response_helpful_rate IS NULL
-               OR response_unhelpful_rate IS NULL
+               OR response_progress_rate IS NULL
+               OR response_regress_rate IS NULL
                OR user_satisfied_rate IS NULL
                OR user_negative_feedback_rate IS NULL
                OR expected_judgment_count IS NULL
@@ -358,8 +365,8 @@ class DuckDBStore:
                     expected_judgment_count = ?,
                     expected_response_judgment_count = ?,
                     expected_episode_judgment_count = ?,
-                    response_helpful_rate = ?,
-                    response_unhelpful_rate = ?,
+                    response_progress_rate = ?,
+                    response_regress_rate = ?,
                     user_satisfied_rate = ?,
                     user_negative_feedback_rate = ?,
                     processing_updated_at = COALESCE(processing_updated_at, CURRENT_TIMESTAMP)
@@ -371,8 +378,8 @@ class DuckDBStore:
                     tool_stats["assistant_response_count"] + tool_stats["user_episode_count"],
                     tool_stats["assistant_response_count"],
                     tool_stats["user_episode_count"],
-                    tool_stats["response_helpful_rate"],
-                    tool_stats["response_unhelpful_rate"],
+                    tool_stats["response_progress_rate"],
+                    tool_stats["response_regress_rate"],
                     tool_stats["user_satisfied_rate"],
                     tool_stats["user_negative_feedback_rate"],
                     sample_uid,
@@ -455,8 +462,8 @@ class DuckDBStore:
             "session_merge_updated_at": row[22],
             "processing_status": row[23] or "pending",
             "processing_updated_at": row[24],
-            "helpful_rate": row[11] if row[11] is not None else (tool_stats or {}).get("response_helpful_rate", 0),
-            "unhelpful_rate": row[12] if row[12] is not None else (tool_stats or {}).get("response_unhelpful_rate", 0),
+            "progress_rate": row[11] if row[11] is not None else (tool_stats or {}).get("response_progress_rate", 0),
+            "regress_rate": row[12] if row[12] is not None else (tool_stats or {}).get("response_regress_rate", 0),
             "satisfied_rate": row[13] if row[13] is not None else (tool_stats or {}).get("user_satisfied_rate", 0),
             "negative_feedback_rate": row[14] if row[14] is not None else (tool_stats or {}).get("user_negative_feedback_rate", 0),
         }
@@ -482,8 +489,8 @@ class DuckDBStore:
         stats = self.conn.execute("""
             SELECT
                 COUNT(*) as total,
-                AVG(response_helpful_rate) as avg_helpful,
-                AVG(response_unhelpful_rate) as avg_unhelpful,
+                AVG(response_progress_rate) as avg_progress,
+                AVG(response_regress_rate) as avg_regress,
                 AVG(user_satisfied_rate) as avg_satisfied,
                 AVG(user_negative_feedback_rate) as avg_negative_feedback,
                 SUM(CASE WHEN CAST(json_extract(tool_stats, '$.has_error') AS BOOLEAN) = true THEN 1 ELSE 0 END) as error_count
@@ -493,8 +500,8 @@ class DuckDBStore:
 
         return {
             "total_samples": sample_count,
-            "avg_response_helpful_rate": stats[1] or 0,
-            "avg_response_unhelpful_rate": stats[2] or 0,
+            "avg_response_progress_rate": stats[1] or 0,
+            "avg_response_regress_rate": stats[2] or 0,
             "avg_user_satisfied_rate": stats[3] or 0,
             "avg_user_negative_feedback_rate": stats[4] or 0,
             "error_count": stats[5] or 0,
@@ -512,22 +519,22 @@ class DuckDBStore:
         response_judgments: list[AssistantResponseJudgment],
         episode_judgments: list[UserEpisodeJudgment],
     ) -> dict[str, Any]:
-        helpful_yes = sum(1 for row in response_judgments if row.response_helpful == "yes")
-        helpful_no = sum(1 for row in response_judgments if row.response_helpful == "no")
-        helpful_uncertain = sum(1 for row in response_judgments if row.response_helpful == "uncertain")
+        progress_yes = sum(1 for row in response_judgments if row.response_progress == "yes")
+        progress_no = sum(1 for row in response_judgments if row.response_progress == "no")
+        progress_uncertain = sum(1 for row in response_judgments if row.response_progress == "uncertain")
         satisfied_yes = sum(1 for row in episode_judgments if row.user_satisfied == "yes")
         satisfied_no = sum(1 for row in episode_judgments if row.user_satisfied == "no")
         satisfied_neutral = sum(1 for row in episode_judgments if row.user_satisfied == "neutral")
         satisfied_uncertain = sum(1 for row in episode_judgments if row.user_satisfied == "uncertain")
-        helpful_scored = helpful_yes + helpful_no
+        progress_scored = progress_yes + progress_no
         satisfied_scored = satisfied_yes + satisfied_no + satisfied_neutral
 
         return {
-            "response_helpful": {
-                "yes": helpful_yes,
-                "no": helpful_no,
-                "uncertain": helpful_uncertain,
-                "rate": helpful_yes / helpful_scored if helpful_scored else 0.0,
+            "response_progress": {
+                "yes": progress_yes,
+                "no": progress_no,
+                "uncertain": progress_uncertain,
+                "rate": progress_yes / progress_scored if progress_scored else 0.0,
             },
             "user_satisfied": {
                 "yes": satisfied_yes,
@@ -536,11 +543,11 @@ class DuckDBStore:
                 "uncertain": satisfied_uncertain,
                 "rate": satisfied_yes / satisfied_scored if satisfied_scored else 0.0,
             },
-            "response_helpful_rate": helpful_yes / helpful_scored if helpful_scored else 0.0,
-            "response_unhelpful_rate": helpful_no / helpful_scored if helpful_scored else 0.0,
+            "response_progress_rate": progress_yes / progress_scored if progress_scored else 0.0,
+            "response_regress_rate": progress_no / progress_scored if progress_scored else 0.0,
             "user_satisfied_rate": satisfied_yes / satisfied_scored if satisfied_scored else 0.0,
             "user_negative_feedback_rate": satisfied_no / satisfied_scored if satisfied_scored else 0.0,
-            "response_helpful_scored_steps": helpful_scored,
+            "response_progress_scored_steps": progress_scored,
             "user_feedback_scored_episodes": satisfied_scored,
             "assistant_response_count": len(response_judgments),
             "user_episode_count": len(episode_judgments),
@@ -554,7 +561,7 @@ class DuckDBStore:
             INSERT INTO assistant_response_judgments (
                 judgment_uid, sample_uid, response_index, episode_index,
                 assistant_message_index, feedback_kind, feedback_message_start_index,
-                feedback_message_end_index, feedback_payload, response_helpful,
+                feedback_message_end_index, feedback_payload, response_progress,
                 llm_error, created_at
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -569,7 +576,7 @@ class DuckDBStore:
                 judgment.feedback_message_start_index,
                 judgment.feedback_message_end_index,
                 json.dumps(judgment.feedback_payload),
-                judgment.response_helpful,
+                judgment.response_progress,
                 judgment.llm_error,
                 judgment.created_at,
             ],
@@ -602,11 +609,13 @@ class DuckDBStore:
         return judgment.judgment_uid
 
     def get_assistant_response_judgments(self, sample_uid: str) -> list[AssistantResponseJudgment]:
+        assistant_columns = {row[1] for row in self.conn.execute("PRAGMA table_info('assistant_response_judgments')").fetchall()}
+        response_value_column = "response_progress" if "response_progress" in assistant_columns else "response_helpful"
         rows = self.conn.execute(
-            """
+            f"""
             SELECT sample_uid, response_index, episode_index, assistant_message_index,
                    feedback_kind, feedback_message_start_index, feedback_message_end_index,
-                   feedback_payload, response_helpful, llm_error, created_at, judgment_uid
+                   feedback_payload, {response_value_column}, llm_error, created_at, judgment_uid
             FROM assistant_response_judgments
             WHERE sample_uid = ?
             ORDER BY response_index
@@ -623,7 +632,7 @@ class DuckDBStore:
                 feedback_message_start_index=row[5],
                 feedback_message_end_index=row[6],
                 feedback_payload=json.loads(row[7]) if row[7] else [],
-                response_helpful=row[8],
+                response_progress=row[8],
                 llm_error=row[9],
                 created_at=row[10],
                 judgment_uid=row[11],
@@ -661,11 +670,11 @@ class DuckDBStore:
     def update_sample_tool_stats(self, sample_uid: str, tool_stats: dict) -> None:
         """Update tool_stats for a sample."""
         self.conn.execute(
-            "UPDATE samples SET tool_stats = ?, response_helpful_rate = ?, response_unhelpful_rate = ?, user_satisfied_rate = ?, user_negative_feedback_rate = ?, processing_updated_at = ? WHERE sample_uid = ?",
+            "UPDATE samples SET tool_stats = ?, response_progress_rate = ?, response_regress_rate = ?, user_satisfied_rate = ?, user_negative_feedback_rate = ?, processing_updated_at = ? WHERE sample_uid = ?",
             [
                 json.dumps(tool_stats),
-                tool_stats.get("response_helpful_rate"),
-                tool_stats.get("response_unhelpful_rate"),
+                tool_stats.get("response_progress_rate"),
+                tool_stats.get("response_regress_rate"),
                 tool_stats.get("user_satisfied_rate"),
                 tool_stats.get("user_negative_feedback_rate"),
                 datetime.now(),
@@ -707,8 +716,8 @@ class DuckDBStore:
                     expected_judgment_count = ?,
                     expected_response_judgment_count = ?,
                     expected_episode_judgment_count = ?,
-                    response_helpful_rate = ?,
-                    response_unhelpful_rate = ?,
+                    response_progress_rate = ?,
+                    response_regress_rate = ?,
                     user_satisfied_rate = ?,
                     user_negative_feedback_rate = ?,
                     processing_status = 'completed',
@@ -721,8 +730,8 @@ class DuckDBStore:
                     expected_response_judgment_count + expected_episode_judgment_count,
                     expected_response_judgment_count,
                     expected_episode_judgment_count,
-                    tool_stats.get("response_helpful_rate"),
-                    tool_stats.get("response_unhelpful_rate"),
+                    tool_stats.get("response_progress_rate"),
+                    tool_stats.get("response_regress_rate"),
                     tool_stats.get("user_satisfied_rate"),
                     tool_stats.get("user_negative_feedback_rate"),
                     datetime.now(),
@@ -789,7 +798,7 @@ class DuckDBStore:
             """
              SELECT id, sample_uid, raw_json, user_query, assistant_response, empty_response, num_turns, expected_judgment_count,
                  expected_response_judgment_count, expected_episode_judgment_count, num_tool_calls,
-                  response_helpful_rate, response_unhelpful_rate, user_satisfied_rate,
+                  response_progress_rate, response_regress_rate, user_satisfied_rate,
                   user_negative_feedback_rate, tool_stats, session_merge_status, session_merge_keep,
                   session_merge_group_id, session_merge_group_size, session_merge_representative_uid,
                  session_merge_reason, session_merge_updated_at, processing_status, processing_updated_at
@@ -805,7 +814,7 @@ class DuckDBStore:
             """
              SELECT id, sample_uid, raw_json, user_query, assistant_response, empty_response, num_turns, expected_judgment_count,
                  expected_response_judgment_count, expected_episode_judgment_count, num_tool_calls,
-                  response_helpful_rate, response_unhelpful_rate, user_satisfied_rate,
+                  response_progress_rate, response_regress_rate, user_satisfied_rate,
                   user_negative_feedback_rate, tool_stats, session_merge_status, session_merge_keep,
                   session_merge_group_id, session_merge_group_size, session_merge_representative_uid,
                  session_merge_reason, session_merge_updated_at, processing_status, processing_updated_at
@@ -818,8 +827,8 @@ class DuckDBStore:
 
     def filter_samples(
         self,
-        helpful_rate_op: str = ">=",
-        helpful_rate_val: float | None = None,
+        progress_rate_op: str = ">=",
+        progress_rate_val: float | None = None,
         satisfied_rate_op: str = ">=",
         satisfied_rate_val: float | None = None,
         negative_feedback_rate_op: str = ">=",
@@ -834,12 +843,32 @@ class DuckDBStore:
         date_to: str | None = None,
         limit: int = 100,
         offset: int = 0,
+        *,
+        progress_op: str | None = None,
+        progress_val: float | None = None,
+        satisfied_op: str | None = None,
+        satisfied_val: float | None = None,
+        negative_feedback_op: str | None = None,
+        negative_feedback_val: float | None = None,
     ) -> tuple[list[dict[str, Any]], int]:
         """Filter samples with parameterized query building."""
+        if progress_op is not None:
+            progress_rate_op = progress_op
+        if progress_val is not None:
+            progress_rate_val = progress_val
+        if satisfied_op is not None:
+            satisfied_rate_op = satisfied_op
+        if satisfied_val is not None:
+            satisfied_rate_val = satisfied_val
+        if negative_feedback_op is not None:
+            negative_feedback_rate_op = negative_feedback_op
+        if negative_feedback_val is not None:
+            negative_feedback_rate_val = negative_feedback_val
+
         builder = FilterQueryBuilder()
 
-        if helpful_rate_val is not None:
-            builder.add_condition("response_helpful_rate", ComparisonOp(helpful_rate_op), helpful_rate_val)
+        if progress_rate_val is not None:
+            builder.add_condition("response_progress_rate", ComparisonOp(progress_rate_op), progress_rate_val)
         if satisfied_rate_val is not None:
             builder.add_condition("user_satisfied_rate", ComparisonOp(satisfied_rate_op), satisfied_rate_val)
         if negative_feedback_rate_val is not None:
@@ -881,7 +910,7 @@ class DuckDBStore:
         query = f"""
              SELECT id, sample_uid, raw_json, user_query, assistant_response, empty_response, num_turns, expected_judgment_count,
                  expected_response_judgment_count, expected_episode_judgment_count, num_tool_calls,
-                  response_helpful_rate, response_unhelpful_rate, user_satisfied_rate,
+                  response_progress_rate, response_regress_rate, user_satisfied_rate,
                   user_negative_feedback_rate, tool_stats, session_merge_status, session_merge_keep,
                   session_merge_group_id, session_merge_group_size, session_merge_representative_uid,
                  session_merge_reason, session_merge_updated_at, processing_status, processing_updated_at

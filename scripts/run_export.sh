@@ -11,7 +11,7 @@ REPORT_PATH="data/export_report.json"
 EXPORT_FORMAT="raw_jsonl"
 
 # Leave empty to disable a filter.
-RESPONSE_HELPFUL_RATE=">=0.7"
+RESPONSE_PROGRESS_RATE=">=0.7"
 USER_SATISFIED_RATE=""
 USER_NEGATIVE_FEEDBACK_RATE=""
 SESSION_MERGE_KEEP="true"
@@ -67,8 +67,8 @@ args=(
   --export "${EXPORT_PATH}"
 )
 
-if [[ -n "${RESPONSE_HELPFUL_RATE}" ]]; then
-  args+=(--response-helpful-rate "${RESPONSE_HELPFUL_RATE}")
+if [[ -n "${RESPONSE_PROGRESS_RATE}" ]]; then
+  args+=(--response-progress-rate "${RESPONSE_PROGRESS_RATE}")
 fi
 
 if [[ -n "${USER_SATISFIED_RATE}" ]]; then

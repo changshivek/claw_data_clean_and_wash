@@ -28,17 +28,19 @@ claw-filter round-feedback --workers 32 --batch-size 50
 claw-filter stats
 
 # 4. 筛选导出
-claw-filter filter --response-helpful-rate ">=0.7" --export filtered.jsonl
+claw-filter filter --response-progress-rate ">=0.7" --export filtered.jsonl
 ```
 
 ## Bash 脚本
 
-项目根目录提供了两份可直接修改配置后执行的脚本：
+项目根目录提供了三份可直接修改配置后执行的脚本：
 
 - scripts/run_import_to_stats.sh
   覆盖 import -> pressure-test -> round-feedback -> stats 全流程。
 - scripts/run_export.sh
   覆盖 filter/export/report 流程。
+- scripts/validate_pipeline_100.sh
+  覆盖 100 条验证集的 import -> pressure-test preflight -> session-merge -> round-feedback -> stats -> export 全流程，并在成功后原子替换目标 DuckDB。
 
 使用方式：
 
@@ -46,6 +48,7 @@ claw-filter filter --response-helpful-rate ">=0.7" --export filtered.jsonl
 # 先修改脚本顶部 Configuration 区域
 bash scripts/run_import_to_stats.sh
 bash scripts/run_export.sh
+bash scripts/validate_pipeline_100.sh
 ```
 
 导入脚本可配置项包括：
@@ -67,7 +70,7 @@ bash scripts/run_export.sh
 - DB_PATH
 - EXPORT_PATH
 - REPORT_PATH
-- RESPONSE_HELPFUL_RATE
+- RESPONSE_PROGRESS_RATE
 - USER_SATISFIED_RATE
 - USER_NEGATIVE_FEEDBACK_RATE
 - EXPORT_FORMAT
@@ -78,9 +81,25 @@ bash scripts/run_export.sh
 - LIMIT
 - GENERATE_REPORT
 
+100 条验证脚本可配置项包括：
+- INPUT_FILE
+- DB_PATH
+- EXPORT_DIR
+- LLM_ENDPOINT
+- LLM_API_KEY
+- LLM_MODEL_ID
+- MAX_CONCURRENCY
+- BATCH_SIZE
+- LLM_TIMEOUT
+- SESSION_MERGE_WORKERS
+- SESSION_MERGE_BATCH_SIZE
+- SESSION_MERGE_MIN_PREFIX_TURNS
+- PYTHON_BIN
+
 脚本行为说明：
 - 当 `EXPORT_FORMAT=raw_jsonl` 时，默认输出文件名是 `data/exported.jsonl`。
 - 当 `EXPORT_FORMAT=openai_round_feedback` 且 `EXPORT_PATH` 仍保持默认值时，脚本会自动改写为 `data/exported_round_feedback.jsonl`，避免把两种格式写到同一个默认路径。
+- `scripts/validate_pipeline_100.sh` 会先做端点 preflight，并将中间结果写入临时 DB；只有整条链路成功后才会替换 `data/pipeline_e2e/e2e_100_progress.duckdb`，避免端点故障时误删现有验证库。
 
 ## 数据格式
 
@@ -170,17 +189,17 @@ claw-filter session-merge --workers 4 --batch-size 512 --min-prefix-turns 2
 
 | 维度 | 值 | 说明 |
 |------|-----|------|
-| **response_helpful** | yes/no/uncertain | assistant 当前响应单元对用户是否有帮助 |
+| **response_progress** | yes/no/uncertain | assistant step 是否让当前问题状态发生正向推进 |
 | **user_satisfied** | yes/no/uncertain/neutral | 用户对完整 assistant 交互 episode 是否满意 |
 
 目标设计采用两层级判定，而不是共用同一分轮边界：
 
-- response_helpful: 以 assistant 响应单元为对象。当前 assistant 的 text、tool 选择、参数构造、调用命令都属于被评判内容；它只能使用紧邻的下一跳反馈块作为证据，下一跳要么是 tool result block，要么是 user 消息。
+- response_progress: 以 assistant 响应单元为对象。当前 prompt 判断的是“这一步是否推进了当前问题”。当前 assistant 的 text、tool 选择、参数构造、调用命令都属于被评判内容；它主要使用紧邻反馈块作为证据，并可参考同一 episode 内最近 3 个前序 response steps 的压缩执行背景。
 - user_satisfied: 以上一轮 user 开始、到下一轮 user 之前结束的完整 assistant/tool 交互 episode 为对象；其证据窗口是该 episode 之后最多 3 条 user 文本消息，不包含后续 assistant。
 
 为什么要拆成两层：
 
-- response_helpful 关注的是 assistant 当下这一步是否做对了，证据应尽量局部、紧邻，避免把后续 assistant 的补救结果反向归功到前一跳。
+- response_progress 关注的是 assistant 当下这一步是否带来了正向推进，证据应尽量局部、紧邻；前序背景只用于帮助理解当前阶段，不能把前序或后续 assistant 的功劳反向归功到当前 step。
 - user_satisfied 关注的是用户是否接受了整段交互结果，天然应该覆盖一个 user episode 内的多步 assistant/tool 往返。
 - 两个指标的评判对象和反馈信号窗口不同，继续共用一套 judged turn 会把粒度混在一起，导致归因失真。
 - 当前实现已经去掉这层共用 judged turn，分别落到 response-step 与 user-episode 两种明细记录上。
@@ -192,7 +211,8 @@ claw-filter session-merge --workers 4 --batch-size 512 --min-prefix-turns 2
 - 无明确信号 → uncertain
 
 边界说明:
-- response_helpful 的边界是 assistant -> 紧邻反馈块。若 assistant 后面紧跟 tool 消息，则该 tool block 是反馈；若 assistant 后面直接进入 user，则该 user 是反馈。
+- response_progress 的边界仍然是 assistant -> 紧邻反馈块。若 assistant 后面紧跟 tool 消息，则该 tool block 是反馈；若 assistant 后面直接进入 user，则该 user 是反馈。
+- 为了帮助连续工具调用场景，step prompt 还会额外带入同一 episode 内最近 3 个前序 response steps 的压缩执行背景，内容仅包含 assistant_text_excerpt、assistant_reason_excerpt、tool_use_summary、tool_result_status_hint、tool_result_excerpt_100。
 - user_satisfied 的边界是 user episode：从某条 user 消息开始，到下一条 user 消息出现前的所有 assistant/tool 交互都属于同一 episode。
 - 导出、Web detail、样本级 rate 聚合与测试都已经按这套双层边界运行。
 
@@ -200,8 +220,8 @@ claw-filter session-merge --workers 4 --batch-size 512 --min-prefix-turns 2
 
 | 字段 | 来源 | 说明 |
 |------|------|------|
-| response_helpful_rate | samples | helpful=yes 比例，分母为 yes+no |
-| response_unhelpful_rate | samples | helpful=no 比例，分母为 yes+no |
+| response_progress_rate | samples | progress=yes 比例，分母为 yes+no |
+| response_regress_rate | samples | progress=no 比例，分母为 yes+no |
 | user_satisfied_rate | samples | satisfied=yes 比例，分母为 yes+no+neutral |
 | user_negative_feedback_rate | samples | satisfied=no 比例，分母为 yes+no+neutral |
 | empty_response | samples | 导入消息中是否只有 user、没有 assistant |
@@ -209,7 +229,7 @@ claw-filter session-merge --workers 4 --batch-size 512 --min-prefix-turns 2
 | has_error | samples.tool_stats | round feedback 是否含错误 |
 
 rate 计算说明:
-- response_helpful_rate 的分母不计入 uncertain。
+- response_progress_rate 的分母不计入 uncertain。
 - user_satisfied_rate 和 user_negative_feedback_rate 的分母不计入 uncertain，仅统计 yes、no、neutral。
 
 ## 存储结构
@@ -219,7 +239,7 @@ rate 计算说明:
 - samples
   记录 sample_uid、原始 JSON、empty_response 在内的派生字段、四个显式 rate 列、session_merge 标记列、tool_stats、processing_status 等样本级信息。
 - assistant_response_judgments
-  记录每个 assistant 响应单元的 response_helpful、feedback_kind、反馈块范围和 llm_error。
+  记录每个 assistant 响应单元的 response_progress、feedback_kind、反馈块范围和 llm_error。
 - user_episode_judgments
   记录每个 user episode 的 user_satisfied、signal_from_users、消息范围和 llm_error。
 
@@ -265,8 +285,8 @@ claw-filter round-feedback --workers 32 --batch-size 50
 ### Filter 选项
 
 ```bash
-# 按 response_helpful_rate 筛选
-claw-filter filter --response-helpful-rate ">=0.7" --export out.jsonl
+# 按 response_progress_rate 筛选
+claw-filter filter --response-progress-rate ">=0.7" --export out.jsonl
 
 # 按 user_satisfied_rate 筛选
 claw-filter filter --user-satisfied-rate ">=0.7" --export out.jsonl
@@ -284,13 +304,13 @@ claw-filter filter --empty-response true --export out.jsonl
 claw-filter filter --session-merge-status merged --export out.jsonl
 
 # 组合筛选
-claw-filter filter --response-helpful-rate ">=0.7" --user-satisfied-rate ">=0.5" --has-error false --export out.jsonl
+claw-filter filter --response-progress-rate ">=0.7" --user-satisfied-rate ">=0.5" --has-error false --export out.jsonl
 
 # 带统计报告
-claw-filter filter --response-helpful-rate ">=0.7" --export out.jsonl --report stats.json
+claw-filter filter --response-progress-rate ">=0.7" --export out.jsonl --report stats.json
 
 # 导出 OpenAI 兼容 + round feedback 侧挂 JSONL
-claw-filter filter --response-helpful-rate ">=0.7" --export-format openai_round_feedback --export out.jsonl
+claw-filter filter --response-progress-rate ">=0.7" --export-format openai_round_feedback --export out.jsonl
 ```
 
 实现说明:
@@ -309,7 +329,7 @@ claw-filter filter --response-helpful-rate ">=0.7" --export-format openai_round_
   - `source_metadata`: 从原始载荷中提取的时间、model requested、user agent、request id、trace id、metadata 等来源信息
   - `conversation.messages`: 规范化后的 OpenAI 兼容消息数组
   - `conversation.tools`: 规范化后的工具定义数组；OpenAI 原生 `tools` 会原样保留，Anthropic request-level `tools` 会被转换为 OpenAI function tools
-  - `round_feedback.response_helpful_steps`: 每个 assistant 响应单元的范围和 helpful judgment
+  - `round_feedback.response_progress_steps`: 每个 assistant 响应单元的范围和 progress judgment
   - `round_feedback.user_satisfied_episodes`: 每个 user episode 的范围和 satisfied judgment
 
 `metadata` 当前采用 sample_uid-first 口径：
@@ -321,7 +341,7 @@ claw-filter filter --response-helpful-rate ">=0.7" --export-format openai_round_
 - 如果源数据来自 UniRouter/Anthropic request body，顶层 `system` 会被前置转换为 OpenAI `system` message。
 - Anthropic `tool_use` / `tool_result` block 会被转换为 OpenAI 风格的 `assistant.tool_calls` 和 `tool` message。
 
-`round_feedback.response_helpful_steps` 中仅保留轻量侧挂信息：
+`round_feedback.response_progress_steps` 中仅保留轻量侧挂信息：
 - `response_index`
 - `episode_index`
 - `assistant_message_index`
@@ -329,7 +349,7 @@ claw-filter filter --response-helpful-rate ">=0.7" --export-format openai_round_
 - `feedback_message_start_index`
 - `feedback_message_end_index`
 - `feedback_payload`
-- `response_helpful`
+- `response_progress`
 - `llm_error`
 
 `round_feedback.user_satisfied_episodes` 中仅保留轻量侧挂信息：
@@ -346,6 +366,25 @@ range 语义说明：
 - `conversation.tools` 不参与 range 计算，因为它不在 `messages` 数组中。
 
 完整字段定义、示例记录、兼容性说明见 [docs/export-format.md](docs/export-format.md)。
+
+## 100 条验证集闭环
+
+当前仓库内置了面向 `data/pipeline_e2e/items_100.jsonl` 的完整闭环脚本：
+
+```bash
+LLM_ENDPOINT=http://182.242.159.76:31870/v1 \
+LLM_API_KEY=dummy \
+LLM_MODEL_ID=qwen35 \
+MAX_CONCURRENCY=16 \
+BATCH_SIZE=20 \
+bash scripts/validate_pipeline_100.sh
+```
+
+默认产物：
+- DuckDB: `data/pipeline_e2e/e2e_100_progress.duckdb`
+- OpenAI 兼容导出: `data/pipeline_e2e/validation_progress/exported_round_feedback.jsonl`
+- 原始导出: `data/pipeline_e2e/validation_progress/exported_raw.jsonl`
+- 报告: `data/pipeline_e2e/validation_progress/export_report_round_feedback.json`
 
 ## 老库回填
 

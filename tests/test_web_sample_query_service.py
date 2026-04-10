@@ -2,12 +2,42 @@
 
 import tempfile
 from pathlib import Path
+from unittest.mock import Mock
 
 from claw_data_filter.models.round_judgment import AssistantResponseJudgment, FeedbackKind, UserEpisodeJudgment
 from claw_data_filter.models.sample import Sample
 from claw_data_filter.storage.duckdb_store import DuckDBStore
 from claw_data_filter.web.services.sample_query_service import get_filtered_samples, get_samples_preview_page, get_table_preview
 from claw_data_filter.web.view_models.filter_list_view import FilterCriteria
+
+
+def test_get_filtered_samples_uses_current_filter_keyword_names():
+    store = Mock()
+    store.filter_samples.return_value = ([], 0)
+
+    get_filtered_samples(
+        store,
+        FilterCriteria(
+            progress_op="<=",
+            progress_val=0.4,
+            satisfied_op="!=",
+            satisfied_val=0.8,
+            negative_feedback_op=">=",
+            negative_feedback_val=0.2,
+        ),
+        page_index=2,
+        page_size=25,
+    )
+
+    _, kwargs = store.filter_samples.call_args
+    assert kwargs["progress_op"] == "<="
+    assert kwargs["progress_val"] == 0.4
+    assert kwargs["satisfied_op"] == "!="
+    assert kwargs["satisfied_val"] == 0.8
+    assert kwargs["negative_feedback_op"] == ">="
+    assert kwargs["negative_feedback_val"] == 0.2
+    assert kwargs["limit"] == 25
+    assert kwargs["offset"] == 25
 
 
 def test_get_samples_preview_page_returns_only_requested_page():
@@ -66,7 +96,7 @@ def test_get_table_preview_returns_rows_and_total_with_offset():
                 episode_index=0,
                 assistant_message_index=1,
                 feedback_kind=FeedbackKind.NONE,
-                response_helpful="uncertain",
+                response_progress="uncertain",
             )
         )
         store.insert_assistant_response_judgment(
@@ -79,7 +109,7 @@ def test_get_table_preview_returns_rows_and_total_with_offset():
                 feedback_message_start_index=2,
                 feedback_message_end_index=2,
                 feedback_payload=["good"],
-                response_helpful="yes",
+                response_progress="yes",
             )
         )
         store.insert_user_episode_judgment(
@@ -143,7 +173,7 @@ def test_get_filtered_samples_supports_session_merge_filters():
 
         rows, total = get_filtered_samples(
             store,
-            FilterCriteria(helpful_val=None, satisfied_val=None, session_merge_scope="merged", session_merge_status="merged"),
+            FilterCriteria(progress_val=None, satisfied_val=None, session_merge_scope="merged", session_merge_status="merged"),
             page_index=1,
             page_size=20,
         )
@@ -179,13 +209,13 @@ def test_get_filtered_samples_supports_empty_response_scope():
 
         empty_rows, empty_total = get_filtered_samples(
             store,
-            FilterCriteria(helpful_val=None, satisfied_val=None, empty_response_scope="empty_only"),
+            FilterCriteria(progress_val=None, satisfied_val=None, empty_response_scope="empty_only"),
             page_index=1,
             page_size=20,
         )
         normal_rows, normal_total = get_filtered_samples(
             store,
-            FilterCriteria(helpful_val=None, satisfied_val=None, empty_response_scope="non_empty_only"),
+            FilterCriteria(progress_val=None, satisfied_val=None, empty_response_scope="non_empty_only"),
             page_index=1,
             page_size=20,
         )

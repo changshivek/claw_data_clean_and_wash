@@ -14,11 +14,11 @@ def test_assistant_response_judgment_generates_stable_uid():
         assistant_message_index=5,
         feedback_kind=FeedbackKind.USER,
         feedback_payload=["谢谢"],
-        response_helpful="yes",
+        response_progress="yes",
     )
 
     assert judgment.judgment_uid == "resp:sample-1:2"
-    assert judgment.response_helpful == "yes"
+    assert judgment.response_progress == "yes"
 
 
 def test_user_episode_judgment_generates_stable_uid():
