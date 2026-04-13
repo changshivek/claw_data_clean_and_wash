@@ -170,6 +170,41 @@ def test_session_merge_command_supports_dry_run(monkeypatch):
         assert "Session Merge Summary" in result.output
 
 
+def test_import_command_supports_parallel_options(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    Path("data").mkdir()
+
+    db_path = Path("data/cli_parallel_import.duckdb")
+    input_file = Path("data/parallel_input.jsonl")
+    input_file.write_text(
+        """
+{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"hi"}]}
+{"messages":[{"role":"user","content":"again"},{"role":"assistant","content":"hello again"}]}
+        """.strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "--db-path",
+            str(db_path),
+            "import",
+            "--workers",
+            "2",
+            "--chunk-size",
+            "1",
+            str(input_file),
+        ],
+        obj={},
+    )
+
+    assert result.exit_code == 0
+    assert "Successfully imported 2 samples." in result.output
+
+
 def test_filter_command_accepts_negative_feedback_rate(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     Path("data").mkdir()

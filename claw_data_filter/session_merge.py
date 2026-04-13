@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import logging
 import multiprocessing
 import re
 from collections import Counter, defaultdict
@@ -22,6 +23,9 @@ from typing import Any, Iterable
 import duckdb
 
 from claw_data_filter.models.sample import extract_messages_from_payload
+
+logger = logging.getLogger(__name__)
+SESSION_MERGE_PROGRESS_LOG_INTERVAL = 10
 
 SENDER_WRAPPER_RE = re.compile(r"^Sender \(untrusted metadata\):\s*", re.IGNORECASE)
 TIMESTAMP_PREFIX_RE = re.compile(r"^\[[^\]]+GMT[+-]\d+\]\s*")
@@ -301,6 +305,7 @@ def _load_candidates(
     total = conn.execute("SELECT COUNT(*) FROM samples").fetchone()[0]
     candidates: list[SessionMergeCandidate] = []
     max_workers = max(1, workers)
+    total_batches = max(1, (total + batch_size - 1) // batch_size) if total else 0
     if max_workers > 1:
         executor = ProcessPoolExecutor(
             max_workers=max_workers,
@@ -309,13 +314,26 @@ def _load_candidates(
     else:
         executor = ThreadPoolExecutor(max_workers=max_workers)
     with executor:
-        for offset in range(0, total, batch_size):
+        for batch_index, offset in enumerate(range(0, total, batch_size), start=1):
             rows = conn.execute(
                 "SELECT sample_uid, id, CAST(raw_json AS VARCHAR), num_turns FROM samples ORDER BY id LIMIT ? OFFSET ?",
                 [batch_size, offset],
             ).fetchall()
             candidates.extend(executor.map(analyze_sample_row, rows))
+            if batch_index == 1 or batch_index % SESSION_MERGE_PROGRESS_LOG_INTERVAL == 0 or batch_index == total_batches:
+                logger.info(
+                    "Session merge candidate scan progress: batches=%s/%s loaded_candidates=%s total_samples=%s",
+                    batch_index,
+                    total_batches,
+                    len(candidates),
+                    total,
+                )
     return candidates
+
+
+def _iter_decision_batches(decisions: list[SessionMergeDecision], batch_size: int) -> Iterable[list[SessionMergeDecision]]:
+    for start in range(0, len(decisions), batch_size):
+        yield decisions[start:start + batch_size]
 
 
 def _build_summary(decisions: list[SessionMergeDecision], total_samples: int) -> dict[str, int]:
@@ -349,13 +367,23 @@ def run_session_merge(
     min_prefix_turns: int = 2,
 ) -> dict[str, int]:
     """Analyze imported samples and mark which session snapshots should flow onward."""
+    logger.info(
+        "Starting session merge: db_path=%s workers=%s batch_size=%s min_prefix_turns=%s dry_run=%s",
+        db_path,
+        workers,
+        batch_size,
+        min_prefix_turns,
+        dry_run,
+    )
     conn = duckdb.connect(str(db_path))
     try:
         ensure_session_merge_schema(conn)
         total_samples = conn.execute("SELECT COUNT(*) FROM samples").fetchone()[0]
+        logger.info("Session merge discovered total_samples=%s", total_samples)
         candidates = _load_candidates(conn, batch_size=batch_size, workers=workers)
         decisions = plan_session_merge(candidates, min_prefix_turns=min_prefix_turns)
         summary = _build_summary(decisions, total_samples)
+        logger.info("Session merge planning summary: %s", json.dumps(summary, ensure_ascii=False, sort_keys=True))
         if dry_run:
             return summary
 
@@ -374,35 +402,47 @@ def run_session_merge(
                     session_merge_updated_at = NULL
                 """
             )
-            conn.executemany(
-                """
-                UPDATE samples
-                SET session_merge_status = ?,
-                    session_merge_keep = ?,
-                    session_merge_group_id = ?,
-                    session_merge_group_size = ?,
-                    session_merge_representative_uid = ?,
-                    session_merge_reason = ?,
-                    session_merge_updated_at = ?
-                WHERE sample_uid = ?
-                """,
-                [
-                    (
-                        decision.status,
-                        decision.keep,
-                        decision.group_id,
-                        decision.group_size,
-                        decision.representative_uid,
-                        decision.reason,
-                        updated_at,
-                        decision.sample_uid,
+            total_batches = max(1, (len(decisions) + batch_size - 1) // batch_size) if decisions else 0
+            for index, decision_batch in enumerate(_iter_decision_batches(decisions, batch_size), start=1):
+                conn.executemany(
+                    """
+                    UPDATE samples
+                    SET session_merge_status = ?,
+                        session_merge_keep = ?,
+                        session_merge_group_id = ?,
+                        session_merge_group_size = ?,
+                        session_merge_representative_uid = ?,
+                        session_merge_reason = ?,
+                        session_merge_updated_at = ?
+                    WHERE sample_uid = ?
+                    """,
+                    [
+                        (
+                            decision.status,
+                            decision.keep,
+                            decision.group_id,
+                            decision.group_size,
+                            decision.representative_uid,
+                            decision.reason,
+                            updated_at,
+                            decision.sample_uid,
+                        )
+                        for decision in decision_batch
+                    ],
+                )
+                if index == 1 or index % SESSION_MERGE_PROGRESS_LOG_INTERVAL == 0 or index == total_batches:
+                    logger.info(
+                        "Session merge write progress: batches=%s/%s updated_rows=%s/%s",
+                        index,
+                        total_batches,
+                        min(index * batch_size, len(decisions)),
+                        len(decisions),
                     )
-                    for decision in decisions
-                ],
-            )
             conn.execute("COMMIT")
+            logger.info("Session merge write phase committed successfully")
         except Exception:
             conn.execute("ROLLBACK")
+            logger.exception("Session merge write phase rolled back due to an error")
             raise
         return summary
     finally:

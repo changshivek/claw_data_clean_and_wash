@@ -1,7 +1,8 @@
 """DuckDB storage layer for samples and evaluations."""
 import json
+import logging
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 import duckdb
 from datetime import datetime
 
@@ -11,6 +12,8 @@ from claw_data_filter.models.round_judgment import (
     AssistantResponseJudgment,
     UserEpisodeJudgment,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class DuckDBStore:
@@ -437,6 +440,39 @@ class DuckDBStore:
 
         raise RuntimeError("Failed to insert sample after retrying sequence synchronization")
 
+    def insert_sample_batch(self, rows: Sequence[tuple[Any, ...]]) -> int:
+        """Insert a batch of precomputed sample rows with a single writer transaction."""
+        if not rows:
+            return 0
+
+        before_count = self.conn.execute("SELECT COUNT(*) FROM samples").fetchone()[0]
+        for attempt in range(2):
+            self.conn.execute("BEGIN TRANSACTION")
+            try:
+                self.conn.executemany(
+                    """
+                    INSERT OR IGNORE INTO samples (
+                        id, sample_uid, raw_json, user_query, assistant_response, empty_response,
+                        num_turns, expected_judgment_count, expected_response_judgment_count,
+                        expected_episode_judgment_count, num_tool_calls, imported_at,
+                        processing_status, processing_updated_at
+                    )
+                    VALUES (nextval('sample_id_seq'), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    rows,
+                )
+                after_count = self.conn.execute("SELECT COUNT(*) FROM samples").fetchone()[0]
+                self.conn.execute("COMMIT")
+                return after_count - before_count
+            except Exception as exc:
+                self.conn.execute("ROLLBACK")
+                if attempt == 0 and "duplicate key" in str(exc).lower():
+                    self._sync_sequence_to_table_max("sample_id_seq", "samples", "id")
+                    continue
+                raise
+
+        raise RuntimeError("Failed to insert sample batch after retrying sequence synchronization")
+
     def _build_sample_record(self, row: tuple[Any, ...]) -> dict[str, Any]:
         tool_stats = json.loads(row[15]) if row[15] else None
         return {
@@ -498,7 +534,7 @@ class DuckDBStore:
             WHERE tool_stats IS NOT NULL
         """).fetchone()
 
-        return {
+        summary = {
             "total_samples": sample_count,
             "avg_response_progress_rate": stats[1] or 0,
             "avg_response_regress_rate": stats[2] or 0,
@@ -506,6 +542,8 @@ class DuckDBStore:
             "avg_user_negative_feedback_rate": stats[4] or 0,
             "error_count": stats[5] or 0,
         }
+        logger.info("Computed stats summary: %s", json.dumps(summary, ensure_ascii=False, sort_keys=True))
+        return summary
 
     def get_processed_count(self) -> int:
         """Count samples that finished round feedback processing."""
@@ -693,6 +731,7 @@ class DuckDBStore:
             "UPDATE samples SET tool_stats = ?, processing_status = 'failed', processing_updated_at = ? WHERE sample_uid = ?",
             [json.dumps(tool_stats), datetime.now(), sample_uid],
         )
+        logger.warning("Marked sample as failed: sample_uid=%s error_reason=%s", sample_uid, error_reason or "")
 
     def replace_round_feedback_results(
         self,
@@ -704,6 +743,13 @@ class DuckDBStore:
         tool_stats: dict,
     ) -> None:
         """Atomically replace a sample's round feedback results."""
+        logger.info(
+            "Replacing round feedback results: sample_uid=%s response_judgments=%s episode_judgments=%s has_error=%s",
+            sample_uid,
+            len(response_judgments),
+            len(episode_judgments),
+            bool(tool_stats.get("has_error")),
+        )
         self.conn.execute("BEGIN TRANSACTION")
         try:
             self.conn.execute("DELETE FROM assistant_response_judgments WHERE sample_uid = ?", [sample_uid])
@@ -743,12 +789,20 @@ class DuckDBStore:
             for judgment in episode_judgments:
                 self.insert_user_episode_judgment(judgment)
             self.conn.execute("COMMIT")
+            logger.info(
+                "Round feedback results committed: sample_uid=%s response_progress_rate=%s user_satisfied_rate=%s",
+                sample_uid,
+                tool_stats.get("response_progress_rate"),
+                tool_stats.get("user_satisfied_rate"),
+            )
         except Exception:
             self.conn.execute("ROLLBACK")
+            logger.exception("Round feedback result replacement rolled back: sample_uid=%s", sample_uid)
             raise
 
     def claim_unprocessed_samples(self, limit: int = 100) -> list[tuple[str, dict]]:
         """Claim pending or failed samples for round feedback processing."""
+        logger.info("Claiming unprocessed samples: limit=%s", limit)
         self.conn.execute("BEGIN TRANSACTION")
         try:
             rows = self.conn.execute(
@@ -773,8 +827,10 @@ class DuckDBStore:
             self.conn.execute("COMMIT")
         except Exception:
             self.conn.execute("ROLLBACK")
+            logger.exception("Failed to claim unprocessed samples")
             raise
 
+        logger.info("Claimed unprocessed samples: claimed=%s", len(rows))
         return [(row[0], json.loads(row[1])) for row in rows]
 
     def get_unprocessed_samples(self, limit: int = 100) -> list[tuple[str, dict]]:

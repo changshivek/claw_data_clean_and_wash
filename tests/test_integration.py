@@ -72,6 +72,37 @@ def test_import_evaluate_export_pipeline():
     print("Note: Skipping LLM evaluation and full pipeline (requires LLM server)")
 
 
+def test_parallel_importer_batches_and_deduplicates(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    Path("data").mkdir()
+
+    db_path = Path("data/test_parallel_import.duckdb")
+    input_file = Path("data/test_parallel_import.jsonl")
+    input_file.write_text(
+        """
+{"messages":[{"role":"user","content":"same"},{"role":"assistant","content":"reply"}]}
+{"messages":[{"role":"user","content":"same"},{"role":"assistant","content":"reply"}]}
+{"messages":[{"role":"user","content":"different"},{"role":"assistant","content":"reply2"}]}
+        """.strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    from claw_data_filter.importers.jsonl_importer import JSONLImporter
+    importer = JSONLImporter(db_path)
+    try:
+        import_count = importer.import_file(input_file, workers=2, chunk_size=1)
+    finally:
+        importer.close()
+
+    assert import_count == 2
+
+    from claw_data_filter.storage.duckdb_store import DuckDBStore
+    store = DuckDBStore(db_path)
+    assert store.get_sample_count() == 2
+    store.close()
+
+
 def test_all_imports_work():
     """Verify all major components can be imported."""
     from claw_data_filter.cli import cli

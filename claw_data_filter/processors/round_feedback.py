@@ -15,6 +15,7 @@ from claw_data_filter.models.round_judgment import AssistantResponseJudgment, Fe
 from claw_data_filter.models.sample import extract_messages_from_payload, extract_normalized_messages
 
 logger = logging.getLogger(__name__)
+PRESSURE_TEST_PROGRESS_LOG_INTERVAL = 50
 
 
 @dataclass(slots=True)
@@ -668,6 +669,7 @@ class RoundFeedbackProcessor:
         self.stats_aggregator = ToolStatsAggregator()
 
     async def process_sample(self, sample_uid: str, raw_json: dict[str, Any]) -> SampleJudgmentResult:
+        logger.info("Round feedback sample start: sample_uid=%s", sample_uid)
         messages = extract_messages_from_payload(raw_json)
         if not messages:
             tool_stats = {
@@ -682,6 +684,7 @@ class RoundFeedbackProcessor:
             }
             async with self.write_lock:
                 self.store.replace_round_feedback_results(sample_uid, 0, 0, [], [], tool_stats)
+            logger.warning("Round feedback sample has no messages: sample_uid=%s", sample_uid)
             return SampleJudgmentResult(sample_uid=sample_uid, response_judgments=[], episode_judgments=[], tool_stats=tool_stats)
 
         response_contexts = self.context_builder.extract_response_contexts(sample_uid, messages)
@@ -711,6 +714,15 @@ class RoundFeedbackProcessor:
                 episode_judgments,
                 tool_stats,
             )
+        logger.info(
+            "Round feedback sample complete: sample_uid=%s response_contexts=%s episode_contexts=%s has_error=%s response_progress_rate=%.4f user_satisfied_rate=%.4f",
+            sample_uid,
+            len(response_contexts),
+            len(episode_contexts),
+            bool(tool_stats.get("has_error")),
+            float(tool_stats.get("response_progress_rate", 0.0) or 0.0),
+            float(tool_stats.get("user_satisfied_rate", 0.0) or 0.0),
+        )
         return SampleJudgmentResult(
             sample_uid=sample_uid,
             response_judgments=response_judgments,
@@ -719,6 +731,8 @@ class RoundFeedbackProcessor:
         )
 
     async def process_batch(self, sample_batch: list[tuple[str, dict[str, Any]]]) -> tuple[int, int]:
+        logger.info("Round feedback batch start: batch_size=%s", len(sample_batch))
+
         async def process_one(sample_uid: str, raw_json: dict[str, Any]) -> bool:
             try:
                 await self.process_sample(sample_uid, raw_json)
@@ -731,6 +745,7 @@ class RoundFeedbackProcessor:
 
         results = await asyncio.gather(*(process_one(sample_uid, raw_json) for sample_uid, raw_json in sample_batch))
         success = sum(1 for item in results if item)
+        logger.info("Round feedback batch complete: batch_size=%s success=%s failures=%s", len(sample_batch), success, len(results) - success)
         return success, len(results) - success
 
     def _build_launch_plan(
@@ -827,6 +842,14 @@ class PressureTest:
         p95_latency_threshold: float = 10.0,
         p99_latency_threshold: float = 30.0,
     ) -> bool:
+        logger.info(
+            "Pressure test start: max_concurrency=%s duration=%s success_threshold=%.2f p95_threshold=%.2f p99_threshold=%.2f",
+            max_concurrency,
+            duration,
+            success_threshold,
+            p95_latency_threshold,
+            p99_latency_threshold,
+        )
         semaphore = asyncio.Semaphore(max(1, max_concurrency))
         results: list[tuple[bool, float]] = []
         start = time.perf_counter()
@@ -836,8 +859,12 @@ class PressureTest:
                 return await self._send_request()
 
         tasks: list[asyncio.Task[tuple[bool, float]]] = []
+        launched = 0
         while time.perf_counter() - start < duration:
             tasks.append(asyncio.create_task(bounded_request()))
+            launched += 1
+            if launched == 1 or launched % PRESSURE_TEST_PROGRESS_LOG_INTERVAL == 0:
+                logger.info("Pressure test launch progress: launched_requests=%s elapsed=%.2fs", launched, time.perf_counter() - start)
             await asyncio.sleep(0.1)
 
         for result in await asyncio.gather(*tasks, return_exceptions=True):
@@ -850,6 +877,14 @@ class PressureTest:
         latencies = sorted(latency for _, latency in results)
         p95 = latencies[int(len(latencies) * 0.95)] if latencies else 0.0
         p99 = latencies[int(len(latencies) * 0.99)] if latencies else 0.0
+
+        logger.info(
+            "Pressure test complete: requests=%s success_rate=%.4f p95=%.4f p99=%.4f",
+            len(results),
+            success_rate,
+            p95,
+            p99,
+        )
 
         if success_rate < success_threshold:
             return False

@@ -1,8 +1,13 @@
 """JSONL file importer."""
 import json
 import logging
+import multiprocessing
+import os
+from collections import deque
+from concurrent.futures import ProcessPoolExecutor
+from datetime import datetime
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, Sequence
 
 from claw_data_filter.models.sample import Sample
 from claw_data_filter.storage.duckdb_store import DuckDBStore
@@ -11,6 +16,66 @@ logger = logging.getLogger(__name__)
 
 # Allowed directories for I/O
 ALLOWED_IO_DIRS = ["data", "."]
+DEFAULT_IMPORT_WORKERS = 1
+DEFAULT_IMPORT_CHUNK_SIZE = 64
+IMPORT_PROGRESS_LOG_INTERVAL = 10
+
+
+def _build_insert_row_from_payload(data: dict) -> tuple:
+    sample = Sample.from_dict(data)
+    return (
+        sample.sample_uid,
+        json.dumps(sample.raw_json, ensure_ascii=False),
+        sample.user_query,
+        sample.assistant_response,
+        sample.empty_response,
+        sample.num_turns,
+        sample.expected_judgment_count,
+        sample.expected_response_judgment_count,
+        sample.expected_episode_judgment_count,
+        sample.num_tool_calls,
+        datetime.now(),
+        "pending",
+        datetime.now(),
+    )
+
+
+def _parse_jsonl_chunk(lines: Sequence[str], skip_errors: bool = True) -> tuple[list[tuple], int, int]:
+    rows: list[tuple] = []
+    errors = 0
+    non_empty_lines = 0
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        non_empty_lines += 1
+        try:
+            data = json.loads(stripped)
+            rows.append(_build_insert_row_from_payload(data))
+        except json.JSONDecodeError as exc:
+            errors += 1
+            logger.error(f"Chunk JSON decode error: {exc}")
+            if not skip_errors:
+                raise
+        except Exception as exc:
+            errors += 1
+            logger.error(f"Chunk processing error: {exc}")
+            if not skip_errors:
+                raise
+
+    return rows, errors, non_empty_lines
+
+
+def _iter_line_chunks(lines: Iterator[str], chunk_size: int) -> Iterator[list[str]]:
+    chunk: list[str] = []
+    for line in lines:
+        chunk.append(line)
+        if len(chunk) >= chunk_size:
+            yield chunk
+            chunk = []
+    if chunk:
+        yield chunk
 
 
 def _validate_input_path(path: Path) -> None:
@@ -39,7 +104,13 @@ class JSONLImporter:
     def __init__(self, db_path: Path):
         self.store = DuckDBStore(db_path)
 
-    def import_file(self, input_path: Path, skip_errors: bool = True) -> int:
+    def import_file(
+        self,
+        input_path: Path,
+        skip_errors: bool = True,
+        workers: int = DEFAULT_IMPORT_WORKERS,
+        chunk_size: int = DEFAULT_IMPORT_CHUNK_SIZE,
+    ) -> int:
         """Import JSONL file, return count of imported samples.
 
         Args:
@@ -50,35 +121,32 @@ class JSONLImporter:
             Number of successfully imported samples
         """
         _validate_input_path(input_path)
-        count = 0
-        errors = 0
-
+        try:
+            input_size = input_path.stat().st_size
+        except OSError:
+            input_size = None
+        logger.info(
+            "Starting JSONL import: path=%s workers=%s chunk_size=%s size_bytes=%s",
+            input_path,
+            workers,
+            chunk_size,
+            input_size if input_size is not None else "unknown",
+        )
         with open(input_path, "r", encoding="utf-8") as f:
-            for line_num, line in enumerate(f, 1):
-                line = line.strip()
-                if not line:
-                    continue
+            return self.import_lines(
+                f,
+                skip_errors=skip_errors,
+                workers=workers,
+                chunk_size=chunk_size,
+            )
 
-                try:
-                    data = json.loads(line)
-                    sample = Sample.from_dict(data)
-                    self.store.insert_sample(sample)
-                    count += 1
-                except json.JSONDecodeError as e:
-                    errors += 1
-                    logger.error(f"Line {line_num}: JSON decode error: {e}")
-                    if not skip_errors:
-                        raise
-                except Exception as e:
-                    errors += 1
-                    logger.error(f"Line {line_num}: Error processing line: {e}")
-                    if not skip_errors:
-                        raise
-
-        logger.info(f"Imported {count} samples, {errors} errors")
-        return count
-
-    def import_lines(self, lines: Iterator[str], skip_errors: bool = True) -> int:
+    def import_lines(
+        self,
+        lines: Iterator[str],
+        skip_errors: bool = True,
+        workers: int = DEFAULT_IMPORT_WORKERS,
+        chunk_size: int = DEFAULT_IMPORT_CHUNK_SIZE,
+    ) -> int:
         """Import from iterator of lines (for streaming).
 
         Args:
@@ -88,27 +156,83 @@ class JSONLImporter:
         Returns:
             Number of successfully imported samples
         """
-        count = 0
-        errors = 0
+        normalized_workers = max(1, int(workers or 1))
+        normalized_chunk_size = max(1, int(chunk_size or DEFAULT_IMPORT_CHUNK_SIZE))
 
-        for line_num, line in enumerate(lines, 1):
-            line = line.strip()
-            if not line:
-                continue
+        logger.info(
+            "Import configuration resolved: workers=%s chunk_size=%s mode=%s",
+            normalized_workers,
+            normalized_chunk_size,
+            "parallel" if normalized_workers > 1 else "serial",
+        )
 
-            try:
-                data = json.loads(line)
-                sample = Sample.from_dict(data)
-                self.store.insert_sample(sample)
-                count += 1
-            except Exception as e:
-                errors += 1
-                logger.error(f"Line {line_num}: Error: {e}")
-                if not skip_errors:
-                    raise
+        if normalized_workers == 1:
+            count, errors = self._import_serial_batched(lines, skip_errors, normalized_chunk_size)
+        else:
+            count, errors = self._import_parallel_batched(lines, skip_errors, normalized_workers, normalized_chunk_size)
 
         logger.info(f"Imported {count} samples, {errors} errors")
         return count
+
+    def _import_serial_batched(self, lines: Iterator[str], skip_errors: bool, chunk_size: int) -> tuple[int, int]:
+        count = 0
+        errors = 0
+        processed_lines = 0
+        for chunk_index, chunk in enumerate(_iter_line_chunks(lines, chunk_size), start=1):
+            rows, chunk_errors, line_count = _parse_jsonl_chunk(chunk, skip_errors=skip_errors)
+            errors += chunk_errors
+            processed_lines += line_count
+            count += self.store.insert_sample_batch(rows)
+            self._log_progress(chunk_index, processed_lines, count, errors)
+        return count, errors
+
+    def _import_parallel_batched(
+        self,
+        lines: Iterator[str],
+        skip_errors: bool,
+        workers: int,
+        chunk_size: int,
+    ) -> tuple[int, int]:
+        count = 0
+        errors = 0
+        processed_lines = 0
+        chunk_index = 0
+        max_pending = max(2, workers * 2)
+        pending = deque()
+
+        with ProcessPoolExecutor(
+            max_workers=workers,
+            mp_context=multiprocessing.get_context("spawn"),
+        ) as executor:
+            for chunk in _iter_line_chunks(lines, chunk_size):
+                pending.append(executor.submit(_parse_jsonl_chunk, chunk, skip_errors))
+                if len(pending) >= max_pending:
+                    rows, chunk_errors, line_count = pending.popleft().result()
+                    errors += chunk_errors
+                    processed_lines += line_count
+                    count += self.store.insert_sample_batch(rows)
+                    chunk_index += 1
+                    self._log_progress(chunk_index, processed_lines, count, errors)
+
+            while pending:
+                rows, chunk_errors, line_count = pending.popleft().result()
+                errors += chunk_errors
+                processed_lines += line_count
+                count += self.store.insert_sample_batch(rows)
+                chunk_index += 1
+                self._log_progress(chunk_index, processed_lines, count, errors)
+
+        return count, errors
+
+    def _log_progress(self, chunk_index: int, processed_lines: int, imported_count: int, errors: int) -> None:
+        if chunk_index == 1 or chunk_index % IMPORT_PROGRESS_LOG_INTERVAL == 0:
+            logger.info(
+                "Import progress: chunks=%s processed_lines=%s imported=%s errors=%s",
+                chunk_index,
+                processed_lines,
+                imported_count,
+                errors,
+            )
 
     def close(self):
         """Close underlying store."""
