@@ -465,6 +465,28 @@ def test_mark_sample_processing_failed_sets_failed_status():
         store.close()
 
 
+def test_mark_sample_processing_failed_persists_distinct_error_reason():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "failed_reason.db"
+        store = DuckDBStore(db_path)
+        sample_id = store.insert_sample(Sample.from_dict({
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi"},
+            ]
+        }))
+        sample_uid = store.get_sample_by_id(sample_id)["sample_uid"]
+
+        store.mark_sample_processing_failed(sample_uid, "user_satisfied_prompt_too_long_after_truncation")
+
+        tool_stats_raw = store.conn.execute(
+            "SELECT tool_stats FROM samples WHERE id = ?",
+            [sample_id],
+        ).fetchone()[0]
+        assert '"error_reason": "user_satisfied_prompt_too_long_after_truncation"' in tool_stats_raw
+        store.close()
+
+
 def test_filter_samples_returns_sample_dicts():
     """Test filter_samples returns parsed records and count."""
     with tempfile.TemporaryDirectory() as tmpdir:

@@ -16,6 +16,8 @@ from claw_data_filter.models.sample import extract_messages_from_payload, extrac
 
 logger = logging.getLogger(__name__)
 PRESSURE_TEST_PROGRESS_LOG_INTERVAL = 50
+DEFAULT_EPISODE_ROUND_LIMIT = 10
+DEFAULT_PROMPT_CHAR_LIMIT = 100_000
 
 
 @dataclass(slots=True)
@@ -63,6 +65,8 @@ class UserEpisodeContext:
     tool_results: list[str] = field(default_factory=list)
     signal_from_users: list[str] = field(default_factory=list)
     execution_trace: list[str] = field(default_factory=list)
+    total_rounds: int = 0
+    retained_rounds: int = 0
 
 
 @dataclass(slots=True)
@@ -138,6 +142,9 @@ class TurnContextBuilder:
         r'"ok"\s*:\s*true',
         r"\bexit code\s*[:=]?\s*0\b",
     )
+
+    def __init__(self, episode_round_limit: int = DEFAULT_EPISODE_ROUND_LIMIT):
+        self.episode_round_limit = max(1, episode_round_limit)
 
     def extract_response_contexts(self, sample_uid: str, messages: list[dict[str, Any]]) -> list[AssistantResponseContext]:
         events = self._normalize_messages(messages)
@@ -233,7 +240,7 @@ class TurnContextBuilder:
             assistant_messages: list[str] = []
             tool_calls: list[dict[str, Any]] = []
             tool_results: list[str] = []
-            execution_trace: list[str] = []
+            round_blocks: list[list[str]] = []
             last_message_index: int | None = None
 
             for event in events:
@@ -242,21 +249,33 @@ class TurnContextBuilder:
                 if next_user_index is not None and event.message_index >= next_user_index:
                     break
                 if event.role == "assistant":
+                    round_block: list[str] = []
                     if event.text:
                         assistant_messages.append(event.text)
-                        execution_trace.append(self._format_message("assistant", event.text))
+                        round_block.append(self._format_message("assistant", event.text))
+                    if event.reasoning:
+                        round_block.append(self._format_reasoning(event.reasoning))
                     for tool_call in event.tool_calls:
                         tool_calls.append(tool_call)
-                        execution_trace.append(self._format_tool_call(tool_call))
+                        round_block.append(self._format_tool_call(tool_call))
+                    if round_block:
+                        round_blocks.append(round_block)
                     last_message_index = event.message_index
                 elif event.role == "tool":
                     if event.text:
                         tool_results.append(event.text)
-                        execution_trace.append(self._format_tool_result(event.text))
+                        rendered_tool_result = self._format_tool_result(event.text)
+                        if round_blocks:
+                            round_blocks[-1].append(rendered_tool_result)
+                        else:
+                            round_blocks.append([rendered_tool_result])
                     last_message_index = event.message_index
 
             if not assistant_messages and not tool_calls and not tool_results:
                 continue
+
+            retained_round_blocks = round_blocks[-self.episode_round_limit :]
+            execution_trace = [item for block in retained_round_blocks for item in block]
 
             signal_from_users = [
                 candidate.text
@@ -275,6 +294,8 @@ class TurnContextBuilder:
                     tool_results=tool_results,
                     signal_from_users=signal_from_users,
                     execution_trace=execution_trace,
+                    total_rounds=len(round_blocks),
+                    retained_rounds=len(retained_round_blocks),
                 )
             )
 
@@ -282,7 +303,7 @@ class TurnContextBuilder:
 
     def build_response_progress_prompt(self, context: AssistantResponseContext) -> str:
         execution = "\n".join(context.execution_trace) if context.execution_trace else "(无 assistant 输出)"
-        feedback_payload = "\n".join(context.feedback_payload) if context.feedback_payload else "(无紧邻反馈块)"
+        feedback_payload = self._render_feedback_payload(context.feedback_kind, context.feedback_payload)
         execution_background = self._render_execution_background(context.prior_execution_background)
         feedback_label = {
             FeedbackKind.TOOL_RESULT: "紧邻 tool result",
@@ -334,6 +355,15 @@ class TurnContextBuilder:
 {signals}
 
 只输出一行：user_satisfied=yes|no|uncertain|neutral"""
+
+    def _render_feedback_payload(self, feedback_kind: FeedbackKind, feedback_payload: list[str]) -> str:
+        if not feedback_payload:
+            return "(无紧邻反馈块)"
+        if feedback_kind == FeedbackKind.USER:
+            return "\n".join(self._format_message("user", item) for item in feedback_payload)
+        if feedback_kind == FeedbackKind.TOOL_RESULT:
+            return "\n".join(self._format_tool_result(item) for item in feedback_payload)
+        return "\n".join(self._make_excerpt(item, 500) for item in feedback_payload)
 
     def _normalize_messages(self, messages: list[dict[str, Any]]) -> list[ConversationEvent]:
         normalized = extract_normalized_messages(messages)
@@ -653,17 +683,39 @@ class ToolStatsAggregator:
         }
 
 
+class PromptBudgetExceededError(RuntimeError):
+    """Raised when a prompt still exceeds the hard budget after truncation."""
+
+    def __init__(self, error_reason: str, sample_uid: str, prompt_length: int, prompt_limit: int):
+        self.error_reason = error_reason
+        self.sample_uid = sample_uid
+        self.prompt_length = prompt_length
+        self.prompt_limit = prompt_limit
+        super().__init__(
+            f"{error_reason}: sample_uid={sample_uid} prompt_length={prompt_length} prompt_limit={prompt_limit}"
+        )
+
+
 class RoundFeedbackProcessor:
     """Run dual-level round feedback judgments with a shared global concurrency budget."""
 
-    def __init__(self, store: Any, llm_client: Any, max_concurrency: int = 10, episode_min_share: float = 0.2):
+    def __init__(
+        self,
+        store: Any,
+        llm_client: Any,
+        max_concurrency: int = 10,
+        episode_min_share: float = 0.2,
+        episode_round_limit: int = DEFAULT_EPISODE_ROUND_LIMIT,
+        prompt_char_limit: int = DEFAULT_PROMPT_CHAR_LIMIT,
+    ):
         self.store = store
         self.llm = llm_client
         self.max_concurrency = max(1, max_concurrency)
         self.episode_min_share = min(max(episode_min_share, 0.0), 1.0)
+        self.prompt_char_limit = max(1, prompt_char_limit)
         self.semaphore = asyncio.Semaphore(self.max_concurrency)
         self.write_lock = asyncio.Lock()
-        self.context_builder = TurnContextBuilder()
+        self.context_builder = TurnContextBuilder(episode_round_limit=episode_round_limit)
         self.response_processor = ResponseProgressJudgmentProcessor(llm_client)
         self.episode_processor = UserSatisfiedJudgmentProcessor(llm_client)
         self.stats_aggregator = ToolStatsAggregator()
@@ -690,8 +742,12 @@ class RoundFeedbackProcessor:
         response_contexts = self.context_builder.extract_response_contexts(sample_uid, messages)
         episode_contexts = self.context_builder.extract_episode_contexts(sample_uid, messages)
         launch_plan = self._build_launch_plan(response_contexts, episode_contexts)
+        prepared_plan = self._prepare_launch_plan(launch_plan)
 
-        tasks = [asyncio.create_task(self._run_planned_task(kind, context)) for kind, context in launch_plan]
+        tasks = [
+            asyncio.create_task(self._run_planned_task(kind, context, prompt))
+            for kind, context, prompt in prepared_plan
+        ]
         response_judgments: list[AssistantResponseJudgment] = []
         episode_judgments: list[UserEpisodeJudgment] = []
 
@@ -740,7 +796,7 @@ class RoundFeedbackProcessor:
             except Exception as exc:
                 logger.exception("Failed to process sample %s", sample_uid)
                 async with self.write_lock:
-                    self.store.mark_sample_processing_failed(sample_uid, str(exc))
+                    self.store.mark_sample_processing_failed(sample_uid, self._derive_error_reason(exc))
                 return False
 
         results = await asyncio.gather(*(process_one(sample_uid, raw_json) for sample_uid, raw_json in sample_batch))
@@ -777,20 +833,65 @@ class RoundFeedbackProcessor:
 
         return plan
 
+    def _prepare_launch_plan(
+        self,
+        launch_plan: list[tuple[str, AssistantResponseContext | UserEpisodeContext]],
+    ) -> list[tuple[str, AssistantResponseContext | UserEpisodeContext, str]]:
+        prepared: list[tuple[str, AssistantResponseContext | UserEpisodeContext, str]] = []
+        for kind, context in launch_plan:
+            if kind == "response":
+                assert isinstance(context, AssistantResponseContext)
+                prompt = self.context_builder.build_response_progress_prompt(context)
+                self._ensure_prompt_within_limit(
+                    prompt,
+                    sample_uid=context.sample_uid,
+                    error_reason="response_progress_prompt_too_long_after_truncation",
+                )
+            else:
+                assert isinstance(context, UserEpisodeContext)
+                prompt = self.context_builder.build_user_satisfied_prompt(context)
+                self._ensure_prompt_within_limit(
+                    prompt,
+                    sample_uid=context.sample_uid,
+                    error_reason="user_satisfied_prompt_too_long_after_truncation",
+                )
+            prepared.append((kind, context, prompt))
+        return prepared
+
+    def _ensure_prompt_within_limit(self, prompt: str, sample_uid: str, error_reason: str) -> None:
+        prompt_length = len(prompt)
+        if prompt_length <= self.prompt_char_limit:
+            return
+        raise PromptBudgetExceededError(
+            error_reason=error_reason,
+            sample_uid=sample_uid,
+            prompt_length=prompt_length,
+            prompt_limit=self.prompt_char_limit,
+        )
+
+    def _derive_error_reason(self, exc: Exception) -> str:
+        error_reason = getattr(exc, "error_reason", "")
+        if error_reason:
+            return str(error_reason)
+        message = str(exc).strip()
+        if message:
+            return message
+        return exc.__class__.__name__
+
     async def _run_planned_task(
         self,
         kind: str,
         context: AssistantResponseContext | UserEpisodeContext,
+        prompt: str,
     ) -> AssistantResponseJudgment | UserEpisodeJudgment:
         async with self.semaphore:
             if kind == "response":
                 assert isinstance(context, AssistantResponseContext)
-                return await self._judge_response_context(context)
+                return await self._judge_response_context(context, prompt)
             assert isinstance(context, UserEpisodeContext)
-            return await self._judge_episode_context(context)
+            return await self._judge_episode_context(context, prompt)
 
-    async def _judge_response_context(self, context: AssistantResponseContext) -> AssistantResponseJudgment:
-        prompt = self.context_builder.build_response_progress_prompt(context)
+    async def _judge_response_context(self, context: AssistantResponseContext, prompt: str) -> AssistantResponseJudgment:
         result = await self.response_processor.judge(prompt)
         return AssistantResponseJudgment(
             sample_uid=context.sample_uid,
@@ -805,8 +906,7 @@ class RoundFeedbackProcessor:
             llm_error=result is None,
         )
 
-    async def _judge_episode_context(self, context: UserEpisodeContext) -> UserEpisodeJudgment:
-        prompt = self.context_builder.build_user_satisfied_prompt(context)
+    async def _judge_episode_context(self, context: UserEpisodeContext, prompt: str) -> UserEpisodeJudgment:
         result = await self.episode_processor.judge(prompt)
         return UserEpisodeJudgment(
             sample_uid=context.sample_uid,

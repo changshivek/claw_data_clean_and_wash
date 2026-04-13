@@ -162,6 +162,45 @@ def test_build_user_satisfied_prompt_uses_episode_and_later_user_signals():
     assert "只输出一行：user_satisfied=yes|no|uncertain|neutral" in prompt
 
 
+def test_extract_episode_contexts_keep_recent_ten_rounds_only():
+    from claw_data_filter.processors.round_feedback import TurnContextBuilder
+
+    messages = [{"role": "user", "content": "开始处理这个任务"}]
+    for index in range(12):
+        messages.append({"role": "assistant", "content": f"assistant round {index:02d}"})
+        messages.append({"role": "tool", "content": f"tool round {index:02d}"})
+
+    context = TurnContextBuilder(episode_round_limit=10).extract_episode_contexts("sample-rounds", messages)[0]
+    prompt = TurnContextBuilder(episode_round_limit=10).build_user_satisfied_prompt(context)
+
+    assert context.total_rounds == 12
+    assert context.retained_rounds == 10
+    assert "assistant round 00" not in prompt
+    assert "tool round 00" not in prompt
+    assert "assistant round 01" not in prompt
+    assert "tool round 01" not in prompt
+    assert "assistant round 11" in prompt
+    assert "tool round 11" in prompt
+
+
+def test_build_response_progress_prompt_truncates_feedback_payload_text():
+    from claw_data_filter.processors.round_feedback import TurnContextBuilder
+
+    messages = [
+        {"role": "user", "content": "帮我检查结果"},
+        {"role": "assistant", "content": "我先读取长输出。"},
+        {"role": "tool", "content": "X" * 900},
+    ]
+
+    builder = TurnContextBuilder()
+    context = builder.extract_response_contexts("sample-feedback", messages)[0]
+    prompt = builder.build_response_progress_prompt(context)
+
+    assert "X" * 600 not in prompt
+    assert "[tool_result]:" in prompt
+    assert "..." in prompt
+
+
 def test_extract_contexts_skip_empty_messages():
     from claw_data_filter.processors.round_feedback import TurnContextBuilder
 
@@ -285,4 +324,46 @@ async def test_process_sample_marks_unirouter_sample_complete(tmp_path):
     ).fetchone()
     assert row[0] == 3
     assert json.loads(row[1])["response_progress_rate"] == 1.0
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_process_batch_marks_sample_failed_when_prompt_still_too_long(tmp_path):
+    from claw_data_filter.models.sample import Sample
+    from claw_data_filter.processors.round_feedback import RoundFeedbackProcessor
+    from claw_data_filter.storage.duckdb_store import DuckDBStore
+
+    class UnexpectedLLMCall:
+        async def chat(self, messages, max_tokens=50):
+            raise AssertionError("LLM should not be called for over-budget prompts")
+
+    store = DuckDBStore(tmp_path / "round_feedback_over_budget.duckdb")
+    raw_json = {
+        "messages": [
+            {"role": "user", "content": "请总结这段执行"},
+            {"role": "assistant", "content": "A" * 500},
+            {"role": "tool", "content": "B" * 500},
+            {"role": "assistant", "content": "C" * 500},
+            {"role": "tool", "content": "D" * 500},
+        ]
+    }
+
+    sample_id = store.insert_sample(Sample.from_dict(raw_json))
+    sample_uid = store.get_sample_by_id(sample_id)["sample_uid"]
+    processor = RoundFeedbackProcessor(store, UnexpectedLLMCall(), max_concurrency=2, prompt_char_limit=700)
+
+    success, failures = await processor.process_batch([(sample_uid, raw_json)])
+
+    row = store.conn.execute(
+        "SELECT processing_status, tool_stats FROM samples WHERE sample_uid = ?",
+        [sample_uid],
+    ).fetchone()
+    tool_stats = json.loads(row[1])
+
+    assert success == 0
+    assert failures == 1
+    assert row[0] == "failed"
+    assert tool_stats["error_reason"] == "user_satisfied_prompt_too_long_after_truncation"
+    assert store.get_assistant_response_judgments(sample_uid) == []
+    assert store.get_user_episode_judgments(sample_uid) == []
     store.close()

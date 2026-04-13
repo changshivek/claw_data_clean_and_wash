@@ -99,3 +99,22 @@
    - 最终 prompt 超过 `100000` 字符时直接标记失败，并带上明确原因
 2. 再基于保留库中的 22 条重型 `processing` 样本做针对性抽样验证，观察是否仍会形成超长 prompt。
 3. 若急救补丁有效，再基于保留库补跑剩余 `1231` 条 round-feedback，之后再执行 `stats`。
+
+### 2026-04-13 急救补丁执行进展
+
+- 已完成代码实现:
+   - `claw_data_filter/processors/round_feedback.py` 已加入 `episode_round_limit=10` 的执行链裁剪，保留最近 10 轮 assistant/tool 执行链进入 `user_satisfied` prompt。
+   - `response_progress` prompt 的紧邻反馈块已改为走统一截断渲染，不再把原始超长全文直接拼入 prompt。
+   - `RoundFeedbackProcessor` 已加入 `prompt_char_limit=100000` 的硬闸门；若裁剪后仍超长，会在发起 LLM 请求前直接失败，并通过 `error_reason` 区分为 `response_progress_prompt_too_long_after_truncation` 或 `user_satisfied_prompt_too_long_after_truncation`。
+
+- 已完成测试验证:
+   - 定向测试 `tests/test_round_feedback.py`、`tests/test_duckdb_store.py` 已通过，当前为 `39 passed`。
+   - 已补充覆盖 episode 最近 10 轮裁剪、反馈块截断、超预算 fail-fast、失败原因入库等路径。
+
+- 已完成保留库离线核验:
+   - 针对保留库中原先卡住的 `22` 条 `processing` 重型样本，使用新逻辑离线构造 prompt 并计算长度，结果 `over_limit_rows=0`。
+   - 该批样本中观测到的最大 `response_progress` prompt 长度约 `5237` 字符，最大 `user_satisfied` prompt 长度约 `10046` 字符，均明显低于 `100000` 字符硬上限。
+
+- 下一步:
+   - 直接基于保留库重置残留 `processing` 状态并补跑剩余 `1231` 条 round-feedback。
+   - round-feedback 跑完后继续执行 `stats`，再评估是否需要进入更系统的 token 预算方案开发。
