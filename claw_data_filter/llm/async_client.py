@@ -1,10 +1,22 @@
 """Async LLM API client for high-concurrency round judgment calls."""
 import logging
+import re
 from typing import Any
 
 import httpx
 
 logger = logging.getLogger(__name__)
+
+
+def _compact_text(value: str, limit: int = 800) -> str:
+    compact = re.sub(r"\s+", " ", value or "").strip()
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 3] + "..."
+
+
+class LLMRequestError(RuntimeError):
+    """Structured request failure surfaced to round-feedback retry logic."""
 
 
 class AsyncLLMClient:
@@ -37,7 +49,10 @@ class AsyncLLMClient:
         headers = {}
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
-        self.client = httpx.AsyncClient(timeout=timeout, headers=headers)
+        self.client = httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=min(10.0, timeout), read=timeout, write=timeout, pool=timeout),
+            headers=headers,
+        )
 
     async def chat(
         self,
@@ -72,11 +87,26 @@ class AsyncLLMClient:
         # chat_template_kwargs must be at top level, not in extra_body
         payload["chat_template_kwargs"] = {"enable_thinking": False}
 
-        response = await self.client.post(
-            f"{self.endpoint}/chat/completions",
-            json=payload,
-        )
-        response.raise_for_status()
+        try:
+            response = await self.client.post(
+                f"{self.endpoint}/chat/completions",
+                json=payload,
+            )
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            response_text = _compact_text(exc.response.text)
+            raise LLMRequestError(
+                f"HTTP {exc.response.status_code} from {exc.request.url}; body={response_text or '<empty>'}"
+            ) from exc
+        except httpx.TimeoutException as exc:
+            raise LLMRequestError(
+                f"{exc.__class__.__name__} after {self.timeout:.1f}s for {self.endpoint}/chat/completions"
+            ) from exc
+        except httpx.RequestError as exc:
+            raise LLMRequestError(
+                f"{exc.__class__.__name__} contacting {self.endpoint}/chat/completions: {exc!r}"
+            ) from exc
+
         data = response.json()
         content = data["choices"][0]["message"].get("content")
         if content is None:

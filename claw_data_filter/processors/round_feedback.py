@@ -566,9 +566,17 @@ class TurnContextBuilder:
 class ResponseProgressJudgmentProcessor:
     """LLM processor for assistant response progress."""
 
-    def __init__(self, llm_client: Any, max_retries: int = 2):
+    def __init__(
+        self,
+        llm_client: Any,
+        max_retries: int = 2,
+        retry_base_delay: float = 5.0,
+        retry_max_delay: float = 30.0,
+    ):
         self.llm = llm_client
         self.max_retries = max_retries
+        self.retry_base_delay = max(0.1, retry_base_delay)
+        self.retry_max_delay = max(self.retry_base_delay, retry_max_delay)
 
     async def judge(self, prompt: str) -> str | None:
         return await self._call_llm_with_retry(prompt, self._parse_response)
@@ -582,12 +590,23 @@ class ResponseProgressJudgmentProcessor:
                     return result
                 logger.warning("Attempt %s: failed to parse response progress output", attempt + 1)
             except Exception as exc:
-                logger.warning("Attempt %s: response progress LLM call failed: %s", attempt + 1, exc)
+                retry_delay = self._retry_delay(attempt)
+                logger.warning(
+                    "Attempt %s/%s: response progress LLM call failed: %s (%s)%s",
+                    attempt + 1,
+                    self.max_retries + 1,
+                    exc,
+                    exc.__class__.__name__,
+                    f"; retry_in={retry_delay:.1f}s" if attempt < self.max_retries else "",
+                )
                 if attempt < self.max_retries:
-                    await asyncio.sleep(2**attempt)
+                    await asyncio.sleep(retry_delay)
                 else:
                     return None
         return None
+
+    def _retry_delay(self, attempt: int) -> float:
+        return min(self.retry_max_delay, self.retry_base_delay * (2**attempt))
 
     def _parse_response(self, response: str) -> str | None:
         return _parse_judgment_label(response, "response_progress", ["yes", "no", "uncertain"])
@@ -596,9 +615,17 @@ class ResponseProgressJudgmentProcessor:
 class UserSatisfiedJudgmentProcessor:
     """LLM processor for user episode satisfaction."""
 
-    def __init__(self, llm_client: Any, max_retries: int = 2):
+    def __init__(
+        self,
+        llm_client: Any,
+        max_retries: int = 2,
+        retry_base_delay: float = 5.0,
+        retry_max_delay: float = 30.0,
+    ):
         self.llm = llm_client
         self.max_retries = max_retries
+        self.retry_base_delay = max(0.1, retry_base_delay)
+        self.retry_max_delay = max(self.retry_base_delay, retry_max_delay)
 
     async def judge(self, prompt: str) -> str | None:
         return await self._call_llm_with_retry(prompt, self._parse_response)
@@ -612,12 +639,23 @@ class UserSatisfiedJudgmentProcessor:
                     return result
                 logger.warning("Attempt %s: failed to parse user satisfied output", attempt + 1)
             except Exception as exc:
-                logger.warning("Attempt %s: user satisfied LLM call failed: %s", attempt + 1, exc)
+                retry_delay = self._retry_delay(attempt)
+                logger.warning(
+                    "Attempt %s/%s: user satisfied LLM call failed: %s (%s)%s",
+                    attempt + 1,
+                    self.max_retries + 1,
+                    exc,
+                    exc.__class__.__name__,
+                    f"; retry_in={retry_delay:.1f}s" if attempt < self.max_retries else "",
+                )
                 if attempt < self.max_retries:
-                    await asyncio.sleep(2**attempt)
+                    await asyncio.sleep(retry_delay)
                 else:
                     return None
         return None
+
+    def _retry_delay(self, attempt: int) -> float:
+        return min(self.retry_max_delay, self.retry_base_delay * (2**attempt))
 
     def _parse_response(self, response: str) -> str | None:
         return _parse_judgment_label(response, "user_satisfied", ["yes", "no", "uncertain", "neutral"])
@@ -707,6 +745,9 @@ class RoundFeedbackProcessor:
         episode_min_share: float = 0.2,
         episode_round_limit: int = DEFAULT_EPISODE_ROUND_LIMIT,
         prompt_char_limit: int = DEFAULT_PROMPT_CHAR_LIMIT,
+        llm_max_retries: int = 2,
+        llm_retry_base_delay: float = 5.0,
+        llm_retry_max_delay: float = 30.0,
     ):
         self.store = store
         self.llm = llm_client
@@ -716,8 +757,18 @@ class RoundFeedbackProcessor:
         self.semaphore = asyncio.Semaphore(self.max_concurrency)
         self.write_lock = asyncio.Lock()
         self.context_builder = TurnContextBuilder(episode_round_limit=episode_round_limit)
-        self.response_processor = ResponseProgressJudgmentProcessor(llm_client)
-        self.episode_processor = UserSatisfiedJudgmentProcessor(llm_client)
+        self.response_processor = ResponseProgressJudgmentProcessor(
+            llm_client,
+            max_retries=llm_max_retries,
+            retry_base_delay=llm_retry_base_delay,
+            retry_max_delay=llm_retry_max_delay,
+        )
+        self.episode_processor = UserSatisfiedJudgmentProcessor(
+            llm_client,
+            max_retries=llm_max_retries,
+            retry_base_delay=llm_retry_base_delay,
+            retry_max_delay=llm_retry_max_delay,
+        )
         self.stats_aggregator = ToolStatsAggregator()
 
     async def process_sample(self, sample_uid: str, raw_json: dict[str, Any]) -> SampleJudgmentResult:

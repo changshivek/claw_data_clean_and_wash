@@ -1,12 +1,23 @@
+import logging
 from click.testing import CliRunner
 from pathlib import Path
 import tempfile
 
 import duckdb
 
-from claw_data_filter.cli import cli
+from claw_data_filter.cli import _configure_logging, cli
 from claw_data_filter.exporters.unified_exporter import OPENAI_ROUND_FEEDBACK
 from claw_data_filter.importers.jsonl_importer import JSONLImporter
+
+
+def test_configure_logging_suppresses_http_client_info_logs():
+    logging.getLogger("httpx").setLevel(logging.INFO)
+    logging.getLogger("httpcore").setLevel(logging.INFO)
+
+    _configure_logging()
+
+    assert logging.getLogger("httpx").level == logging.WARNING
+    assert logging.getLogger("httpcore").level == logging.WARNING
 
 
 def test_filter_command_accepts_has_error_only(tmp_path, monkeypatch):

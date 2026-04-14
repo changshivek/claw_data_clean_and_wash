@@ -1,6 +1,7 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from claw_data_filter.llm.async_client import AsyncLLMClient
+import httpx
 
 @pytest.mark.asyncio
 async def test_async_client_initialization():
@@ -49,4 +50,20 @@ async def test_chat_includes_model_when_configured():
 
     await client.close()
 
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_raises_error_with_http_status_body_details():
+    client = AsyncLLMClient(endpoint="http://localhost:8000/v1")
+
+    request = httpx.Request("POST", "http://localhost:8000/v1/chat/completions")
+    response = httpx.Response(503, request=request, text='{"error":"kv cache exhausted"}')
+    http_error = httpx.HTTPStatusError("boom", request=request, response=response)
+
+    with patch.object(client.client, "post", AsyncMock(side_effect=http_error)):
+        with pytest.raises(RuntimeError, match="HTTP 503") as exc_info:
+            await client.chat([{"role": "user", "content": "test"}])
+
+    assert "kv cache exhausted" in str(exc_info.value)
     await client.close()

@@ -257,6 +257,34 @@ def test_user_satisfied_parser_accepts_expected_values():
     assert processor._parse_response("invalid") is None
 
 
+@pytest.mark.asyncio
+async def test_response_progress_retry_uses_configured_backoff(monkeypatch):
+    from claw_data_filter.processors.round_feedback import ResponseProgressJudgmentProcessor
+
+    sleep_calls = []
+
+    async def fake_sleep(delay):
+        sleep_calls.append(delay)
+
+    class FlakyLLM:
+        def __init__(self):
+            self.calls = 0
+
+        async def chat(self, messages, max_tokens=50):
+            self.calls += 1
+            if self.calls < 3:
+                raise RuntimeError("temporary failure")
+            return "response_progress=yes"
+
+    monkeypatch.setattr("claw_data_filter.processors.round_feedback.asyncio.sleep", fake_sleep)
+
+    processor = ResponseProgressJudgmentProcessor(FlakyLLM(), max_retries=3, retry_base_delay=5.0, retry_max_delay=12.0)
+    result = await processor.judge("prompt")
+
+    assert result == "yes"
+    assert sleep_calls == [5.0, 10.0]
+
+
 def test_tool_stats_aggregator_uses_dual_denominators():
     from claw_data_filter.models.round_judgment import AssistantResponseJudgment, FeedbackKind, UserEpisodeJudgment
     from claw_data_filter.processors.round_feedback import ToolStatsAggregator

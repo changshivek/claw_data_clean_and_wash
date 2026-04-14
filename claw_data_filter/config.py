@@ -16,6 +16,8 @@ class Config(BaseModel):
     # Round feedback specific
     max_concurrency: int = 10
     llm_timeout: float = 60.0
+    llm_retry_base_delay: float = 5.0
+    llm_retry_max_delay: float = 30.0
     context_window: int = 4096
 
     @classmethod
@@ -30,5 +32,7 @@ class Config(BaseModel):
             max_retries=int(os.getenv("MAX_RETRIES", 3)),
             max_concurrency=int(os.getenv("MAX_CONCURRENCY", 10)),
             llm_timeout=float(os.getenv("LLM_TIMEOUT", 60.0)),
+            llm_retry_base_delay=float(os.getenv("LLM_RETRY_BASE_DELAY", 5.0)),
+            llm_retry_max_delay=float(os.getenv("LLM_RETRY_MAX_DELAY", 30.0)),
             context_window=int(os.getenv("CONTEXT_WINDOW", 4096)),
         )

@@ -20,10 +20,18 @@ from claw_data_filter.exporters.unified_exporter import (
 from claw_data_filter.importers.jsonl_importer import JSONLImporter
 from claw_data_filter.storage.duckdb_store import DuckDBStore
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
+
+def _configure_logging() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
+    # Keep third-party HTTP client noise out of long-running rebuild logs.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+
+_configure_logging()
 logger = logging.getLogger(__name__)
 
 def _shared_cpu_budget(max_cap: int | None = None) -> int:
@@ -267,7 +275,14 @@ def round_feedback(ctx, workers, batch_size):
         )
 
         store = DuckDBStore(config.db_path)
-        processor = RoundFeedbackProcessor(store, llm, config.max_concurrency)
+        processor = RoundFeedbackProcessor(
+            store,
+            llm,
+            config.max_concurrency,
+            llm_max_retries=config.max_retries,
+            llm_retry_base_delay=config.llm_retry_base_delay,
+            llm_retry_max_delay=config.llm_retry_max_delay,
+        )
 
         try:
             total_success = 0

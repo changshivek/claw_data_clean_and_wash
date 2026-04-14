@@ -73,6 +73,8 @@ def test_config_round_feedback_defaults():
     config = Config()
     assert config.max_concurrency == 10
     assert config.llm_timeout == 60.0
+    assert config.llm_retry_base_delay == 5.0
+    assert config.llm_retry_max_delay == 30.0
     assert config.context_window == 4096
 
 
@@ -81,14 +83,20 @@ def test_config_from_env_round_feedback():
     import os
     os.environ["MAX_CONCURRENCY"] = "20"
     os.environ["LLM_TIMEOUT"] = "30.0"
+    os.environ["LLM_RETRY_BASE_DELAY"] = "7.0"
+    os.environ["LLM_RETRY_MAX_DELAY"] = "45.0"
     os.environ["CONTEXT_WINDOW"] = "8192"
 
     config = Config.from_env()
     assert config.max_concurrency == 20
     assert config.llm_timeout == 30.0
+    assert config.llm_retry_base_delay == 7.0
+    assert config.llm_retry_max_delay == 45.0
     assert config.context_window == 8192
 
     # Cleanup
     del os.environ["MAX_CONCURRENCY"]
     del os.environ["LLM_TIMEOUT"]
+    del os.environ["LLM_RETRY_BASE_DELAY"]
+    del os.environ["LLM_RETRY_MAX_DELAY"]
     del os.environ["CONTEXT_WINDOW"]

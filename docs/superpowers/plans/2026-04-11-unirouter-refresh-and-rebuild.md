@@ -118,3 +118,130 @@
 - 下一步:
    - 直接基于保留库重置残留 `processing` 状态并补跑剩余 `1231` 条 round-feedback。
    - round-feedback 跑完后继续执行 `stats`，再评估是否需要进入更系统的 token 预算方案开发。
+
+### 2026-04-13 保库停机快照（vLLM 再次异常后）
+
+- 已执行保库停止:
+   - 当前补跑进程已停止，保留库仍为 `data/unirouter_refresh/unirouter_refresh_preserved_after_vllm_crash_20260413_1702.duckdb`。
+   - 本轮补跑日志停在 `data/unirouter_refresh/logs/preserved_resume_retry_20260413_181527.log`，最后一段日志再次出现连续 `All connection attempts failed`，说明停止原因仍是 vLLM 端点异常，而不是 prompt 超长保护触发。
+
+- 停机时保留库状态:
+   - `session_merge_keep=TRUE` 范围内当前状态为: `completed=5031`、`pending=927`、`processing=51`。
+   - 仍需继续处理的 kept 样本总数为 `978`。
+   - `completed` 中当前 `has_error=false` 为 `5009`，`has_error=true` 为 `22`。
+   - `completed && has_error=true` 的原因分布为: `no_messages=20`、`error_reason为空=2`。
+   - 当前 `failed` 状态样本为 `0`。
+
+- 当前统计快照（kept 样本、且已有 `tool_stats`）:
+   - `avg_response_progress_rate=0.46668750497474204`
+   - `avg_response_regress_rate=0.0952991981930318`
+   - `avg_user_satisfied_rate=0.12069702603775835`
+   - `avg_user_negative_feedback_rate=0.3468783947198448`
+   - `has_error` 样本数为 `50`
+
+- 后续续跑建议:
+   - 等 vLLM 新镜像更新完毕后，先确认端点稳定，再将残留 `processing=51` 复位为 `pending` 后继续补跑。
+   - 视新镜像恢复情况，再决定是否把 `completed && has_error=true && error_reason为空` 的 2 条样本一起复位重跑；`no_messages=20` 可继续保留，不必重跑。
+
+### 2026-04-14 超时 / 重试策略排查与修正
+
+- 排查结论:
+   - 当前 `round-feedback` 并不是因为 `LLM_TIMEOUT=60s` 这一项单独过短而立刻失败，主要问题在于失败后的回退等待过短。
+   - 原实现里，单次调用失败后只按 `1s -> 2s` 退避，且 `Config.max_retries` 没有真正传到 `RoundFeedbackProcessor`，导致运行时即便配置了更保守的重试策略，实际仍按处理器默认值执行。
+   - 在 vLLM 出现 `kvcache` 紧张或瞬时抖动时，这种短退避会让同一批请求迅速回打，容易把服务从“抖动”放大为“雪崩”。
+
+- 已完成代码修正:
+   - `config.max_retries` 现已接入 `round-feedback` 实际处理链路。
+   - 新增可配置退避参数:
+      - `LLM_RETRY_BASE_DELAY`，默认 `5s`
+      - `LLM_RETRY_MAX_DELAY`，默认 `30s`
+   - `ResponseProgressJudgmentProcessor` / `UserSatisfiedJudgmentProcessor` 的重试等待已改为指数退避上限模式，而不是原来的 `1s/2s`。
+   - `AsyncLLMClient` 现在会把 vLLM 的真实 HTTP 状态码和响应体摘要带进异常消息；例如后续若返回 `503` 或明确的 `kvcache exhausted` 文本，日志里会直接看到，不再只剩空白 warning。
+
+- 验证情况:
+   - 定向测试 `tests/test_async_client.py`、`tests/test_config.py`、`tests/test_round_feedback.py` 已通过，结果为 `26 passed`。
+
+### 2026-04-14 32 并发补跑失败快照（vLLM 再次掉线）
+
+- 运行结果:
+   - 本轮 `32` 并发补跑在执行中后段再次遇到 `All connection attempts failed`，说明 vLLM 端点在运行过程中掉线。
+   - 失败窗口内，处理器按新退避策略走到了 `Attempt 4/4`，日志中能直接看到 `ConnectError contacting http://182.242.159.76:31866/v1/chat/completions`，说明新的错误可观测性已经生效。
+   - `round-feedback` 进程随后在写回失败样本时触发 DuckDB 内部致命错误并退出，不是正常收尾退出。
+
+- 新暴露的问题:
+   - 终端末尾出现 DuckDB `PRIMARY KEY or UNIQUE constraint violation`，冲突键为 `resp:e53b29a761f6a6e142b92038f59917c68fb8252b508b62c02bb99df7a675c0a2:0`。
+   - 该错误发生在 `Replacing round feedback results` 之后、事务提交阶段，说明当前除了 vLLM 稳定性外，还需要继续排查 round-feedback 失败样本回写时的重复插入/事务回滚一致性问题。
+
+- 当前保留库状态:
+   - `session_merge_keep=TRUE` 范围内当前状态为: `completed=5091`、`pending=909`、`processing=9`。
+   - 相比 32 并发启动前的 `completed=5068 / pending=941`，本轮至少净推进了 `23` 条 kept 样本。
+   - `has_error=true` 当前为 `26` 条；原因分布为 `no_messages=20`、`error_reason为空=6`。
+
+- stats 快照:
+   - 虽然 `round-feedback` 失败退出，但命令链路里的 `stats` 仍已执行完成。
+   - 当前输出为:
+      - `avg_response_progress_rate=0.4653583076811547`
+      - `avg_response_regress_rate=0.09449400479455392`
+      - `avg_user_satisfied_rate=0.11969928708759765`
+      - `avg_user_negative_feedback_rate=0.34632803248644917`
+      - `error_count=26`
+      - `total_samples=43728`
+
+- 本次顺手改进:
+   - CLI 日志初始化已下调第三方 HTTP 客户端日志级别，后续 `httpx` / `httpcore` 的 `200 OK` 信息不会再刷满日志，只保留 `WARNING` 及以上事件。
+
+### 2026-04-14 round-feedback 库内结果排查汇总
+
+- 当前 kept 样本状态:
+   - 基于保留库 `data/unirouter_refresh/unirouter_refresh_preserved_after_vllm_crash_20260413_1702.duckdb`，`session_merge_keep=TRUE` 范围内当前状态为: `completed=5091`、`pending=909`、`processing=9`。
+   - 当前并不是“大量样本都已经被 LLM fail 打坏”，而是少数超大样本上聚集了很多 judgment 级失败。
+
+- response progress judgment 统计:
+   - 总 judgment 数: `439535`
+   - `llm_error=true` 数: `10549`，占比约 `2.400%`
+   - 标签分布:
+      - `yes=383611`
+      - `no=44943`
+      - `uncertain=432`
+      - `null=10549`
+   - `null` 与 `llm_error=true` 对齐，说明这些空标签基本就是 LLM 调用失败后留下的 judgment 空洞。
+
+- user satisfy judgment 统计:
+   - 总 judgment 数: `180057`
+   - `llm_error=true` 数: `4552`，占比约 `2.528%`
+   - 标签分布:
+      - `no=163651`
+      - `uncertain=8246`
+      - `yes=3602`
+      - `neutral=6`
+      - `null=4552`
+   - 同样，`null` 基本对应 LLM 调用失败而未拿到有效判断。
+
+- 样本级影响面:
+   - `completed` kept 样本总数为 `5091`。
+   - 至少包含一次 response-progress LLM fail 的样本数为 `17`。
+   - 至少包含一次 user-satisfied LLM fail 的样本数为 `19`。
+   - 任一维度出现过 LLM fail 的样本总数为 `19`，占全部 `completed` kept 样本约 `0.373%`。
+   - 某一维度 judgment 全部失败的样本数为 `12`，说明问题集中在极少量超大样本上，而不是均匀扩散到大多数 completed 样本。
+
+- `has_error` 与 LLM fail 的关系:
+   - 当前 `has_error=true` 的 kept completed 样本总数为 `26`，且全部仍为 `processing_status='completed'`。
+   - 原因分布为:
+      - `no_messages=20`
+      - `error_reason为空=6`
+   - 这说明样本级 `has_error` 主要仍是老的 `no_messages` 问题，并不是本轮 LLM fail 大面积升级成样本级错误。
+   - 但确实有 `6` 条 `error_reason为空` 的 completed 样本与 judgment 级 LLM fail 同时出现，属于当前最值得重点复查的一批异常样本。
+
+- 重点异常样本特征:
+   - judgment 级失败高度集中在少数超大样本上，例如部分样本出现 `response_llm_errors` 超过 `700`、`episode_llm_errors` 超过 `300`，且错误率可达 `100%`。
+   - 目前观察到的最重样本包括:
+      - `96b7a3c3283abc3a851985c3485caa745dd1bda973cce271f5febb821135756f`
+      - `a3617ebe229fe56cf594b2f2b7c97c6777b3bcc968eb5c7ec88dce13cdad41cf`
+      - `c9e72aa583f8f59cf4f005638703a4322e0c55ecacd4f315e34bb5e6fa83d5ed`
+      - `48fd315b595cdc6169db2298e5f7e656b615ee90e3639eec23b5a57f573a083a`
+   - 这些样本更像是后续修复和定向重跑时的优先排查对象，而不是要把所有 completed 样本都视作被污染。
+
+- 当前判断:
+   - 从 judgment 数量看，LLM fail 确实存在，且 response / episode 两侧比例都在 `2.4% - 2.5%` 左右。
+   - 从样本影响面看，问题并不广泛，当前主要是少数长样本集中承受了连接失败/服务掉线带来的判断空洞。
+   - 因此后续续跑策略上，更合理的方向应是优先处理残留 `pending/processing`、并对这批少量重灾样本定向复位或复查，而不是默认整库 completed 结果已经失真。
