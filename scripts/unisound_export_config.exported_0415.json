@@ -1,0 +1,14 @@
+{
+  "domain": "Agent",
+  "task_describe": "claw_exported_0415_all_except_user_unsatisfy_gt_2ep",
+  "data_source": "exported_0415_all_except_user_unsatisfy_gt_2ep",
+  "default_answer_key": "Assistant",
+  "id_strategy": "source_metadata_then_sample_uid",
+  "preserve_extensions": true,
+  "preserve_round_feedback": true,
+  "preserve_conversation": true,
+  "task_describe_en_suffix": true,
+  "turn_feedback_field": "round_feedback",
+  "think_split_strategy": "tag",
+  "english_detection_mode": "simple"
+}

@@ -8,6 +8,8 @@ import duckdb
 from claw_data_filter.cli import _configure_logging, cli
 from claw_data_filter.exporters.unified_exporter import OPENAI_ROUND_FEEDBACK
 from claw_data_filter.importers.jsonl_importer import JSONLImporter
+from claw_data_filter.models.sample import Sample
+from claw_data_filter.storage.duckdb_store import DuckDBStore
 
 
 def test_configure_logging_suppresses_http_client_info_logs():
@@ -18,6 +20,76 @@ def test_configure_logging_suppresses_http_client_info_logs():
 
     assert logging.getLogger("httpx").level == logging.WARNING
     assert logging.getLogger("httpcore").level == logging.WARNING
+
+
+def test_round_feedback_sample_command_runs_in_isolated_db(tmp_path, monkeypatch):
+    source_db = tmp_path / "source.duckdb"
+    isolated_db = tmp_path / "isolated.duckdb"
+    store = DuckDBStore(source_db)
+
+    raw_json = {
+        "request": {
+            "bodyJson": {
+                "messages": [
+                    {"role": "user", "content": "Hi"},
+                    {"role": "assistant", "content": "Hello"},
+                    {"role": "tool", "content": "tool ok"},
+                    {"role": "assistant", "content": "Anything else?"},
+                ]
+            }
+        }
+    }
+
+    try:
+        sample_id = store.insert_sample(Sample.from_dict(raw_json))
+        sample_uid = store.get_sample_by_id(sample_id)["sample_uid"]
+    finally:
+        store.close()
+
+    class FakeLLM:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def chat(self, messages, max_tokens=1024, temperature=0.1):
+            if "response_progress" in messages[0]["content"]:
+                return "response_progress=yes"
+            return "user_satisfied=yes"
+
+        async def close(self):
+            return None
+
+    monkeypatch.setattr("claw_data_filter.llm.async_client.AsyncLLMClient", FakeLLM)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "--db-path",
+            str(source_db),
+            "round-feedback-sample",
+            "--sample-uid",
+            sample_uid,
+            "--isolated-db-path",
+            str(isolated_db),
+            "--workers",
+            "1",
+        ],
+        obj={},
+    )
+
+    assert result.exit_code == 0
+    assert "Sample summary:" in result.output
+    assert "Isolated sample complete:" in result.output
+
+    isolated_store = DuckDBStore(isolated_db)
+    try:
+        isolated_sample = isolated_store.get_sample_by_uid(sample_uid)
+        assert isolated_sample is not None
+        assert isolated_sample["processing_status"] == "completed"
+        assert isolated_sample["progress_rate"] == 1.0
+        assert isolated_sample["satisfied_rate"] == 1.0
+    finally:
+        isolated_store.close()
 
 
 def test_filter_command_accepts_has_error_only(tmp_path, monkeypatch):

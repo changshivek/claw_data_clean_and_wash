@@ -258,8 +258,8 @@ def _build_export_filter_spec(criteria: FilterCriteria, selected_ids: list[int] 
         session_merge_keep = False
 
     return ExportFilterSpec(
-        helpful_op=criteria.helpful_op,
-        helpful_val=criteria.helpful_val,
+        progress_op=criteria.progress_op,
+        progress_val=criteria.progress_val,
         satisfied_op=criteria.satisfied_op,
         satisfied_val=criteria.satisfied_val,
         negative_feedback_op=criteria.negative_feedback_op,
