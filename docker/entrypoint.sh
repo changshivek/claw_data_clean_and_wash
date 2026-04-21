@@ -34,7 +34,31 @@ PY
 export CRON_SCHEDULE
 export DB_PATH="${DB_PATH:-${DB_PATH_VALUE}}"
 
-mkdir -p /app/runtime
+mapfile -t PIPELINE_DIRS < <(python - <<'PY'
+from pathlib import Path
+import os
+
+try:
+  import tomllib
+except ModuleNotFoundError:
+  import tomli as tomllib  # type: ignore
+
+config_path = Path(os.environ["CONFIG_PATH"])
+payload = tomllib.loads(config_path.read_text(encoding="utf-8"))
+paths = payload["paths"]
+dir_candidates = [
+  Path(paths["db_path"]).expanduser().parent,
+  Path(paths["unpack_dir"]).expanduser(),
+  Path(paths["work_dir"]).expanduser(),
+  Path(paths["export_dir"]).expanduser(),
+  Path(paths["log_dir"]).expanduser(),
+]
+for path in dir_candidates:
+  print(path)
+PY
+)
+
+mkdir -p /app/runtime "${PIPELINE_DIRS[@]}"
 
 sed \
   -e "s|\${CRON_SCHEDULE}|${CRON_SCHEDULE}|g" \

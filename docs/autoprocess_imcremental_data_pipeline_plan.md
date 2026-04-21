@@ -94,6 +94,11 @@
 	- 首个测试 tar 完整执行到 completed，但由于隔离配置仍保留 response_progress_rate 阈值，最终 qualified_samples=0，未产出导出文件。
 	- 调整隔离配置 configs/autoprocess.pipeline.docker_cron_e2e.toml 以对齐最终导出口径后，第二个增量 tar 成功完成 import -> session merge -> round feedback -> openai_round_feedback 导出 -> Unisound 转换，结果为 imported_samples=4、exported_samples=4、exported_files=1、unisound_files=1。
 	- 成功产物已保存在 data/docker_cron_e2e/artifacts/export/，对应日志保存在 data/docker_cron_e2e/artifacts/logs/。
+7. 已完成 Docker 冷启动真机验证：
+	- 使用 manydata 源路径中的真实小包重新裁剪并打包为 data/docker_cold_start_e2e/source/request-logs-cold-start-subset.tar，保持 tar + items.jsonl.gz 的真实输入形态。
+	- 基于全新 named volume、只读 source/config 挂载和 RUN_ON_START=true 启动真实容器，验证首次启动时无需手工创建 runtime 子目录。
+	- 首次冷启动实际完成 import -> session merge -> round feedback -> openai_round_feedback 导出 -> Unisound 转换，结果为 imported_samples=36、exported_samples=1、exported_files=1、unisound_files=1。
+	- 冷启动产物已保存在 data/docker_cold_start_e2e/artifacts/20260421_183344_19896/runtime/，包含 DuckDB、pipeline 日志、openai_round_feedback 导出与 Unisound 导出。
 
 # Git 维护记录
 1. 已创建功能提交 c83aee7：Add incremental tar pipeline orchestration

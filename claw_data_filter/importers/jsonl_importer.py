@@ -5,6 +5,7 @@ import multiprocessing
 import os
 from collections import deque
 from concurrent.futures import ProcessPoolExecutor
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Iterator, Sequence
@@ -19,6 +20,14 @@ ALLOWED_IO_DIRS = ["data", "."]
 DEFAULT_IMPORT_WORKERS = 1
 DEFAULT_IMPORT_CHUNK_SIZE = 64
 IMPORT_PROGRESS_LOG_INTERVAL = 10
+
+
+@dataclass(slots=True)
+class ImportSummary:
+    imported_count: int
+    imported_sample_uids: list[str]
+    error_count: int
+    processed_lines: int
 
 
 def _build_insert_row_from_payload(data: dict) -> tuple:
@@ -156,6 +165,22 @@ class JSONLImporter:
         Returns:
             Number of successfully imported samples
         """
+        summary = self.import_lines_with_summary(
+            lines,
+            skip_errors=skip_errors,
+            workers=workers,
+            chunk_size=chunk_size,
+        )
+        return summary.imported_count
+
+    def import_lines_with_summary(
+        self,
+        lines: Iterator[str],
+        skip_errors: bool = True,
+        workers: int = DEFAULT_IMPORT_WORKERS,
+        chunk_size: int = DEFAULT_IMPORT_CHUNK_SIZE,
+    ) -> ImportSummary:
+        """Import from iterator of lines and return detailed import results."""
         normalized_workers = max(1, int(workers or 1))
         normalized_chunk_size = max(1, int(chunk_size or DEFAULT_IMPORT_CHUNK_SIZE))
 
@@ -167,24 +192,46 @@ class JSONLImporter:
         )
 
         if normalized_workers == 1:
-            count, errors = self._import_serial_batched(lines, skip_errors, normalized_chunk_size)
+            count, imported_sample_uids, errors, processed_lines = self._import_serial_batched(
+                lines,
+                skip_errors,
+                normalized_chunk_size,
+            )
         else:
-            count, errors = self._import_parallel_batched(lines, skip_errors, normalized_workers, normalized_chunk_size)
+            count, imported_sample_uids, errors, processed_lines = self._import_parallel_batched(
+                lines,
+                skip_errors,
+                normalized_workers,
+                normalized_chunk_size,
+            )
 
         logger.info(f"Imported {count} samples, {errors} errors")
-        return count
+        return ImportSummary(
+            imported_count=count,
+            imported_sample_uids=imported_sample_uids,
+            error_count=errors,
+            processed_lines=processed_lines,
+        )
 
-    def _import_serial_batched(self, lines: Iterator[str], skip_errors: bool, chunk_size: int) -> tuple[int, int]:
+    def _import_serial_batched(
+        self,
+        lines: Iterator[str],
+        skip_errors: bool,
+        chunk_size: int,
+    ) -> tuple[int, list[str], int, int]:
         count = 0
         errors = 0
         processed_lines = 0
+        imported_sample_uids: list[str] = []
         for chunk_index, chunk in enumerate(_iter_line_chunks(lines, chunk_size), start=1):
             rows, chunk_errors, line_count = _parse_jsonl_chunk(chunk, skip_errors=skip_errors)
             errors += chunk_errors
             processed_lines += line_count
-            count += self.store.insert_sample_batch(rows)
+            chunk_count, chunk_sample_uids = self.store.insert_sample_batch_detailed(rows)
+            count += chunk_count
+            imported_sample_uids.extend(chunk_sample_uids)
             self._log_progress(chunk_index, processed_lines, count, errors)
-        return count, errors
+        return count, imported_sample_uids, errors, processed_lines
 
     def _import_parallel_batched(
         self,
@@ -192,13 +239,14 @@ class JSONLImporter:
         skip_errors: bool,
         workers: int,
         chunk_size: int,
-    ) -> tuple[int, int]:
+    ) -> tuple[int, list[str], int, int]:
         count = 0
         errors = 0
         processed_lines = 0
         chunk_index = 0
         max_pending = max(2, workers * 2)
         pending = deque()
+        imported_sample_uids: list[str] = []
 
         with ProcessPoolExecutor(
             max_workers=workers,
@@ -210,7 +258,9 @@ class JSONLImporter:
                     rows, chunk_errors, line_count = pending.popleft().result()
                     errors += chunk_errors
                     processed_lines += line_count
-                    count += self.store.insert_sample_batch(rows)
+                    chunk_count, chunk_sample_uids = self.store.insert_sample_batch_detailed(rows)
+                    count += chunk_count
+                    imported_sample_uids.extend(chunk_sample_uids)
                     chunk_index += 1
                     self._log_progress(chunk_index, processed_lines, count, errors)
 
@@ -218,11 +268,13 @@ class JSONLImporter:
                 rows, chunk_errors, line_count = pending.popleft().result()
                 errors += chunk_errors
                 processed_lines += line_count
-                count += self.store.insert_sample_batch(rows)
+                chunk_count, chunk_sample_uids = self.store.insert_sample_batch_detailed(rows)
+                count += chunk_count
+                imported_sample_uids.extend(chunk_sample_uids)
                 chunk_index += 1
                 self._log_progress(chunk_index, processed_lines, count, errors)
 
-        return count, errors
+            return count, imported_sample_uids, errors, processed_lines
 
     def _log_progress(self, chunk_index: int, processed_lines: int, imported_count: int, errors: int) -> None:
         if chunk_index == 1 or chunk_index % IMPORT_PROGRESS_LOG_INTERVAL == 0:

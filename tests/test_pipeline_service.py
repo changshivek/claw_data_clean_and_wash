@@ -8,8 +8,10 @@ import json
 import tarfile
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
+import claw_data_filter.pipeline.service as pipeline_service_module
 from claw_data_filter.cli import cli
 from claw_data_filter.pipeline.config import PipelineConfig
 from claw_data_filter.pipeline.service import PipelineService
@@ -88,8 +90,8 @@ def _build_config(
     )
 
 
-def _items_payload() -> bytes:
-    lines = [
+def _items_payload(lines: list[str] | None = None) -> bytes:
+    payload_lines = lines or [
         json.dumps(
             {
                 "messages": [
@@ -112,14 +114,14 @@ def _items_payload() -> bytes:
             ensure_ascii=False,
         ),
     ]
-    return ("\n".join(lines) + "\n").encode("utf-8")
+    return ("\n".join(payload_lines) + "\n").encode("utf-8")
 
 
-def _write_nested_archive(archive_path: Path) -> None:
-    items_bytes = _items_payload()
+def _write_nested_archive(archive_path: Path, items_bytes: bytes | None = None) -> None:
+    payload = items_bytes or _items_payload()
     gzip_buffer = io.BytesIO()
     with gzip.GzipFile(fileobj=gzip_buffer, mode="wb") as gz_handle:
-        gz_handle.write(items_bytes)
+        gz_handle.write(payload)
 
     inner_tar_buffer = io.BytesIO()
     with tarfile.open(fileobj=inner_tar_buffer, mode="w") as inner_tar:
@@ -133,6 +135,24 @@ def _write_nested_archive(archive_path: Path) -> None:
         info = tarfile.TarInfo(name="bundle/inner.tar")
         info.size = len(inner_payload)
         outer_tar.addfile(info, io.BytesIO(inner_payload))
+
+
+def _malformed_items_payload() -> bytes:
+    return _items_payload(
+        [
+            json.dumps(
+                {
+                    "messages": [
+                        {"role": "user", "content": "valid"},
+                        {"role": "assistant", "content": "ok"},
+                    ],
+                    "metadata": {"id": "valid-1"},
+                },
+                ensure_ascii=False,
+            ),
+            "{bad json",
+        ]
+    )
 
 
 def _write_toml_config(config_path: Path, paths: dict[str, Path], unisound_config_path: Path) -> None:
@@ -224,6 +244,10 @@ def test_pipeline_service_runs_once_and_exports_incremental_files(tmp_path: Path
             [str(archive_path)],
         ).fetchone()
         assert source_status == ("completed", 2)
+        run_file_status = service.store.conn.execute(
+            "SELECT status, qualified_samples FROM pipeline_run_files"
+        ).fetchone()
+        assert run_file_status == ("completed", 2)
     finally:
         service.close()
 
@@ -299,3 +323,213 @@ def test_pipeline_run_cli_loads_toml_and_executes(tmp_path: Path):
     assert result.exit_code == 0
     assert "Pipeline Run Summary" in result.output
     assert "imported_samples: 2" in result.output
+
+
+def test_pipeline_service_bootstraps_empty_runtime_directories(tmp_path: Path):
+    source_dir = tmp_path / "source"
+    db_path = tmp_path / "db" / "pipeline.duckdb"
+    unpack_dir = tmp_path / "unpack"
+    work_dir = tmp_path / "work"
+    export_dir = tmp_path / "exports"
+    log_dir = tmp_path / "logs"
+    unisound_config_path = tmp_path / "unisound_config.json"
+
+    source_dir.mkdir(parents=True, exist_ok=True)
+    _write_unisound_config(unisound_config_path)
+    _write_nested_archive(source_dir / "cold_start.tar")
+
+    service = PipelineService(
+        _build_config(
+            source_dir=source_dir,
+            unpack_dir=unpack_dir,
+            work_dir=work_dir,
+            db_path=db_path,
+            export_dir=export_dir,
+            log_dir=log_dir,
+            unisound_config_path=unisound_config_path,
+        )
+    )
+    try:
+        summary = service.run_once()
+        assert summary["status"] == "completed"
+        assert db_path.exists()
+        for path in (unpack_dir, work_dir, export_dir, log_dir, db_path.parent):
+            assert path.exists()
+    finally:
+        service.close()
+
+
+def test_pipeline_service_skips_overlapping_run_with_lock(tmp_path: Path):
+    source_dir = tmp_path / "source"
+    unpack_dir = tmp_path / "unpack"
+    work_dir = tmp_path / "work"
+    db_path = tmp_path / "db" / "pipeline.duckdb"
+    export_dir = tmp_path / "exports"
+    log_dir = tmp_path / "logs"
+    unisound_config_path = tmp_path / "unisound_config.json"
+
+    for path in (source_dir, unpack_dir, work_dir, export_dir, log_dir, db_path.parent):
+        path.mkdir(parents=True, exist_ok=True)
+    _write_unisound_config(unisound_config_path)
+    _write_nested_archive(source_dir / "locked.tar")
+
+    service = PipelineService(
+        _build_config(
+            source_dir=source_dir,
+            unpack_dir=unpack_dir,
+            work_dir=work_dir,
+            db_path=db_path,
+            export_dir=export_dir,
+            log_dir=log_dir,
+            unisound_config_path=unisound_config_path,
+        )
+    )
+    try:
+        with service._pipeline_run_lock("lock-holder"):
+            summary = service.run_once()
+        assert summary["status"] == "skipped"
+        assert summary["processed_files"] == 0
+        run_row = service.store.conn.execute(
+            "SELECT status, error_message FROM pipeline_runs WHERE run_id = ?",
+            [summary["run_id"]],
+        ).fetchone()
+        assert run_row == ("skipped", "another pipeline run is already in progress")
+    finally:
+        service.close()
+
+
+def test_pipeline_service_skip_errors_uses_importer_semantics(tmp_path: Path):
+    source_dir = tmp_path / "source"
+    unpack_dir = tmp_path / "unpack"
+    work_dir = tmp_path / "work"
+    db_path = tmp_path / "db" / "pipeline.duckdb"
+    export_dir = tmp_path / "exports"
+    log_dir = tmp_path / "logs"
+    unisound_config_path = tmp_path / "unisound_config.json"
+
+    for path in (source_dir, unpack_dir, work_dir, export_dir, log_dir, db_path.parent):
+        path.mkdir(parents=True, exist_ok=True)
+    _write_unisound_config(unisound_config_path)
+    _write_nested_archive(source_dir / "skip_errors.tar", _malformed_items_payload())
+
+    config = _build_config(
+        source_dir=source_dir,
+        unpack_dir=unpack_dir,
+        work_dir=work_dir,
+        db_path=db_path,
+        export_dir=export_dir,
+        log_dir=log_dir,
+        unisound_config_path=unisound_config_path,
+    )
+    config.import_settings.skip_errors = True
+
+    service = PipelineService(config)
+    try:
+        summary = service.run_once()
+        assert summary["status"] == "completed"
+        assert summary["imported_samples"] == 1
+        assert summary["exported_samples"] == 1
+    finally:
+        service.close()
+
+
+def test_pipeline_service_retries_failed_archive_on_next_run(tmp_path: Path, monkeypatch):
+    source_dir = tmp_path / "source"
+    unpack_dir = tmp_path / "unpack"
+    work_dir = tmp_path / "work"
+    db_path = tmp_path / "db" / "pipeline.duckdb"
+    export_dir = tmp_path / "exports"
+    log_dir = tmp_path / "logs"
+    unisound_config_path = tmp_path / "unisound_config.json"
+
+    for path in (source_dir, unpack_dir, work_dir, export_dir, log_dir, db_path.parent):
+        path.mkdir(parents=True, exist_ok=True)
+    _write_unisound_config(unisound_config_path)
+    archive_path = source_dir / "retry.tar"
+    _write_nested_archive(archive_path)
+
+    config = _build_config(
+        source_dir=source_dir,
+        unpack_dir=unpack_dir,
+        work_dir=work_dir,
+        db_path=db_path,
+        export_dir=export_dir,
+        log_dir=log_dir,
+        unisound_config_path=unisound_config_path,
+    )
+
+    service = PipelineService(config)
+    original_extract = service._extract_items_jsonl
+    calls = {"count": 0}
+
+    def flaky_extract(*args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise RuntimeError("temporary extract failure")
+        return original_extract(*args, **kwargs)
+
+    monkeypatch.setattr(service, "_extract_items_jsonl", flaky_extract)
+    try:
+        with pytest.raises(RuntimeError, match="temporary extract failure"):
+            service.run_once()
+        source_status = service.store.conn.execute(
+            "SELECT status FROM pipeline_source_files WHERE source_path = ?",
+            [str(archive_path)],
+        ).fetchone()
+        assert source_status == ("failed",)
+
+        summary = service.run_once()
+        assert summary["status"] == "completed"
+        assert summary["imported_samples"] == 2
+    finally:
+        service.close()
+
+
+def test_pipeline_service_marks_file_failed_when_export_fails(tmp_path: Path, monkeypatch):
+    source_dir = tmp_path / "source"
+    unpack_dir = tmp_path / "unpack"
+    work_dir = tmp_path / "work"
+    db_path = tmp_path / "db" / "pipeline.duckdb"
+    export_dir = tmp_path / "exports"
+    log_dir = tmp_path / "logs"
+    unisound_config_path = tmp_path / "unisound_config.json"
+
+    for path in (source_dir, unpack_dir, work_dir, export_dir, log_dir, db_path.parent):
+        path.mkdir(parents=True, exist_ok=True)
+    _write_unisound_config(unisound_config_path)
+    archive_path = source_dir / "export_fail.tar"
+    _write_nested_archive(archive_path)
+
+    service = PipelineService(
+        _build_config(
+            source_dir=source_dir,
+            unpack_dir=unpack_dir,
+            work_dir=work_dir,
+            db_path=db_path,
+            export_dir=export_dir,
+            log_dir=log_dir,
+            unisound_config_path=unisound_config_path,
+        )
+    )
+
+    def raise_export_error(*args, **kwargs):
+        raise RuntimeError("unisound export failed")
+
+    monkeypatch.setattr(pipeline_service_module, "convert_unisound_file", raise_export_error)
+
+    try:
+        with pytest.raises(RuntimeError, match="unisound export failed"):
+            service.run_once()
+
+        run_file_row = service.store.conn.execute(
+            "SELECT status, error_message FROM pipeline_run_files"
+        ).fetchone()
+        assert run_file_row == ("failed", "unisound export failed")
+
+        source_file_row = service.store.conn.execute(
+            "SELECT status, error_message FROM pipeline_source_files WHERE source_path = ?",
+            [str(archive_path)],
+        ).fetchone()
+        assert source_file_row == ("failed", "unisound export failed")
+    finally:
+        service.close()

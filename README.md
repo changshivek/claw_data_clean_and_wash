@@ -1,116 +1,154 @@
 # Claw Data Filter
 
-LLM-powered agent conversation data filtering tool. Import JSONL files, run round feedback judgments, filter and export high-quality data.
+面向 agent 对话数据的筛选、评分、导出与增量处理工具。
 
-当前推荐的验证用远端 LLM 配置是 OpenRouter 免费模型：
+当前仓库覆盖两类主要使用方式：
 
-- LLM_ENDPOINT=https://openrouter.ai/api/v1
-- LLM_MODEL_ID=google/gemma-4-26b-a4b-it:free
-- LLM_API_KEY 通过环境变量提供，不写入仓库配置文件
+1. 普通 JSONL 数据导入 DuckDB，执行 session merge、round feedback、筛选导出。
+2. 监控 manydata 下新增 tar 数据，按增量 pipeline 自动完成导入、评分、导出和 Unisound 转换。
 
-约束：
+## 功能概览
 
-- OpenRouter 免费模型只用于小样本验证、pressure-test 和链路冒烟。
-- 增量正式跑批默认配置仍应使用独立可控的正式 LLM 服务，不应直接依赖免费模型。
+- 导入 OpenAI / UniRouter 风格 JSONL 数据。
+- 写入 DuckDB，并生成稳定的 sample_uid。
+- 标记 empty_response 样本。
+- 执行 session merge，去掉重复会话快照。
+- 执行 round feedback，生成 response_progress 和 user_satisfied 两层 judgment。
+- 按统一条件导出 raw_jsonl 或 openai_round_feedback。
+- 将 openai_round_feedback JSONL 转成 Unisound JSONL。
+- 通过 Streamlit Web 页面查看、筛选和导出数据。
+- 通过增量 pipeline 处理新增 tar 包，并支持容器内 cron 定时执行。
 
-当前主链路:
+## 环境准备
 
-1. 导入 OpenAI 或 UniRouter 对话数据。
-2. 将样本写入 DuckDB，并生成稳定的 sample_uid 与本地整数 id。
-3. 对导入消息中只有 user、没有 assistant 的样本打标 empty_response=true。
-4. session merge 按真实 user turns 检测并折叠会话快照重复，只保留应继续流转的样本。
-5. round feedback 以 claim 模式批量领取 pending 或 failed 且 session_merge_keep 为 true 的样本。
-6. 按双层语义分别生成 assistant response judgments 和 user episode judgments，并以 sample_uid 为键原子写回结果。
-7. 样本进入 completed 或 failed 状态。
-8. 通过 CLI 或 Web 筛选页按统一导出服务导出 raw_json JSONL，或导出带双层 round feedback 侧挂信息的 OpenAI 兼容 JSONL。
+项目要求：
 
-## Quick Start
+- Python >= 3.10
+- 使用 uv 管理环境
+- 使用仓库内虚拟环境 .venv
+
+初始化方式：
 
 ```bash
-# 1. 导入数据
-claw-filter import data.jsonl
+uv venv .venv
+./.venv/bin/pip install -e ".[dev]"
+```
 
-# 2. 运行 round feedback 评分（需要 LLM 服务）
-export LLM_ENDPOINT=https://openrouter.ai/api/v1
-export LLM_MODEL_ID=google/gemma-4-26b-a4b-it:free
-export LLM_API_KEY=your_openrouter_key
+安装后可直接使用两种入口：
 
-claw-filter pressure-test  # 先测试稳定性
-claw-filter session-merge --workers 4 --batch-size 512 --min-prefix-turns 2
-claw-filter round-feedback --workers 32 --batch-size 50
+- `claw-filter`
+- `./.venv/bin/python -m claw_data_filter.cli`
 
-# 3. 查看统计
+如果你更希望避免环境路径问题，后文命令优先使用 `./.venv/bin/python -m ...` 形式。
+
+## 快速开始
+
+### 1. 导入数据
+
+```bash
+./.venv/bin/python -m claw_data_filter.cli \
+  --db-path data.duckdb \
+  import data/test_input_single.jsonl
+```
+
+### 2. 检查 LLM 连通性
+
+```bash
+export LLM_ENDPOINT=http://127.0.0.1:8000/v1
+export LLM_MODEL_ID=qwen35
+export LLM_API_KEY=dummy
+
+./.venv/bin/python -m claw_data_filter.cli \
+  --db-path data.duckdb \
+  pressure-test
+```
+
+### 3. 执行 session merge
+
+```bash
+./.venv/bin/python -m claw_data_filter.cli \
+  --db-path data.duckdb \
+  session-merge \
+  --workers 4 \
+  --batch-size 512 \
+  --min-prefix-turns 2
+```
+
+### 4. 执行 round feedback
+
+```bash
+./.venv/bin/python -m claw_data_filter.cli \
+  --db-path data.duckdb \
+  round-feedback \
+  --workers 16 \
+  --batch-size 20
+```
+
+### 5. 查看统计
+
+```bash
+./.venv/bin/python -m claw_data_filter.cli \
+  --db-path data.duckdb \
+  stats
+```
+
+### 6. 筛选并导出
+
+```bash
+./.venv/bin/python -m claw_data_filter.cli \
+  --db-path data.duckdb \
+  filter \
+  --session-merge-keep true \
+  --empty-response false \
+  --num-turns-min 3 \
+  --has-error false \
+  --export-format openai_round_feedback \
+  --export data/exported_round_feedback.jsonl \
+  --report data/export_report.json
+```
+
+## 常用 CLI 命令
+
+```bash
+claw-filter import <file>
+claw-filter pressure-test
+claw-filter session-merge
+claw-filter round-feedback
+claw-filter round-feedback-sample
+claw-filter filter --export <file>
 claw-filter stats
-
-# 4. 筛选导出
-claw-filter filter --response-progress-rate ">=0.7" --export filtered.jsonl
+claw-filter info
+claw-filter pipeline-run --config <toml>
 ```
 
-## Bash 脚本
+常用场景：
 
-项目根目录提供了三份可直接修改配置后执行的脚本：
+- `import`: 导入 JSONL。
+- `pressure-test`: 在正式跑批前验证 LLM 端点可用性。
+- `session-merge`: 标记重复会话快照。
+- `round-feedback`: 生成评分结果。
+- `round-feedback-sample`: 将单个 sample_uid 抽到隔离 DuckDB 单独复现。
+- `filter`: 按条件导出样本。
+- `pipeline-run`: 手动执行一次增量 tar pipeline。
 
-- scripts/run_import_to_stats.sh
-  覆盖 import -> pressure-test -> round-feedback -> stats 全流程。
-- scripts/run_export.sh
-  覆盖 filter/export/report 流程。
-- scripts/validate_pipeline_100.sh
-  覆盖 100 条验证集的 import -> pressure-test preflight -> session-merge -> round-feedback -> stats -> export 全流程，并在成功后原子替换目标 DuckDB。
+## 常见使用流程
 
-使用方式：
+### 普通 JSONL 流程
 
-```bash
-# 先修改脚本顶部 Configuration 区域
-bash scripts/run_import_to_stats.sh
-bash scripts/run_export.sh
-bash scripts/validate_pipeline_100.sh
-```
+适用于手动导入、人工筛选和离线分析：
 
-## 增量 Pipeline
+1. `import`
+2. `pressure-test`
+3. `session-merge`
+4. `round-feedback`
+5. `stats`
+6. `filter`
 
-用于 manydata 新增 tar 数据的持续处理链路已经接入：扫描新包、递归解压、导入、session merge、round feedback、增量筛选导出、Unisound 转换，以及运行状态记账。
+### 单样本隔离复现
 
-默认配置文件：
-
-- configs/autoprocess.pipeline.toml
-- configs/unisound_export.autoprocess.json
-
-本地执行一次：
+适用于长样本、异常样本或 prompt 过长样本排查：
 
 ```bash
-export LLM_API_KEY=your_openrouter_key
-
-bash scripts/run_incremental_pipeline.sh
-```
-
-注意：上面的环境变量示例仅用于临时验证链路是否打通。configs/autoprocess.pipeline.toml 的默认值仍然面向正式跑批环境，本地或容器中的全量增量任务不建议直接使用 OpenRouter 免费模型。
-
-也可以显式指定配置文件：
-
-```bash
-LLM_API_KEY=your_openrouter_key \
-./.venv/bin/python -m claw_data_filter.cli pipeline-run \
-  --config configs/autoprocess.pipeline.toml
-```
-
-增量 pipeline 的默认路径指向当前任务约定的 manydata 目录：
-
-- source_dir=/kanas/nlp/liuchang/manydata/unirouter
-- unpack_dir=/kanas/nlp/liuchang/manydata/unirouter_uncompress
-- work_dir=/kanas/nlp/liuchang/manydata/unirouter_in_process
-- db_path=/kanas/nlp/liuchang/manydata/unirouter_duckdb/incremental_pipeline.duckdb
-- export_dir=/kanas/nlp/liuchang/manydata/unirouter_unisound_format
-
-运行结果会写入同一个 DuckDB 中的 pipeline_runs、pipeline_source_files、pipeline_run_files、pipeline_run_samples 表，并在 log_dir 下生成逐次运行日志。
-
-新增 CLI 入口：
-
-```bash
-# 直接运行一次增量 tar pipeline
-./.venv/bin/python -m claw_data_filter.cli pipeline-run \
-  --config configs/autoprocess.pipeline.toml
-
-# 抽取指定 sample_uid 到隔离 DuckDB，单独复现 round feedback
 ./.venv/bin/python -m claw_data_filter.cli \
   --db-path data.duckdb \
   round-feedback-sample \
@@ -119,20 +157,74 @@ LLM_API_KEY=your_openrouter_key \
   --workers 1
 ```
 
-适用场景：
+### Web 页面
 
-- pipeline-run 用于定时任务、手动补跑和容器内 cron 调度。
-- round-feedback-sample 用于长样本、异常样本或 prompt 过长样本的隔离复现，不污染源库。
+```bash
+DB_PATH=data.duckdb ./.venv/bin/streamlit run claw_data_filter/web/app.py --server.port 5000
+```
 
-## 容器部署
+页面包括：
 
-已提供以下部署文件：
+- overview：统计概览
+- filter：筛选与导出
+- tables：数据表预览
+- detail：样本详情
 
-- Dockerfile
-- docker/entrypoint.sh
-- docker/pipeline.cron
-- scripts/docker_build_incremental_pipeline.sh
-- scripts/docker_run_incremental_pipeline.sh
+## 增量 Pipeline
+
+增量 pipeline 用于 manydata 下新增 tar 数据的持续处理，链路包括：
+
+1. 扫描新 tar 包
+2. 递归解压
+3. 导入 JSONL
+4. session merge
+5. round feedback
+6. 增量筛选导出
+7. Unisound 转换
+8. 记录运行状态与日志
+
+默认配置文件：
+
+- `configs/autoprocess.pipeline.toml`
+- `configs/unisound_export.autoprocess.json`
+
+执行一次增量 pipeline：
+
+```bash
+export LLM_ENDPOINT=http://127.0.0.1:8000/v1
+export LLM_MODEL_ID=qwen35
+export LLM_API_KEY=dummy
+
+./.venv/bin/python -m claw_data_filter.cli \
+  pipeline-run \
+  --config configs/autoprocess.pipeline.toml
+```
+
+也可以直接使用脚本：
+
+```bash
+bash scripts/run_incremental_pipeline.sh
+```
+
+默认 manydata 路径：
+
+- source_dir=/kanas/nlp/liuchang/manydata/unirouter
+- unpack_dir=/kanas/nlp/liuchang/manydata/unirouter_uncompress
+- work_dir=/kanas/nlp/liuchang/manydata/unirouter_in_process
+- db_path=/kanas/nlp/liuchang/manydata/unirouter_duckdb/incremental_pipeline.duckdb
+- export_dir=/kanas/nlp/liuchang/manydata/unirouter_unisound_format
+
+运行状态会写入 DuckDB 中的 pipeline 相关表，并在配置的 log_dir 下生成逐次运行日志。
+
+## Docker 部署
+
+仓库已提供：
+
+- `Dockerfile`
+- `docker/entrypoint.sh`
+- `docker/pipeline.cron`
+- `scripts/docker_build_incremental_pipeline.sh`
+- `scripts/docker_run_incremental_pipeline.sh`
 
 构建镜像：
 
@@ -143,413 +235,67 @@ bash scripts/docker_build_incremental_pipeline.sh
 启动容器：
 
 ```bash
-LLM_API_KEY=your_openrouter_key bash scripts/docker_run_incremental_pipeline.sh
+LLM_ENDPOINT=http://127.0.0.1:8000/v1 \
+LLM_MODEL_ID=qwen35 \
+LLM_API_KEY=your_key \
+bash scripts/docker_run_incremental_pipeline.sh
 ```
 
-容器行为：
+容器默认行为：
 
-- 前台常驻启动 Streamlit Web。
-- 后台通过 cron 定时执行 pipeline-run。
-- 不会自动 stop、restart、rm、rmi 或复用同名容器。
-- manydata 目录通过显式 volume 挂载进入容器。
+- 前台启动 Streamlit Web
+- 后台通过 cron 定时执行 `pipeline-run`
+- 不自动复用或删除已有同名容器
 
-Docker cron 隔离验证备注：
+可通过环境变量覆盖：
 
-- 本仓库已实际完成一次隔离 Docker cron E2E 验证：镜像可构建、容器可启动、crontab 可安装、cron 可按分钟触发并跑完整条增量链路。
-- 这台机器上的工作区 bind mount 对容器内 root 不可写；若做隔离验证，建议仅把 source/config 作为只读挂载，db/export/logs/unpack/work 使用 named volume 承载。
-- 若使用全新 named volume 作为 runtime，需要先确保其中存在 `db`、`export`、`logs`、`unpack`、`work` 子目录，否则 DuckDB 初始化会因目标目录不存在而失败。
-- 本次隔离验证产物已保存在 `data/docker_cron_e2e/artifacts/`，其中包含 cron 成功产出的 openai_round_feedback 与 Unisound 导出样例。
-
-如果需要调整定时表达式、配置路径或 Streamlit 端口，可通过环境变量覆盖：
-
-- CONFIG_PATH
-- CRON_SCHEDULE
-- RUN_ON_START
-- STREAMLIT_PORT
+- `CONFIG_PATH`
+- `CRON_SCHEDULE`
+- `RUN_ON_START`
+- `STREAMLIT_PORT`
 
 ## Unisound 离线转换
 
-当前仓库已补充离线 Unisound 转换与校验工具，输入格式为 openai_round_feedback_v2 JSONL。
-
-相关文件：
-
-- scripts/unisound_export.py
-- scripts/unisound_export_models.py
-- scripts/unisound_export_config.exported_0415.json
-- docs/unisound-export-migration-plan.md
-- docs/unisound-export-test-notes.md
+输入格式为 openai_round_feedback JSONL。
 
 常用命令：
 
 ```bash
-# 校验输入 openai_round_feedback_v2 文件
+# 校验输入
 ./.venv/bin/python scripts/unisound_export.py validate-input \
-  --input data/exported_0415_all_except_user_unsatisfy_gt_2ep.jsonl
+  --input data/exported_round_feedback.jsonl
 
-# 抽样转换 10 条
+# 转换
 ./.venv/bin/python scripts/unisound_export.py convert \
-  --input data/exported_0415_all_except_user_unsatisfy_gt_2ep.jsonl \
-  --output data/exported_0415_all_except_user_unsatisfy_gt_2ep.sample10.unisound.jsonl \
-  --config scripts/unisound_export_config.exported_0415.json \
-  --limit 10
+  --input data/exported_round_feedback.jsonl \
+  --output data/exported_unisound.jsonl \
+  --config configs/unisound_export.autoprocess.json \
+  --report data/exported_unisound.report.json
 
-# 全量转换
-./.venv/bin/python scripts/unisound_export.py convert \
-  --input data/exported_0415_all_except_user_unsatisfy_gt_2ep.jsonl \
-  --output data/exported_0415_all_except_user_unsatisfy_gt_2ep.unisound.jsonl \
-  --config scripts/unisound_export_config.exported_0415.json \
-  --report data/exported_0415_all_except_user_unsatisfy_gt_2ep.unisound.report.json
-
-# 校验转换结果
+# 校验输出
 ./.venv/bin/python scripts/unisound_export.py validate-output \
-  --input data/exported_0415_all_except_user_unsatisfy_gt_2ep.unisound.jsonl
+  --input data/exported_unisound.jsonl
 ```
 
-实现口径：
+## 脚本入口
 
-- 顶级 tools 已扁平化为 name、description、parameters。
-- 顶级 system_prompt 与 dialog 分离。
-- Chosen 和 Rejected 在单答案场景下固定为 Assistant。
-- round_feedback 会映射回重建后的 Unisound 轮次，同时可保留 ext 扩展字段。
+仓库内常用脚本：
 
-导入脚本可配置项包括：
-- INPUT_FILE
-- DB_PATH
-- LLM_ENDPOINT
-- LLM_API_KEY
-- LLM_MODEL_ID
-- MAX_CONCURRENCY
-- BATCH_SIZE
-- LLM_TIMEOUT
-- RUN_PRESSURE_TEST
-- RUN_SESSION_MERGE
-- SESSION_MERGE_WORKERS
-- SESSION_MERGE_BATCH_SIZE
-- SESSION_MERGE_MIN_PREFIX_TURNS
+- `scripts/run_import_to_stats.sh`
+  适合普通 JSONL 的 import -> pressure-test -> round-feedback -> stats。
+- `scripts/run_export.sh`
+  适合导出和报告生成。
+- `scripts/validate_pipeline_100.sh`
+  适合 100 条样本的小规模链路验证。
+- `scripts/run_incremental_pipeline.sh`
+  适合手动执行一次增量 pipeline。
 
-导出脚本可配置项包括：
-- DB_PATH
-- EXPORT_PATH
-- REPORT_PATH
-- RESPONSE_PROGRESS_RATE
-- USER_SATISFIED_RATE
-- USER_NEGATIVE_FEEDBACK_RATE
-- EXPORT_FORMAT
-- SESSION_MERGE_KEEP
-- SESSION_MERGE_STATUS
-- EMPTY_RESPONSE
-- HAS_ERROR
-- LIMIT
-- GENERATE_REPORT
+## 100 条验证集
 
-100 条验证脚本可配置项包括：
-- INPUT_FILE
-- DB_PATH
-- EXPORT_DIR
-- LLM_ENDPOINT
-- LLM_API_KEY
-- LLM_MODEL_ID
-- MAX_CONCURRENCY
-- BATCH_SIZE
-- LLM_TIMEOUT
-- SESSION_MERGE_WORKERS
-- SESSION_MERGE_BATCH_SIZE
-- SESSION_MERGE_MIN_PREFIX_TURNS
-- PYTHON_BIN
-
-OpenRouter 使用说明：
-- scripts/validate_pipeline_100.sh 默认会使用 OpenRouter 免费模型。
-- 运行前必须导出 LLM_API_KEY。
-- 默认并发和 batch 已下调，避免免费模型配额下触发过多限流。
-- 增量 pipeline 默认 round feedback 并发为 2、batch 为 4，并把 LLM 重试提高到 6 次。
-- 该脚本定位是小样本验证，不应用作全量数据跑批入口。
-- 该脚本现在会在 openai_round_feedback 导出后继续执行 Unisound 转换和输出校验。
-
-脚本行为说明：
-- 当 `EXPORT_FORMAT=raw_jsonl` 时，默认输出文件名是 `data/exported.jsonl`。
-- 当 `EXPORT_FORMAT=openai_round_feedback` 且 `EXPORT_PATH` 仍保持默认值时，脚本会自动改写为 `data/exported_round_feedback.jsonl`，避免把两种格式写到同一个默认路径。
-- `scripts/validate_pipeline_100.sh` 会先做端点 preflight，并将中间结果写入临时 DB；只有整条链路成功后才会替换 `data/pipeline_e2e/e2e_100_progress.duckdb`，避免端点故障时误删现有验证库。
-- `scripts/validate_pipeline_100.sh` 会额外产出 `exported_unisound.jsonl` 和 `export_report_unisound.json`，确保验证链路包含 Unisound 转换。
-
-## 数据格式
-
-支持 OpenAI 格式和 UniRouter 格式（自动转换）：
-
-```json
-{"messages": [
-  {"role": "user", "content": "用户问题"},
-  {"role": "assistant", "content": "回复", "tool_calls": [...]},
-  {"role": "tool", "content": "工具结果", "tool_call_id": "..."}
-]}
-```
-
-UniRouter 格式自动从 request.bodyJson.messages 提取:
-
-```json
-{
-  "request": {
-    "bodyJson": {
-      "messages": [
-        {"role": "user", "content": "用户问题"},
-        {"role": "assistant", "content": "回复"}
-      ]
-    }
-  }
-}
-```
-
-说明:
-- 导入阶段会统一提取消息并生成 user_query、assistant_response、num_turns、expected_judgment_count、empty_response 等派生字段。
-- 导入阶段还会基于原始 payload 生成 SHA-256 的 sample_uid，用作稳定、低碰撞的导入身份；整数 id 继续作为本地关系键。
-- 当导入数据中存在 user 消息但没有 assistant 消息时，会标记 empty_response=true，便于后续筛除这类样本。
-- 当前代码中的 expected_judgment_count 等于 expected_response_judgment_count + expected_episode_judgment_count。
-- response judgments 以 assistant 响应单元计数；episode judgments 以完整 user episode 计数。
-- importer 当前直接读取的是普通 `.jsonl` 文件，不会自动解压 `.gz`。
-- 如果原始包内是 `items.jsonl.gz`，需要先解压为普通 `items.jsonl` 后再导入。
-- `scripts/run_import_to_stats.sh` 也要求 `INPUT_FILE` 指向普通 `.jsonl`，传入 `.gz` 会直接报错退出。
-
-## 样本状态
-
-samples 表当前使用显式处理状态:
-
-| 状态 | 含义 |
-|------|------|
-| pending | 已导入，尚未进入 round feedback |
-| processing | 已被当前批处理领取 |
-| completed | round feedback 已完成且结果已原子写回 |
-| failed | 处理失败，保留错误信息，后续可重新领取 |
-
-说明:
-- round feedback 使用 claim 模式领取 pending 和 failed 样本。
-- 如果 session merge 已执行，claim 时只会领取 session_merge_keep=true 的样本；unmarked/null 和 session_merge_keep=false 都不会进入 round feedback。
-- 结果写入采用按 sample_uid 的原子替换，避免 sample 聚合结果与双 judgment 明细不一致。
-
-## Session Merge
-
-session merge 用于修复导入后 DuckDB 中的会话快照重复问题，执行时只依赖真实 user content，而不依赖可能失真的 metadata 标识。
-
-当前策略：
-- 只抽取真实 user turns，跳过 tool_result-only user block。
-- 先按第一轮真实 user 文本分桶。
-- 桶内先折叠完全相同的 user-turn 序列。
-- 对满足最小公共前缀阈值的严格前缀样本，只保留更长的叶子样本。
-
-session merge 会在 samples 表写入以下字段：
-- session_merge_status
-- session_merge_keep
-- session_merge_group_id
-- session_merge_group_size
-- session_merge_representative_uid
-- session_merge_reason
-- session_merge_updated_at
-
-CLI 示例：
+用于小样本链路验证，不建议作为正式全量跑批入口。
 
 ```bash
-# 仅预览 merge 结果，不写回数据库
-claw-filter session-merge --dry-run --workers 4 --batch-size 512 --min-prefix-turns 2
-
-# 正式写回 merge 标记
-claw-filter session-merge --workers 4 --batch-size 512 --min-prefix-turns 2
-```
-
-## 评分维度
-
-当前 round feedback 维护两个指标：
-
-| 维度 | 值 | 说明 |
-|------|-----|------|
-| **response_progress** | yes/no/uncertain | assistant step 是否让当前问题状态发生正向推进 |
-| **user_satisfied** | yes/no/uncertain/neutral | 用户对完整 assistant 交互 episode 是否满意 |
-
-目标设计采用两层级判定，而不是共用同一分轮边界：
-
-- response_progress: 以 assistant 响应单元为对象。当前 prompt 判断的是“这一步是否推进了当前问题”。当前 assistant 的 text、tool 选择、参数构造、调用命令都属于被评判内容；它主要使用紧邻反馈块作为证据，并可参考同一 episode 内最近 3 个前序 response steps 的压缩执行背景。
-- user_satisfied: 以上一轮 user 开始、到下一轮 user 之前结束的完整 assistant/tool 交互 episode 为对象；其证据窗口是该 episode 之后最多 3 条 user 文本消息，不包含后续 assistant。
-
-为什么要拆成两层：
-
-- response_progress 关注的是 assistant 当下这一步是否带来了正向推进，证据应尽量局部、紧邻；前序背景只用于帮助理解当前阶段，不能把前序或后续 assistant 的功劳反向归功到当前 step。
-- user_satisfied 关注的是用户是否接受了整段交互结果，天然应该覆盖一个 user episode 内的多步 assistant/tool 往返。
-- 两个指标的评判对象和反馈信号窗口不同，继续共用一套 judged turn 会把粒度混在一起，导致归因失真。
-- 当前实现已经去掉这层共用 judged turn，分别落到 response-step 与 user-episode 两种明细记录上。
-
-**user_satisfied 判定：**
-- 用户追问/澄清 → no
-- 用户确认/继续 → yes
-- 用户转新话题 → neutral
-- 无明确信号 → uncertain
-
-边界说明:
-- response_progress 的边界仍然是 assistant -> 紧邻反馈块。若 assistant 后面紧跟 tool 消息，则该 tool block 是反馈；若 assistant 后面直接进入 user，则该 user 是反馈。
-- 为了帮助连续工具调用场景，step prompt 还会额外带入同一 episode 内最近 3 个前序 response steps 的压缩执行背景，内容仅包含 assistant_text_excerpt、assistant_reason_excerpt、tool_use_summary、tool_result_status_hint、tool_result_excerpt_100。
-- user_satisfied 的边界是 user episode：从某条 user 消息开始，到下一条 user 消息出现前的所有 assistant/tool 交互都属于同一 episode。
-- 导出、Web detail、样本级 rate 聚合与测试都已经按这套双层边界运行。
-
-## 筛选字段
-
-| 字段 | 来源 | 说明 |
-|------|------|------|
-| response_progress_rate | samples | progress=yes 比例，分母为 yes+no |
-| response_regress_rate | samples | progress=no 比例，分母为 yes+no |
-| user_satisfied_rate | samples | satisfied=yes 比例，分母为 yes+no+neutral |
-| user_negative_feedback_rate | samples | satisfied=no 比例，分母为 yes+no+neutral |
-| empty_response | samples | 导入消息中是否只有 user、没有 assistant |
-| num_turns | samples | 轮次数 |
-| has_error | samples.tool_stats | round feedback 是否含错误 |
-
-rate 计算说明:
-- response_progress_rate 的分母不计入 uncertain。
-- user_satisfied_rate 和 user_negative_feedback_rate 的分母不计入 uncertain，仅统计 yes、no、neutral。
-
-## 存储结构
-
-主要表:
-
-- samples
-  记录 sample_uid、原始 JSON、empty_response 在内的派生字段、四个显式 rate 列、session_merge 标记列、tool_stats、processing_status 等样本级信息。
-- assistant_response_judgments
-  记录每个 assistant 响应单元的 response_progress、feedback_kind、反馈块范围和 llm_error。
-- user_episode_judgments
-  记录每个 user episode 的 user_satisfied、signal_from_users、消息范围和 llm_error。
-
-说明:
-- 双 judgment 明细表都以 sample_uid 作为跨表关联键。
-- samples.id 仍然存在，但不再承担 Web drill-down、round feedback 写回或 session merge 代表关系的业务主键职责。
-
-## 环境变量
-
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `LLM_ENDPOINT` | http://localhost:8000/v1 | LLM API 地址 |
-| `LLM_API_KEY` | - | API 密钥 |
-| `LLM_MODEL_ID` | - | 模型 ID |
-| `DB_PATH` | ./data.duckdb | 数据库路径 |
-| `BATCH_SIZE` | 10 | round feedback 每批领取样本数 |
-| `MAX_CONCURRENCY` | 10 | 最大并发数 |
-| `LLM_TIMEOUT` | 60.0 | 超时（秒） |
-
-说明：
-- 上表描述的是仓库核心 CLI 的默认环境变量。
-- scripts/validate_pipeline_100.sh 会单独默认指向 OpenRouter 免费模型，仅用于小样本验证。
-
-## CLI 命令
-
-```bash
-claw-filter import <file>              # 导入 JSONL
-claw-filter pressure-test              # LLM 稳定性测试
-claw-filter round-feedback            # 运行 round feedback 评分
-claw-filter round-feedback-sample     # 在隔离 DuckDB 复现指定样本
-claw-filter session-merge            # 运行 session merge 打标
-claw-filter pipeline-run             # 运行一次增量 tar pipeline
-claw-filter stats                     # 查看统计
-claw-filter filter [options] --export <file>  # 筛选导出
-claw-filter info                     # 数据库信息
-```
-
-### Round Feedback 选项
-
-```bash
-# 使用 32 并发 worker，单批领取 50 条样本
-claw-filter round-feedback --workers 32 --batch-size 50
-```
-
-行为说明:
-- workers 控制 LLM 调用并发上限。
-- batch-size 控制每轮从 pending 或 failed 状态领取的样本数量。
-- 处理过程中失败的样本会标记为 failed，而不是静默丢失。
-
-### Filter 选项
-
-```bash
-# 按 response_progress_rate 筛选
-claw-filter filter --response-progress-rate ">=0.7" --export out.jsonl
-
-# 按 user_satisfied_rate 筛选
-claw-filter filter --user-satisfied-rate ">=0.7" --export out.jsonl
-
-# 按 user_negative_feedback_rate 筛选
-claw-filter filter --user-negative-feedback-rate ">=0.3" --export out.jsonl
-
-# 仅导出 session merge 保留样本
-claw-filter filter --session-merge-keep true --export out.jsonl
-
-# 仅导出 empty response 样本
-claw-filter filter --empty-response true --export out.jsonl
-
-# 仅导出 session merge 标记为 merged 的样本
-claw-filter filter --session-merge-status merged --export out.jsonl
-
-# 组合筛选
-claw-filter filter --response-progress-rate ">=0.7" --user-satisfied-rate ">=0.5" --has-error false --export out.jsonl
-
-# 带统计报告
-claw-filter filter --response-progress-rate ">=0.7" --export out.jsonl --report stats.json
-
-# 导出 OpenAI 兼容 + round feedback 侧挂 JSONL
-claw-filter filter --response-progress-rate ">=0.7" --export-format openai_round_feedback --export out.jsonl
-```
-
-实现说明:
-- CLI filter 和 Web 筛选页共用同一个 UnifiedExporter，不再维护两套导出链路。
-- 导出统一采用结构化筛选条件构建，不再在不同入口各自拼 SQL。
-- JSONL 导出采用临时文件写入后原子替换，避免生成半截文件。
-
-### 导出格式
-
-- `raw_jsonl`
-  每行直接导出一个 sample 的原始 `raw_json`。
-- `openai_round_feedback`
-  每行导出一个包装后的 JSON 对象，包含：
-  - `schema`: 固定为 `openai_round_feedback_v2`
-  - `metadata`: sample 级派生字段和处理状态
-  - `source_metadata`: 从原始载荷中提取的时间、model requested、user agent、request id、trace id、metadata 等来源信息
-  - `conversation.messages`: 规范化后的 OpenAI 兼容消息数组
-  - `conversation.tools`: 规范化后的工具定义数组；OpenAI 原生 `tools` 会原样保留，Anthropic request-level `tools` 会被转换为 OpenAI function tools
-  - `round_feedback.response_progress_steps`: 每个 assistant 响应单元的范围和 progress judgment
-  - `round_feedback.user_satisfied_episodes`: 每个 user episode 的范围和 satisfied judgment
-
-`metadata` 当前采用 sample_uid-first 口径：
-- `sample_uid`: 对外稳定样本键
-- `local_sample_id`: 本地整数辅助键
-
-`conversation.messages` 的规范化规则：
-- 如果源数据本身是 OpenAI 风格，原有 `messages` 会直接保留。
-- 如果源数据来自 UniRouter/Anthropic request body，顶层 `system` 会被前置转换为 OpenAI `system` message。
-- Anthropic `tool_use` / `tool_result` block 会被转换为 OpenAI 风格的 `assistant.tool_calls` 和 `tool` message。
-
-`round_feedback.response_progress_steps` 中仅保留轻量侧挂信息：
-- `response_index`
-- `episode_index`
-- `assistant_message_index`
-- `feedback_kind`
-- `feedback_message_start_index`
-- `feedback_message_end_index`
-- `feedback_payload`
-- `response_progress`
-- `llm_error`
-
-`round_feedback.user_satisfied_episodes` 中仅保留轻量侧挂信息：
-- `episode_index`
-- `message_start_index`
-- `message_end_index`
-- `signal_from_users`
-- `user_satisfied`
-- `llm_error`
-
-range 语义说明：
-- 所有 message index 都基于最终导出的 `conversation.messages` 重新计算。
-- 如果规范化时在最前面新增了 `system` message，后续 assistant step 和 episode 的消息范围会相应后移。
-- `conversation.tools` 不参与 range 计算，因为它不在 `messages` 数组中。
-
-完整字段定义、示例记录、兼容性说明见 [docs/export-format.md](docs/export-format.md)。
-
-## 100 条验证集闭环
-
-当前仓库内置了面向 `data/pipeline_e2e/items_100.jsonl` 的完整闭环脚本：
-
-```bash
-LLM_ENDPOINT=http://182.242.159.76:31870/v1 \
+LLM_ENDPOINT=http://127.0.0.1:8000/v1 \
 LLM_API_KEY=dummy \
 LLM_MODEL_ID=qwen35 \
 MAX_CONCURRENCY=16 \
@@ -558,99 +304,72 @@ bash scripts/validate_pipeline_100.sh
 ```
 
 默认产物：
-- DuckDB: `data/pipeline_e2e/e2e_100_progress.duckdb`
-- OpenAI 兼容导出: `data/pipeline_e2e/validation_progress/exported_round_feedback.jsonl`
-- Unisound 导出: `data/pipeline_e2e/validation_progress/exported_unisound.jsonl`
-- 报告: `data/pipeline_e2e/validation_progress/export_report_round_feedback.json`
 
-验证脚本内置的最终导出筛选条件为：
+- `data/pipeline_e2e/e2e_100_progress.duckdb`
+- `data/pipeline_e2e/validation_progress/exported_round_feedback.jsonl`
+- `data/pipeline_e2e/validation_progress/exported_unisound.jsonl`
+- `data/pipeline_e2e/validation_progress/export_report_round_feedback.json`
+
+验证脚本的最终导出条件：
+
 - `session_merge_keep = true`
 - `empty_response = false`
 - `num_turns >= 3`
 
-## 老库回填
+## 数据格式
 
-对已存在的 DuckDB，可用一次性脚本按导入阶段同样的规则回填 empty_response：
+支持两类输入：
+
+- OpenAI 风格 `messages`
+- UniRouter 风格 `request.bodyJson.messages`
+
+最小 OpenAI 示例：
+
+```json
+{
+  "messages": [
+    {"role": "user", "content": "用户问题"},
+    {"role": "assistant", "content": "回复"}
+  ]
+}
+```
+
+更完整的导出字段说明见：
+
+- `docs/export-format.md`
+
+## 常用维护命令
+
+回填老库中的 empty_response：
 
 ```bash
-# 只看回填摘要，不写库
-.venv/bin/python scripts/mark_empty_response.py --db-path data/unirouter_20260403_512.duckdb --dry-run
-
-# 正式回填
-.venv/bin/python scripts/mark_empty_response.py --db-path data/unirouter_20260403_512.duckdb
+./.venv/bin/python scripts/mark_empty_response.py --db-path data/your.duckdb --dry-run
+./.venv/bin/python scripts/mark_empty_response.py --db-path data/your.duckdb
 ```
 
-## Web 页面
+## 开发与测试
 
-项目已包含基于 Streamlit 的单入口可视化工作台，页面与后端使用同一套查询和双层 judgment 语义。
-
-启动方式：
+安装开发依赖：
 
 ```bash
-DB_PATH=data/unirouter_20260403_512.duckdb .venv/bin/streamlit run claw_data_filter/web/app.py --server.port 5000
+./.venv/bin/pip install -e ".[dev]"
 ```
 
-运行后可以在侧边栏查看当前数据库文件，并直接输入新的 DuckDB 路径点击“加载数据库”切换，无需重启 Web。
-当前 Web 固定使用浅色主题，不依赖 light/dark 模式切换。
-
-当前页面包括:
-- overview: 统计概览
-- filter: 数据筛选、勾选与统一导出
-- tables: 数据表预览
-- detail: 样本详情、response steps 与 user episodes 展示
-
-Web 页面说明:
-- 只保留 `app.py` 这一个 Streamlit 入口；侧边栏导航由 query params 路由驱动，不再暴露默认多页标签。
-- detail 页复用与 round feedback 相同的 dual-level context builder。
-- 导出功能已并入 filter 页，不再维护独立 export 页。
-- CLI 与 Web filter 页共用 UnifiedExporter，避免导出逻辑分叉。
-- overview/filter/detail/tables 页都可以查看 session merge 标记信息。
-- overview/filter/detail/tables 页都已接入 empty_response 信息或过滤能力。
-- detail 页 URL 使用 sample_uid 进行 drill-down，local sample_id 仅作辅助展示。
-
-## 目录结构
-
-```
-claw_data_filter/
-├── cli.py              # CLI 命令
-├── config.py           # 配置
-├── models/             # 数据模型
-├── importers/          # JSONL 导入
-├── processors/         # RoundFeedback 处理器
-├── storage/            # DuckDB 操作
-├── filters/            # 筛选查询
-├── exporters/          # 导出
-├── llm/                # LLM 客户端
-└── web/                # Streamlit 单入口工作台与共享视图组件
-```
-
-## 开发
+运行测试：
 
 ```bash
-pip install -e ".[dev]"
-pytest tests/ -v           # 运行测试
-SKIP_INTEGRATION=1 pytest tests/ -v  # 跳过集成测试
+./.venv/bin/pytest tests/ -v
 ```
 
-推荐回归命令:
+推荐最小回归：
 
 ```bash
-.venv/bin/pytest tests/test_duckdb_store.py tests/test_round_feedback.py tests/test_query_filter.py tests/test_exporters.py tests/test_models.py tests/test_jsonl_importer.py tests/test_integration.py -q
+./.venv/bin/pytest tests/test_cli.py tests/test_pipeline_service.py tests/test_unisound_export.py -q
 ```
 
-## 已知限制
+## 相关文档
 
-- processing 状态样本的超时回收机制尚未实现；如果进程在 claim 后崩溃，样本可能停留在 processing。
-- 当前并发语义主要针对单进程 asyncio 批处理场景。
-- Web 页面已与后端语义对齐，但仍缺少页面级自动化测试。
-
-## 字段收敛说明
-
-为避免死字段和语义冲突，samples 表已移除以下字段:
-
-- task_type: 没有真实写入来源，属于未维护字段。
-- 旧的 samples.has_error: 与 tool_stats.has_error 语义冲突，且后者才是 round feedback 的真实错误状态。
-
-当前建议:
-- 使用 sample_uid 作为稳定导入身份和去重依据。
-- 使用整数 id 作为本地辅助键，不再作为页面详情路由或跨表业务关联键。
+- `docs/export-format.md`
+- `docs/autoprocess_imcremental_data_pipeline_plan.md`
+- `docs/unisound-export-migration-plan.md`
+- `docs/unisound-export-test-notes.md`

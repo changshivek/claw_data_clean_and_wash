@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import gzip
 import hashlib
 import json
@@ -69,10 +70,10 @@ class ProcessedFileResult:
 class PipelineService:
     def __init__(self, config: PipelineConfig):
         self.config = config
+        self._ensure_directories()
         self.store = DuckDBStore(config.paths.db_path)
         self.exporter = UnifiedExporter(self.store)
         self.repo_root = Path(__file__).resolve().parents[2]
-        self._ensure_directories()
         self._ensure_pipeline_schema()
 
     def close(self) -> None:
@@ -91,31 +92,32 @@ class PipelineService:
         with self._pipeline_log_handler(log_path):
             logger.info("Incremental pipeline run started: run_id=%s", run_id)
             try:
-                plans = self._discover_source_files(run_id)
-                logger.info("Discovered candidate archives: run_id=%s count=%s", run_id, len(plans))
-                for plan in plans:
-                    result = self._process_source_file(run_id, plan)
-                    if result is not None:
-                        processed_results.append(result)
-                        imported_total += result.imported_count
+                with self._pipeline_run_lock(run_id):
+                    plans = self._discover_source_files(run_id)
+                    logger.info("Discovered candidate archives: run_id=%s count=%s", run_id, len(plans))
+                    for plan in plans:
+                        result = self._process_source_file(run_id, plan)
+                        if result is not None:
+                            processed_results.append(result)
+                            imported_total += result.imported_count
 
-                all_imported_sample_uids = [
-                    sample_uid
-                    for result in processed_results
-                    for sample_uid in result.imported_sample_uids
-                ]
+                    all_imported_sample_uids = [
+                        sample_uid
+                        for result in processed_results
+                        for sample_uid in result.imported_sample_uids
+                    ]
 
-                if all_imported_sample_uids:
-                    if self.config.session_merge.enabled:
-                        self._run_session_merge()
-                    if self.config.round_feedback.enabled:
-                        self._run_round_feedback_for_samples(all_imported_sample_uids)
+                    if all_imported_sample_uids:
+                        if self.config.session_merge.enabled:
+                            self._run_session_merge()
+                        if self.config.round_feedback.enabled:
+                            self._run_round_feedback_for_samples(all_imported_sample_uids)
 
-                for result in processed_results:
-                    export_summary = self._export_file_result(run_id, result)
-                    exported_total += export_summary["qualified_samples"]
-                    exported_files += 1 if export_summary["qualified_samples"] > 0 else 0
-                    unisound_files += 1 if export_summary["qualified_samples"] > 0 else 0
+                    for result in processed_results:
+                        export_summary = self._export_file_result(run_id, result)
+                        exported_total += export_summary["qualified_samples"]
+                        exported_files += 1 if export_summary["qualified_samples"] > 0 else 0
+                        unisound_files += 1 if export_summary["qualified_samples"] > 0 else 0
 
                 summary = {
                     "run_id": run_id,
@@ -130,6 +132,26 @@ class PipelineService:
                 self._finish_pipeline_run(run_id, "completed", summary)
                 logger.info("Incremental pipeline run completed: %s", json.dumps(summary, ensure_ascii=False))
                 return summary
+            except BlockingIOError:
+                logger.warning("Pipeline run skipped because another run is already in progress: run_id=%s", run_id)
+                skipped_summary = {
+                    "run_id": run_id,
+                    "status": "skipped",
+                    "processed_files": 0,
+                    "imported_samples": 0,
+                    "exported_samples": 0,
+                    "exported_files": 0,
+                    "unisound_files": 0,
+                    "log_path": str(log_path),
+                    "error": "another pipeline run is already in progress",
+                }
+                self._finish_pipeline_run(
+                    run_id,
+                    "skipped",
+                    skipped_summary,
+                    error_message=skipped_summary["error"],
+                )
+                return skipped_summary
             except Exception as exc:
                 logger.exception("Incremental pipeline run failed: run_id=%s", run_id)
                 failure_summary = {
@@ -239,6 +261,20 @@ class PipelineService:
             root_logger.removeHandler(handler)
             handler.close()
 
+    @contextmanager
+    def _pipeline_run_lock(self, run_id: str) -> Iterator[None]:
+        lock_path = self.config.paths.work_dir / "pipeline.lock"
+        with lock_path.open("a+", encoding="utf-8") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                handle.seek(0)
+                handle.truncate()
+                handle.write(run_id)
+                handle.flush()
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
     def _discover_source_files(self, run_id: str) -> list[SourceFilePlan]:
         plans: list[SourceFilePlan] = []
         for path in sorted(self.config.paths.source_dir.rglob("*")):
@@ -259,27 +295,35 @@ class PipelineService:
         pending: list[SourceFilePlan] = []
         now = datetime.now()
         for plan in plans:
-            existing = self.store.conn.execute(
-                "SELECT fingerprint, status FROM pipeline_source_files WHERE source_path = ?",
-                [str(plan.source_path)],
-            ).fetchone()
-            if existing and existing[0] == plan.fingerprint and existing[1] == "completed":
-                self.store.conn.execute(
-                    "UPDATE pipeline_source_files SET last_seen_at = ?, last_run_id = ? WHERE source_path = ?",
-                    [now, run_id, str(plan.source_path)],
-                )
-                continue
-            pending.append(plan)
-            self._upsert_source_file(
-                plan=plan,
-                status="pending",
-                run_id=run_id,
-                last_seen_at=now,
-            )
+            if self._claim_source_file(plan, run_id, now):
+                pending.append(plan)
         return pending
 
+    def _claim_source_file(self, plan: SourceFilePlan, run_id: str, now: datetime) -> bool:
+        existing = self.store.conn.execute(
+            "SELECT fingerprint, status FROM pipeline_source_files WHERE source_path = ?",
+            [str(plan.source_path)],
+        ).fetchone()
+        if existing and existing[0] == plan.fingerprint and existing[1] == "completed":
+            self.store.conn.execute(
+                "UPDATE pipeline_source_files SET last_seen_at = ?, last_run_id = ? WHERE source_path = ?",
+                [now, run_id, str(plan.source_path)],
+            )
+            return False
+
+        self._upsert_source_file(
+            plan=plan,
+            status="processing",
+            run_id=run_id,
+            last_seen_at=now,
+        )
+        return True
+
+    def _run_file_id(self, run_id: str, source_path: Path) -> str:
+        return f"{run_id}:{hashlib.sha1(str(source_path).encode('utf-8')).hexdigest()[:16]}"
+
     def _process_source_file(self, run_id: str, plan: SourceFilePlan) -> ProcessedFileResult | None:
-        run_file_id = f"{run_id}:{hashlib.sha1(str(plan.source_path).encode('utf-8')).hexdigest()[:16]}"
+        run_file_id = self._run_file_id(run_id, plan.source_path)
         started_at = datetime.now()
         self._upsert_run_file(
             run_file_id=run_file_id,
@@ -304,15 +348,10 @@ class PipelineService:
             imported_sample_uids: list[str] = []
             imported_count = 0
             for items_path in items_paths:
-                parsed_sample_uids = self._collect_sample_uids(items_path)
-                new_sample_uids = self._new_sample_uids(parsed_sample_uids)
-                if not new_sample_uids:
-                    continue
-
                 importer = JSONLImporter(self.config.paths.db_path)
                 try:
                     with items_path.open("r", encoding="utf-8") as handle:
-                        imported_count += importer.import_lines(
+                        import_summary = importer.import_lines_with_summary(
                             handle,
                             skip_errors=self.config.import_settings.skip_errors,
                             workers=self.config.import_settings.workers,
@@ -321,7 +360,8 @@ class PipelineService:
                 finally:
                     importer.close()
 
-                imported_sample_uids.extend(new_sample_uids)
+                imported_count += import_summary.imported_count
+                imported_sample_uids.extend(import_summary.imported_sample_uids)
 
             imported_sample_uids = self._dedupe_keep_order(imported_sample_uids)
             if imported_sample_uids:
@@ -336,7 +376,7 @@ class PipelineService:
                 run_id=run_id,
                 source_path=plan.source_path,
                 source_name=plan.source_name,
-                status="completed",
+                status="imported",
                 extracted_dir=extracted_dir,
                 items_paths=items_paths,
                 imported_samples=len(imported_sample_uids),
@@ -345,7 +385,7 @@ class PipelineService:
             )
             self._upsert_source_file(
                 plan=plan,
-                status="completed",
+                status="imported",
                 run_id=run_id,
                 last_seen_at=finished_at,
                 processed_at=finished_at,
@@ -450,71 +490,146 @@ class PipelineService:
         asyncio.run(_run())
 
     def _export_file_result(self, run_id: str, result: ProcessedFileResult) -> dict[str, Any]:
+        run_file_id = self._run_file_id(run_id, result.source_path)
         if not result.imported_sample_uids:
-            return {"qualified_samples": 0}
-
-        filter_spec = self._build_export_filter_spec(result.imported_sample_uids)
-        qualified_rows = self.exporter.preview(filter_spec)
-        if qualified_rows["count"] == 0:
-            logger.info("No qualified samples for source file: %s", result.source_name)
-            return {"qualified_samples": 0}
-
-        stem = self._safe_file_stem(result.source_name)
-        export_path = self.config.paths.export_dir / f"{stem}.{run_id}.openai_round_feedback.jsonl"
-        export_report_path = self.config.paths.export_dir / f"{stem}.{run_id}.openai_round_feedback.report.json"
-        unisound_path = self.config.paths.export_dir / f"{stem}.{run_id}.unisound.jsonl"
-        unisound_report_path = self.config.paths.export_dir / f"{stem}.{run_id}.unisound.report.json"
-
-        count = self.exporter.export(
-            ExportRequest(
-                output_path=export_path,
-                export_format="openai_round_feedback",
-                filter_spec=filter_spec,
-                allowed_output_dirs=[self.config.paths.export_dir],
+            finished_at = datetime.now()
+            self._upsert_run_file(
+                run_file_id=run_file_id,
+                run_id=run_id,
+                source_path=result.source_path,
+                source_name=result.source_name,
+                status="completed",
+                extracted_dir=result.extracted_dir,
+                items_paths=result.items_paths,
+                imported_samples=result.imported_count,
+                qualified_samples=0,
+                finished_at=finished_at,
             )
-        )
-        export_report_path.write_text(
-            json.dumps(
-                {
-                    "run_id": run_id,
-                    "source_path": str(result.source_path),
-                    "qualified_samples": count,
-                    "export_path": str(export_path),
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
+            self._update_source_file_status(
+                result.source_path,
+                status="completed",
+                last_run_id=run_id,
+                last_seen_at=finished_at,
+                imported_samples=result.imported_count,
+            )
+            return {"qualified_samples": 0}
 
-        unisound_config = load_unisound_config(self.config.export.unisound_config_path)
-        unisound_summary = convert_unisound_file(export_path, unisound_path, unisound_config)
-        build_unisound_report(unisound_summary, unisound_report_path)
+        try:
+            filter_spec = self._build_export_filter_spec(result.imported_sample_uids)
+            qualified_rows = self.exporter.preview(filter_spec)
+            if qualified_rows["count"] == 0:
+                logger.info("No qualified samples for source file: %s", result.source_name)
+                finished_at = datetime.now()
+                self._upsert_run_file(
+                    run_file_id=run_file_id,
+                    run_id=run_id,
+                    source_path=result.source_path,
+                    source_name=result.source_name,
+                    status="completed",
+                    extracted_dir=result.extracted_dir,
+                    items_paths=result.items_paths,
+                    imported_samples=result.imported_count,
+                    qualified_samples=0,
+                    finished_at=finished_at,
+                )
+                self._update_source_file_status(
+                    result.source_path,
+                    status="completed",
+                    last_run_id=run_id,
+                    last_seen_at=finished_at,
+                    imported_samples=result.imported_count,
+                )
+                return {"qualified_samples": 0}
 
-        run_file_id = f"{run_id}:{hashlib.sha1(str(result.source_path).encode('utf-8')).hexdigest()[:16]}"
-        self._upsert_run_file(
-            run_file_id=run_file_id,
-            run_id=run_id,
-            source_path=result.source_path,
-            source_name=result.source_name,
-            status="completed",
-            extracted_dir=result.extracted_dir,
-            items_paths=result.items_paths,
-            imported_samples=result.imported_count,
-            qualified_samples=count,
-            export_path=export_path,
-            export_report_path=export_report_path,
-            unisound_path=unisound_path,
-            unisound_report_path=unisound_report_path,
-        )
-        logger.info(
-            "Exported incremental dataset: source=%s qualified_samples=%s export=%s unisound=%s",
-            result.source_name,
-            count,
-            export_path,
-            unisound_path,
-        )
-        return {"qualified_samples": count}
+            stem = self._safe_file_stem(result.source_name)
+            export_path = self.config.paths.export_dir / f"{stem}.{run_id}.openai_round_feedback.jsonl"
+            export_report_path = self.config.paths.export_dir / f"{stem}.{run_id}.openai_round_feedback.report.json"
+            unisound_path = self.config.paths.export_dir / f"{stem}.{run_id}.unisound.jsonl"
+            unisound_report_path = self.config.paths.export_dir / f"{stem}.{run_id}.unisound.report.json"
+
+            count = self.exporter.export(
+                ExportRequest(
+                    output_path=export_path,
+                    export_format="openai_round_feedback",
+                    filter_spec=filter_spec,
+                    allowed_output_dirs=[self.config.paths.export_dir],
+                )
+            )
+            export_report_path.write_text(
+                json.dumps(
+                    {
+                        "run_id": run_id,
+                        "source_path": str(result.source_path),
+                        "qualified_samples": count,
+                        "export_path": str(export_path),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+
+            unisound_config = load_unisound_config(self.config.export.unisound_config_path)
+            unisound_summary = convert_unisound_file(export_path, unisound_path, unisound_config)
+            build_unisound_report(unisound_summary, unisound_report_path)
+
+            finished_at = datetime.now()
+            self._upsert_run_file(
+                run_file_id=run_file_id,
+                run_id=run_id,
+                source_path=result.source_path,
+                source_name=result.source_name,
+                status="completed",
+                extracted_dir=result.extracted_dir,
+                items_paths=result.items_paths,
+                imported_samples=result.imported_count,
+                qualified_samples=count,
+                export_path=export_path,
+                export_report_path=export_report_path,
+                unisound_path=unisound_path,
+                unisound_report_path=unisound_report_path,
+                finished_at=finished_at,
+            )
+            self._update_source_file_status(
+                result.source_path,
+                status="completed",
+                last_run_id=run_id,
+                last_seen_at=finished_at,
+                processed_at=finished_at,
+                imported_samples=result.imported_count,
+            )
+            logger.info(
+                "Exported incremental dataset: source=%s qualified_samples=%s export=%s unisound=%s",
+                result.source_name,
+                count,
+                export_path,
+                unisound_path,
+            )
+            return {"qualified_samples": count}
+        except Exception as exc:
+            finished_at = datetime.now()
+            self._upsert_run_file(
+                run_file_id=run_file_id,
+                run_id=run_id,
+                source_path=result.source_path,
+                source_name=result.source_name,
+                status="failed",
+                extracted_dir=result.extracted_dir,
+                items_paths=result.items_paths,
+                imported_samples=result.imported_count,
+                error_message=str(exc),
+                finished_at=finished_at,
+            )
+            self._update_source_file_status(
+                result.source_path,
+                status="failed",
+                last_run_id=run_id,
+                last_seen_at=finished_at,
+                processed_at=finished_at,
+                imported_samples=result.imported_count,
+                error_message=str(exc),
+            )
+            raise
 
     def _build_export_filter_spec(self, sample_uids: list[str]) -> ExportFilterSpec:
         filter_spec = ExportFilterSpec(
@@ -611,30 +726,6 @@ class PipelineService:
         with gzip.open(source_path, "rb") as source, target_path.open("wb") as target:
             shutil.copyfileobj(source, target)
 
-    def _collect_sample_uids(self, items_path: Path) -> list[str]:
-        sample_uids: list[str] = []
-        with items_path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                stripped = line.strip()
-                if not stripped:
-                    continue
-                payload = json.loads(stripped)
-                sample_uids.append(Sample.from_dict(payload).sample_uid)
-        return self._dedupe_keep_order(sample_uids)
-
-    def _new_sample_uids(self, sample_uids: list[str]) -> list[str]:
-        if not sample_uids:
-            return []
-        existing: set[str] = set()
-        for chunk in self._chunked(sample_uids, 500):
-            placeholders = ", ".join(["?"] * len(chunk))
-            rows = self.store.conn.execute(
-                f"SELECT sample_uid FROM samples WHERE sample_uid IN ({placeholders})",
-                chunk,
-            ).fetchall()
-            existing.update(row[0] for row in rows)
-        return [sample_uid for sample_uid in sample_uids if sample_uid not in existing]
-
     def _insert_pipeline_run(self, run_id: str, log_path: Path) -> None:
         self.store.conn.execute(
             """
@@ -676,6 +767,39 @@ class PipelineService:
                 int(summary.get("unisound_files", 0)),
                 error_message,
                 run_id,
+            ],
+        )
+
+    def _update_source_file_status(
+        self,
+        source_path: Path,
+        *,
+        status: str,
+        last_run_id: str,
+        last_seen_at: datetime,
+        processed_at: datetime | None = None,
+        imported_samples: int | None = None,
+        error_message: str | None = None,
+    ) -> None:
+        self.store.conn.execute(
+            """
+            UPDATE pipeline_source_files
+            SET status = ?,
+                last_run_id = ?,
+                last_seen_at = ?,
+                processed_at = COALESCE(?, processed_at),
+                imported_samples = COALESCE(?, imported_samples),
+                error_message = ?
+            WHERE source_path = ?
+            """,
+            [
+                status,
+                last_run_id,
+                last_seen_at,
+                processed_at,
+                imported_samples,
+                error_message,
+                str(source_path),
             ],
         )
 

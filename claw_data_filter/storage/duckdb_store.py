@@ -442,10 +442,29 @@ class DuckDBStore:
 
     def insert_sample_batch(self, rows: Sequence[tuple[Any, ...]]) -> int:
         """Insert a batch of precomputed sample rows with a single writer transaction."""
-        if not rows:
-            return 0
+        inserted_count, _ = self.insert_sample_batch_detailed(rows)
+        return inserted_count
 
-        before_count = self.conn.execute("SELECT COUNT(*) FROM samples").fetchone()[0]
+    def insert_sample_batch_detailed(self, rows: Sequence[tuple[Any, ...]]) -> tuple[int, list[str]]:
+        """Insert a batch and return the inserted count with inserted sample_uids."""
+        if not rows:
+            return 0, []
+
+        unique_rows: list[tuple[Any, ...]] = []
+        seen_sample_uids: set[str] = set()
+        for row in rows:
+            sample_uid = row[0]
+            if sample_uid in seen_sample_uids:
+                continue
+            seen_sample_uids.add(sample_uid)
+            unique_rows.append(row)
+
+        candidate_sample_uids = [row[0] for row in unique_rows]
+        existing_before = self._fetch_existing_sample_uids(candidate_sample_uids)
+        pending_rows = [row for row in unique_rows if row[0] not in existing_before]
+        if not pending_rows:
+            return 0, []
+
         for attempt in range(2):
             self.conn.execute("BEGIN TRANSACTION")
             try:
@@ -459,11 +478,12 @@ class DuckDBStore:
                     )
                     VALUES (nextval('sample_id_seq'), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    rows,
+                    pending_rows,
                 )
-                after_count = self.conn.execute("SELECT COUNT(*) FROM samples").fetchone()[0]
+                inserted_uids = self._fetch_existing_sample_uids([row[0] for row in pending_rows])
                 self.conn.execute("COMMIT")
-                return after_count - before_count
+                ordered_inserted_uids = [row[0] for row in pending_rows if row[0] in inserted_uids]
+                return len(ordered_inserted_uids), ordered_inserted_uids
             except Exception as exc:
                 self.conn.execute("ROLLBACK")
                 if attempt == 0 and "duplicate key" in str(exc).lower():
@@ -472,6 +492,22 @@ class DuckDBStore:
                 raise
 
         raise RuntimeError("Failed to insert sample batch after retrying sequence synchronization")
+
+    def _fetch_existing_sample_uids(self, sample_uids: Sequence[str]) -> set[str]:
+        if not sample_uids:
+            return set()
+
+        existing: set[str] = set()
+        chunk_size = 500
+        for start in range(0, len(sample_uids), chunk_size):
+            chunk = list(sample_uids[start:start + chunk_size])
+            placeholders = ", ".join(["?"] * len(chunk))
+            rows = self.conn.execute(
+                f"SELECT sample_uid FROM samples WHERE sample_uid IN ({placeholders})",
+                chunk,
+            ).fetchall()
+            existing.update(row[0] for row in rows)
+        return existing
 
     def _build_sample_record(self, row: tuple[Any, ...]) -> dict[str, Any]:
         tool_stats = json.loads(row[15]) if row[15] else None
