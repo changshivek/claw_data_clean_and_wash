@@ -42,6 +42,10 @@ THINK_PATTERN = re.compile(r"<think>(.*?)</think>", re.DOTALL | re.IGNORECASE)
 THINK_TAG_PATTERN = re.compile(r"</?think>", re.IGNORECASE)
 
 
+class EmptyDialogError(ValueError):
+    """Raised when a record cannot be rebuilt into a valid Unisound dialog."""
+
+
 def load_config(config_path: Path) -> UnisoundExportConfig:
     """Load JSON config used for conversion."""
     return UnisoundExportConfig.model_validate_json(config_path.read_text(encoding="utf-8"))
@@ -94,10 +98,20 @@ def convert_file(input_path: Path, output_path: Path, config: UnisoundExportConf
     count = 0
     english_count = 0
     sample_uids: list[str] = []
+    skipped_records: list[dict[str, str]] = []
 
     with output_path.open("w", encoding="utf-8") as handle:
         for record in iter_validated_input_records(input_path, limit=limit):
-            converted = convert_record(record, config)
+            try:
+                converted = convert_record(record, config)
+            except EmptyDialogError as exc:
+                skipped_records.append(
+                    {
+                        "sample_uid": record.metadata.sample_uid,
+                        "reason": str(exc),
+                    }
+                )
+                continue
             if converted.task_describe.endswith("-en"):
                 english_count += 1
             sample_uids.append(record.metadata.sample_uid)
@@ -108,6 +122,8 @@ def convert_file(input_path: Path, output_path: Path, config: UnisoundExportConf
         "count": count,
         "english_count": english_count,
         "sample_uids": sample_uids,
+        "skipped_count": len(skipped_records),
+        "skipped_records": skipped_records,
         "output_path": str(output_path),
     }
 
@@ -134,6 +150,10 @@ def convert_record(record: OpenAIRoundFeedbackRecord, config: UnisoundExportConf
     )
 
     task_describe = config.task_describe
+    if not turns:
+        raise EmptyDialogError(
+            f"sample_uid={record.metadata.sample_uid} has no user/tool anchored dialog turns"
+        )
     if config.task_describe_en_suffix and _dialog_looks_english(turns):
         task_describe = f"{task_describe}-en"
 

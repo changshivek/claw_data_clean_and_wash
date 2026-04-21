@@ -217,6 +217,49 @@ def test_validate_input_and_convert_file(tmp_path: Path):
     assert payload["tools"][0]["name"] == "web_search"
     assert "function" not in payload["tools"][0]
     assert payload["dialog"][1]["Tool"][0]["tool_call_id"] == "call_1"
+    assert summary["skipped_count"] == 0
+
+
+def test_convert_file_skips_empty_response_records(tmp_path: Path):
+    input_path = tmp_path / "input.jsonl"
+    output_path = tmp_path / "output.jsonl"
+
+    valid_payload = _base_record()
+    skipped_payload = _base_record()
+    skipped_payload["metadata"]["sample_uid"] = "sample-empty"
+    skipped_payload["metadata"]["local_sample_id"] = 2
+    skipped_payload["metadata"]["empty_response"] = True
+    skipped_payload["conversation"]["messages"] = [
+        {"role": "system", "content": "You are a coding assistant."}
+    ]
+    skipped_payload["round_feedback"] = {
+        "response_progress_steps": [],
+        "user_satisfied_episodes": [],
+    }
+
+    input_path.write_text(
+        "\n".join(
+            [
+                json.dumps(valid_payload, ensure_ascii=False),
+                json.dumps(skipped_payload, ensure_ascii=False),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    summary = convert_file(input_path, output_path, _config())
+    output_lines = output_path.read_text(encoding="utf-8").splitlines()
+
+    assert summary["count"] == 1
+    assert summary["skipped_count"] == 1
+    assert summary["skipped_records"] == [
+        {
+            "sample_uid": "sample-empty",
+            "reason": "sample_uid=sample-empty has no user/tool anchored dialog turns",
+        }
+    ]
+    assert len(output_lines) == 1
 
 
 def test_convert_record_merges_developer_into_system_prompt():

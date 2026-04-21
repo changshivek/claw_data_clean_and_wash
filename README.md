@@ -153,6 +153,13 @@ LLM_API_KEY=your_openrouter_key bash scripts/docker_run_incremental_pipeline.sh
 - 不会自动 stop、restart、rm、rmi 或复用同名容器。
 - manydata 目录通过显式 volume 挂载进入容器。
 
+Docker cron 隔离验证备注：
+
+- 本仓库已实际完成一次隔离 Docker cron E2E 验证：镜像可构建、容器可启动、crontab 可安装、cron 可按分钟触发并跑完整条增量链路。
+- 这台机器上的工作区 bind mount 对容器内 root 不可写；若做隔离验证，建议仅把 source/config 作为只读挂载，db/export/logs/unpack/work 使用 named volume 承载。
+- 若使用全新 named volume 作为 runtime，需要先确保其中存在 `db`、`export`、`logs`、`unpack`、`work` 子目录，否则 DuckDB 初始化会因目标目录不存在而失败。
+- 本次隔离验证产物已保存在 `data/docker_cron_e2e/artifacts/`，其中包含 cron 成功产出的 openai_round_feedback 与 Unisound 导出样例。
+
 如果需要调整定时表达式、配置路径或 Streamlit 端口，可通过环境变量覆盖：
 
 - CONFIG_PATH
@@ -256,11 +263,13 @@ OpenRouter 使用说明：
 - 默认并发和 batch 已下调，避免免费模型配额下触发过多限流。
 - 增量 pipeline 默认 round feedback 并发为 2、batch 为 4，并把 LLM 重试提高到 6 次。
 - 该脚本定位是小样本验证，不应用作全量数据跑批入口。
+- 该脚本现在会在 openai_round_feedback 导出后继续执行 Unisound 转换和输出校验。
 
 脚本行为说明：
 - 当 `EXPORT_FORMAT=raw_jsonl` 时，默认输出文件名是 `data/exported.jsonl`。
 - 当 `EXPORT_FORMAT=openai_round_feedback` 且 `EXPORT_PATH` 仍保持默认值时，脚本会自动改写为 `data/exported_round_feedback.jsonl`，避免把两种格式写到同一个默认路径。
 - `scripts/validate_pipeline_100.sh` 会先做端点 preflight，并将中间结果写入临时 DB；只有整条链路成功后才会替换 `data/pipeline_e2e/e2e_100_progress.duckdb`，避免端点故障时误删现有验证库。
+- `scripts/validate_pipeline_100.sh` 会额外产出 `exported_unisound.jsonl` 和 `export_report_unisound.json`，确保验证链路包含 Unisound 转换。
 
 ## 数据格式
 
@@ -551,8 +560,13 @@ bash scripts/validate_pipeline_100.sh
 默认产物：
 - DuckDB: `data/pipeline_e2e/e2e_100_progress.duckdb`
 - OpenAI 兼容导出: `data/pipeline_e2e/validation_progress/exported_round_feedback.jsonl`
-- 原始导出: `data/pipeline_e2e/validation_progress/exported_raw.jsonl`
+- Unisound 导出: `data/pipeline_e2e/validation_progress/exported_unisound.jsonl`
 - 报告: `data/pipeline_e2e/validation_progress/export_report_round_feedback.json`
+
+验证脚本内置的最终导出筛选条件为：
+- `session_merge_keep = true`
+- `empty_response = false`
+- `num_turns >= 3`
 
 ## 老库回填
 

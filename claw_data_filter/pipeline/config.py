@@ -65,6 +65,7 @@ class ExportSettings(BaseModel):
     user_satisfied_rate: str | None = None
     user_negative_feedback_rate: str | None = None
     empty_response: bool | None = False
+    num_turns_min: int | None = 3
     session_merge_keep: bool | None = True
     session_merge_status: str | None = None
     has_error: bool | None = False

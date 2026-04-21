@@ -35,6 +35,7 @@ response_progress_rate = ">=0.7"
 user_satisfied_rate = ""
 user_negative_feedback_rate = ""
 empty_response = false
+num_turns_min = 3
 session_merge_keep = true
 has_error = false
 keep_intermediate = true

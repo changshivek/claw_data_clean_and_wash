@@ -77,6 +77,7 @@ def _build_config(
                 "user_satisfied_rate": None,
                 "user_negative_feedback_rate": None,
                 "empty_response": False,
+                "num_turns_min": None,
                 "session_merge_keep": None,
                 "session_merge_status": None,
                 "has_error": None,

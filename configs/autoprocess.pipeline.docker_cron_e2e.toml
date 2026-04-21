@@ -1,0 +1,50 @@
+[paths]
+source_dir = "/app/runtime/docker_cron_e2e/source"
+unpack_dir = "/app/runtime/docker_cron_e2e/unpack"
+work_dir = "/app/runtime/docker_cron_e2e/work"
+db_path = "/app/runtime/docker_cron_e2e/db/incremental_pipeline.duckdb"
+export_dir = "/app/runtime/docker_cron_e2e/export"
+log_dir = "/app/runtime/docker_cron_e2e/logs"
+
+[llm]
+endpoint = "http://120.220.102.24:31877/v1"
+api_key = "dummy"
+model_id = "qwen35"
+timeout = 120.0
+max_retries = 6
+retry_base_delay = 10.0
+retry_max_delay = 120.0
+
+[import]
+workers = 4
+chunk_size = 32
+skip_errors = true
+
+[session_merge]
+enabled = true
+workers = 4
+batch_size = 64
+min_prefix_turns = 2
+
+[round_feedback]
+enabled = true
+workers = 4
+batch_size = 8
+
+[export]
+response_progress_rate = ""
+user_satisfied_rate = ""
+user_negative_feedback_rate = ""
+empty_response = false
+num_turns_min = 3
+session_merge_keep = true
+has_error = false
+keep_intermediate = true
+unisound_config_path = "/app/configs/unisound_export.autoprocess.json"
+
+[schedule]
+cron = "* * * * *"
+
+[web]
+host = "0.0.0.0"
+port = 8501

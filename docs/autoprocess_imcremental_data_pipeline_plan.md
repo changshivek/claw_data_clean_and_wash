@@ -62,7 +62,8 @@
 1. 已确认现有主链路和 Web 能力可复用。
 2. 已确认导入幂等基于 sample_uid，可作为增量编排的基础保证。
 3. 已完成增量编排服务、CLI、测试、容器部署骨架、README 使用说明和开发文档收尾，本次任务进入交付完成状态。
-4. OpenRouter 免费模型 google/gemma-4-26b-a4b-it:free 当前仅保留给小样本验证使用；正式增量 pipeline 默认配置已恢复为独立正式 LLM 服务占位值，API key 仍仅通过环境变量注入，不写入配置文件。
+4. 已完成 Docker 镜像构建、容器启动、cron 实际触发与隔离增量 tar 端到端验证；验证产物已落在 data/docker_cron_e2e/artifacts 供复查。
+5. OpenRouter 免费模型 google/gemma-4-26b-a4b-it:free 当前仅保留给小样本验证使用；正式增量 pipeline 默认配置已恢复为独立正式 LLM 服务占位值，API key 仍仅通过环境变量注入，不写入配置文件。
 
 # 交付结果
 1. 已新增 claw_data_filter.pipeline 模块，提供 PipelineConfig 和 PipelineService，覆盖增量扫描、递归解压、导入、session merge、round feedback、增量导出和 Unisound 转换。
@@ -85,14 +86,23 @@
 3. Unisound 转换与隔离 CLI 相关回归通过：./.venv/bin/python -m pytest tests/test_cli.py tests/test_unisound_export.py -q，结果 16 passed。
 4. OpenRouter 免费模型真实连通性已验证，通过指数退避后返回 OPENROUTER_OK；结论是接口兼容无问题，但免费模型存在明显 429 限流。
 5. shell 脚本静态检查已通过：docker/entrypoint.sh、scripts/run_incremental_pipeline.sh、scripts/docker_build_incremental_pipeline.sh、scripts/docker_run_incremental_pipeline.sh、scripts/validate_pipeline_100.sh 均完成 bash -n 校验。
+6. 已完成 Docker cron 隔离 E2E 真机验证：
+	- 通过 scripts/docker_build_incremental_pipeline.sh 成功构建隔离镜像 claw-incremental-pipeline:cron-e2e。
+	- 首次容器启动暴露出 docker/pipeline.cron 缺少文件末尾换行，修复后 crontab 可正常安装。
+	- cron 以 `* * * * *` 成功实际触发 pipeline-run。
+	- 工作区 bind mount 在该机器上对容器内 root 不可写，因此隔离验证采用“source/config 只读挂载 + runtime named volume”策略，规避宿主目录权限干扰。
+	- 首个测试 tar 完整执行到 completed，但由于隔离配置仍保留 response_progress_rate 阈值，最终 qualified_samples=0，未产出导出文件。
+	- 调整隔离配置 configs/autoprocess.pipeline.docker_cron_e2e.toml 以对齐最终导出口径后，第二个增量 tar 成功完成 import -> session merge -> round feedback -> openai_round_feedback 导出 -> Unisound 转换，结果为 imported_samples=4、exported_samples=4、exported_files=1、unisound_files=1。
+	- 成功产物已保存在 data/docker_cron_e2e/artifacts/export/，对应日志保存在 data/docker_cron_e2e/artifacts/logs/。
 
 # Git 维护记录
 1. 已创建功能提交 c83aee7：Add incremental tar pipeline orchestration
 2. 已创建功能提交 e248f28：Add unisound export tooling
-3. 文档与说明维护将在本次收尾提交中单独记录，保持功能提交与文档提交边界清晰。
+3. 已完成本次收尾维护：补齐最终导出筛选条件、Unisound 转换容错、100 条验证链路、Docker cron 隔离 E2E 结果与 README/计划文档说明；保持功能提交、验证修复与文档收尾边界清晰。
 
 # 风险与备注
 1. round feedback 依赖外部 LLM 服务；OpenRouter 免费模型存在明显速率限制，因此仅用于小样本验证脚本，不能作为全量跑批默认依赖。
-2. 容器脚本、Dockerfile 和 cron 入口已完成静态审计，但在本次会话中未实际执行 docker build 或 docker run，以遵守“只通过受约束脚本操作 docker 且不直接影响其他容器”的约束。
-3. 正式增量跑批仍需要接入稳定的正式 LLM 服务，并在目标环境中完成一次端到端真机验证。
-4. keep_intermediate 目前仍默认保留中间 openai_round_feedback 导出文件，若后续需要节省磁盘，可在转换成功后增加清理策略。
+2. 容器脚本、Dockerfile 和 cron 入口现已完成静态审计与一次隔离真机验证；验证中使用唯一镜像 tag、唯一容器名和独立 runtime volume，未影响其他容器。
+3. 该机器上的工作区 bind mount 对容器内 root 不可写；正式部署若继续使用 bind mount 承载可写目录，需要预先确认宿主权限模型，或改用命名 volume 承载 runtime 数据。
+4. 正式增量跑批仍需要接入稳定的正式 LLM 服务，并在目标 manydata 路径上完成一次生产口径端到端验证。
+5. keep_intermediate 目前仍默认保留中间 openai_round_feedback 导出文件，若后续需要节省磁盘，可在转换成功后增加清理策略。

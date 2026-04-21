@@ -519,6 +519,7 @@ class PipelineService:
     def _build_export_filter_spec(self, sample_uids: list[str]) -> ExportFilterSpec:
         filter_spec = ExportFilterSpec(
             empty_response=self.config.export.empty_response,
+            num_turns_min=self.config.export.num_turns_min,
             session_merge_keep=self.config.export.session_merge_keep,
             session_merge_status=self.config.export.session_merge_status,
             has_error=self.config.export.has_error,
