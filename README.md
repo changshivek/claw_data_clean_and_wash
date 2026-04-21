@@ -103,6 +103,27 @@ LLM_API_KEY=your_openrouter_key \
 
 运行结果会写入同一个 DuckDB 中的 pipeline_runs、pipeline_source_files、pipeline_run_files、pipeline_run_samples 表，并在 log_dir 下生成逐次运行日志。
 
+新增 CLI 入口：
+
+```bash
+# 直接运行一次增量 tar pipeline
+./.venv/bin/python -m claw_data_filter.cli pipeline-run \
+  --config configs/autoprocess.pipeline.toml
+
+# 抽取指定 sample_uid 到隔离 DuckDB，单独复现 round feedback
+./.venv/bin/python -m claw_data_filter.cli \
+  --db-path data.duckdb \
+  round-feedback-sample \
+  --sample-uid <sample_uid> \
+  --isolated-db-path data/isolated/sample.duckdb \
+  --workers 1
+```
+
+适用场景：
+
+- pipeline-run 用于定时任务、手动补跑和容器内 cron 调度。
+- round-feedback-sample 用于长样本、异常样本或 prompt 过长样本的隔离复现，不污染源库。
+
 ## 容器部署
 
 已提供以下部署文件：
@@ -138,6 +159,51 @@ LLM_API_KEY=your_openrouter_key bash scripts/docker_run_incremental_pipeline.sh
 - CRON_SCHEDULE
 - RUN_ON_START
 - STREAMLIT_PORT
+
+## Unisound 离线转换
+
+当前仓库已补充离线 Unisound 转换与校验工具，输入格式为 openai_round_feedback_v2 JSONL。
+
+相关文件：
+
+- scripts/unisound_export.py
+- scripts/unisound_export_models.py
+- scripts/unisound_export_config.exported_0415.json
+- docs/unisound-export-migration-plan.md
+- docs/unisound-export-test-notes.md
+
+常用命令：
+
+```bash
+# 校验输入 openai_round_feedback_v2 文件
+./.venv/bin/python scripts/unisound_export.py validate-input \
+  --input data/exported_0415_all_except_user_unsatisfy_gt_2ep.jsonl
+
+# 抽样转换 10 条
+./.venv/bin/python scripts/unisound_export.py convert \
+  --input data/exported_0415_all_except_user_unsatisfy_gt_2ep.jsonl \
+  --output data/exported_0415_all_except_user_unsatisfy_gt_2ep.sample10.unisound.jsonl \
+  --config scripts/unisound_export_config.exported_0415.json \
+  --limit 10
+
+# 全量转换
+./.venv/bin/python scripts/unisound_export.py convert \
+  --input data/exported_0415_all_except_user_unsatisfy_gt_2ep.jsonl \
+  --output data/exported_0415_all_except_user_unsatisfy_gt_2ep.unisound.jsonl \
+  --config scripts/unisound_export_config.exported_0415.json \
+  --report data/exported_0415_all_except_user_unsatisfy_gt_2ep.unisound.report.json
+
+# 校验转换结果
+./.venv/bin/python scripts/unisound_export.py validate-output \
+  --input data/exported_0415_all_except_user_unsatisfy_gt_2ep.unisound.jsonl
+```
+
+实现口径：
+
+- 顶级 tools 已扁平化为 name、description、parameters。
+- 顶级 system_prompt 与 dialog 分离。
+- Chosen 和 Rejected 在单答案场景下固定为 Assistant。
+- round_feedback 会映射回重建后的 Unisound 轮次，同时可保留 ext 扩展字段。
 
 导入脚本可配置项包括：
 - INPUT_FILE
@@ -346,13 +412,17 @@ rate 计算说明:
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `LLM_ENDPOINT` | https://openrouter.ai/api/v1 | LLM API 地址 |
+| `LLM_ENDPOINT` | http://localhost:8000/v1 | LLM API 地址 |
 | `LLM_API_KEY` | - | API 密钥 |
-| `LLM_MODEL_ID` | google/gemma-4-26b-a4b-it:free | 模型 ID |
+| `LLM_MODEL_ID` | - | 模型 ID |
 | `DB_PATH` | ./data.duckdb | 数据库路径 |
 | `BATCH_SIZE` | 10 | round feedback 每批领取样本数 |
 | `MAX_CONCURRENCY` | 10 | 最大并发数 |
 | `LLM_TIMEOUT` | 60.0 | 超时（秒） |
+
+说明：
+- 上表描述的是仓库核心 CLI 的默认环境变量。
+- scripts/validate_pipeline_100.sh 会单独默认指向 OpenRouter 免费模型，仅用于小样本验证。
 
 ## CLI 命令
 
@@ -360,7 +430,9 @@ rate 计算说明:
 claw-filter import <file>              # 导入 JSONL
 claw-filter pressure-test              # LLM 稳定性测试
 claw-filter round-feedback            # 运行 round feedback 评分
+claw-filter round-feedback-sample     # 在隔离 DuckDB 复现指定样本
 claw-filter session-merge            # 运行 session merge 打标
+claw-filter pipeline-run             # 运行一次增量 tar pipeline
 claw-filter stats                     # 查看统计
 claw-filter filter [options] --export <file>  # 筛选导出
 claw-filter info                     # 数据库信息

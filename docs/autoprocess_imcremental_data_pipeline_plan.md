@@ -61,9 +61,38 @@
 # 当前进展
 1. 已确认现有主链路和 Web 能力可复用。
 2. 已确认导入幂等基于 sample_uid，可作为增量编排的基础保证。
-3. 已完成增量编排服务、CLI、测试以及容器部署骨架的实现，当前处于 README、脚本审计和真实 LLM 连通性验证阶段。
+3. 已完成增量编排服务、CLI、测试、容器部署骨架、README 使用说明和开发文档收尾，本次任务进入交付完成状态。
 4. OpenRouter 免费模型 google/gemma-4-26b-a4b-it:free 当前仅保留给小样本验证使用；正式增量 pipeline 默认配置已恢复为独立正式 LLM 服务占位值，API key 仍仅通过环境变量注入，不写入配置文件。
 
+# 交付结果
+1. 已新增 claw_data_filter.pipeline 模块，提供 PipelineConfig 和 PipelineService，覆盖增量扫描、递归解压、导入、session merge、round feedback、增量导出和 Unisound 转换。
+2. 已新增 CLI 入口 claw-filter pipeline-run，可按 TOML 配置触发单次 pipeline；同时保留并整理了 round-feedback-sample 隔离复现入口。
+3. 已扩展 UnifiedExporter，支持 selected_sample_uids 增量导出和 allowed_output_dirs 输出目录白名单。
+4. 已提供默认配置与部署文件：configs/autoprocess.pipeline.toml、configs/unisound_export.autoprocess.json、Dockerfile、docker/entrypoint.sh、docker/pipeline.cron、scripts/run_incremental_pipeline.sh、scripts/docker_build_incremental_pipeline.sh、scripts/docker_run_incremental_pipeline.sh。
+5. 已整理并提交 Unisound 离线转换工具：scripts/unisound_export.py、scripts/unisound_export_models.py、scripts/unisound_export_config.exported_0415.json，以及对应测试与说明文档。
+
+# 使用说明摘要
+1. 本地单次运行增量 pipeline：./.venv/bin/python -m claw_data_filter.cli pipeline-run --config configs/autoprocess.pipeline.toml
+2. 使用 OpenRouter 免费模型验证 100 条小样本：先导出 LLM_API_KEY，再运行 bash scripts/validate_pipeline_100.sh
+3. 构建容器镜像：bash scripts/docker_build_incremental_pipeline.sh
+4. 启动容器：LLM_API_KEY=<key> bash scripts/docker_run_incremental_pipeline.sh
+5. 隔离复现单样本 round feedback：claw-filter --db-path <source_db> round-feedback-sample --sample-uid <uid> --isolated-db-path <isolated_db> --workers 1
+6. 离线转换 Unisound：./.venv/bin/python scripts/unisound_export.py convert --input <openai_round_feedback_jsonl> --output <unisound_jsonl> --config scripts/unisound_export_config.exported_0415.json
+
+# 验证结果
+1. 增量 pipeline 相关回归测试通过：./.venv/bin/python -m pytest tests/test_pipeline_service.py tests/test_exporters.py -q，结果 12 passed。
+2. CLI、pipeline 和 exporter 综合回归通过：./.venv/bin/python -m pytest tests/test_cli.py tests/test_pipeline_service.py tests/test_exporters.py -q，结果 21 passed。
+3. Unisound 转换与隔离 CLI 相关回归通过：./.venv/bin/python -m pytest tests/test_cli.py tests/test_unisound_export.py -q，结果 16 passed。
+4. OpenRouter 免费模型真实连通性已验证，通过指数退避后返回 OPENROUTER_OK；结论是接口兼容无问题，但免费模型存在明显 429 限流。
+5. shell 脚本静态检查已通过：docker/entrypoint.sh、scripts/run_incremental_pipeline.sh、scripts/docker_build_incremental_pipeline.sh、scripts/docker_run_incremental_pipeline.sh、scripts/validate_pipeline_100.sh 均完成 bash -n 校验。
+
+# Git 维护记录
+1. 已创建功能提交 c83aee7：Add incremental tar pipeline orchestration
+2. 已创建功能提交 e248f28：Add unisound export tooling
+3. 文档与说明维护将在本次收尾提交中单独记录，保持功能提交与文档提交边界清晰。
+
 # 风险与备注
-1. 文档要求“每一步开发基于 git commit 维护”，但当前会话执行策略不包含自动提交；代码实现会继续推进，commit 需在你明确要求后执行。
-2. round feedback 依赖外部 LLM 服务；OpenRouter 免费模型存在明显速率限制，因此仅用于小样本验证脚本，不能作为全量跑批默认依赖。
+1. round feedback 依赖外部 LLM 服务；OpenRouter 免费模型存在明显速率限制，因此仅用于小样本验证脚本，不能作为全量跑批默认依赖。
+2. 容器脚本、Dockerfile 和 cron 入口已完成静态审计，但在本次会话中未实际执行 docker build 或 docker run，以遵守“只通过受约束脚本操作 docker 且不直接影响其他容器”的约束。
+3. 正式增量跑批仍需要接入稳定的正式 LLM 服务，并在目标环境中完成一次端到端真机验证。
+4. keep_intermediate 目前仍默认保留中间 openai_round_feedback 导出文件，若后续需要节省磁盘，可在转换成功后增加清理策略。

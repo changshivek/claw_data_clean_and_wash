@@ -1,0 +1,111 @@
+
+创建： 李雪，最新修改于： 四月 16, 2026
+
+数据标准格式说明
+除必备字段外，尽可能多的保留原数据集的信息，便于后续做验证、分类等
+
+必备字段：
+
+_id 或 id ： 唯一标识，如果是已经入库的数据，一定有 _id，否则必须有id，如果原始数据集中有id，应该 id = 源数据集中的id，便于溯源
+domain ：目前和task_describe结合作为数据采样的依据，主要分为5大类：单轮、多轮、英文、合规、重点能力（专门为某种能力做的数据收集，单独标识，便于采样）
+重点能力取值见03-数据类别规范，如：Math、Code、STEM、Logic、CodingAgent、TerminalAgent、SearchAgent、GeneralAgent
+task_describe ： 每个数据集的英文名称（见名知意），每个来源唯一，和domain一起作为采样依据，可参考：UniData.SFT.200w.240415.v-exp-50w 进一步理解domain和task_describe
+task_descibe区分中英文，若query为英文，则taskdescribe增加“-en”后缀
+增加后缀是为了从数据库中采样时，确定中英文比例
+如数据集 aaa 中包含中文和英文，则最终交付的数据中会存在 aaa 和 aaa-en 两种task_describe
+如果是一个大数据集中，综合了不同来源数据，可以按照 数据集名称_数据来源， 如：tulu2_lima (来自tulu2数据合集中的lima数据集)
+内部数据以 Unisound_ 开头，如: Unisound_compound_instruction (云知声自构建复杂指令)
+data_source ： 来自开源数据集的具体描述，无具体要求，但尽可能的不丢失原始数据描述信息
+Chosen ：必须，且不为空，标识 dailog 中更好的答案所在的 key 名，同一模型key名统一
+已有key名：Assistant、GPT35、Qwen1.5-14B-Chat、Qwen_72B、Qwen1.5-72B、GPT4（历史不确定哪个接口生成的数据）、Uni_Gen、UniGPT2.08.01.00.240315、azure-gpt4-1106-turbo-preview-batch azure-gpt4-32k-batch、azure-gpt4-8k-batch
+开源数据集中的答案，采用回复模型名标记，无法确定回复模型时用Assistant标识，其他key名用于我们自己生成的答案，采用我们内部模型生成的答案，用完整模型名称标识
+Chosen 的值必须在dialog[-1]中出现
+Rejected ：必须，且不为空，标识 dailog 中稍差的答案所在的 key 名
+当只有一个答案时，Chosen 值=Rejected 值
+Rejected 的值必须在dialog[-1]中出现
+system_prompt
+系统提示
+tools
+工具说明，主要应用于Agentic数据的系统提示拼接
+dialog：列表的长度，代表了真实交互轮数
+最后一轮：User、Chosen对应的key、Rejected对应的key
+前n-1轮：User/Tool、Assistant
+ 
+
+示例：
+
+{
+    "_id": "670e20f8b1cd3f55b8f6331e",
+    "domain": "Agent",
+    "task_describe": "internal_web_tool",
+    "data_source": "multiturn_dialog_search_and_answer",
+    "Chosen": "Assistant",
+    "Rejected": "Assistant",
+    "system_prompt": "You are OpenHands agent... <ROLE>...",   // 行为规范
+    "tools": [           // 可调用工具说明，似乎还缺少一个工具输出规范
+        {
+            "name": "think",
+            "parameters": {}
+        },
+        {
+            "name": "execute_bash",
+            "parameters": {}
+        }
+    ],
+    "dialog": [
+        {
+            "turn_id": 1,
+            "loss": true,  // 是否计算这一轮的Assistant loss, 默认为True
+            "User": "I've uploaded a python code repository. The addon manager no longer logs...",
+            "Assistant": {
+                "thought": "",
+                "answer": "",
+                "tool_calls": [
+                    {
+                        "function": {
+                            "arguments": {
+                                "path": "/workspace/fuzzyfinder/tests/test_fuzzyfinder.py",
+                                "command": "view"
+                            },
+                            "name": "str_replace_editor"
+                        },
+                        "id": "call_acfe7fbe08b14c3d8d1fa99d",
+                        "index": null,
+                        "type": "function"
+                    }
+                ]
+            }
+        },
+        {
+            "turn_id": 2,
+            "loss": true,
+            "Tool": [
+                "I've uploaded a python code repository. The addon manager no longer logs..."
+            ],
+            "Assistant": {
+                "thought": "",
+                "answer": "",
+                "tool_calls": [
+                    {
+                        "function": {
+                            "arguments": {
+                                "path": "/workspace/fuzzyfinder/tests/test_fuzzyfinder.py",
+                                "command": "view"
+                            },
+                            "name": "str_replace_editor"
+                        },
+                        "id": "call_acfe7fbe08b14c3d8d1fa99d",
+                        "index": null,
+                        "type": "function"
+                    }
+                ]
+            }
+        }
+    ]
+}
+ 
+
+Agentic数据相关补充：
+
+system_prompt和tools共同组成最终拼接的系统提示，需要包含以下信息，很重要的是“可用工具说明”和“工具输出规范”
+若对于Terminal这种无法明确说明所有工具的，应该要有”工具输出规范“
