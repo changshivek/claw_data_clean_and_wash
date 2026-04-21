@@ -1,0 +1,14 @@
+{
+  "domain": "Agent",
+  "task_describe": "claw_incremental_unirouter",
+  "data_source": "unirouter_incremental_pipeline",
+  "default_answer_key": "Assistant",
+  "id_strategy": "source_metadata_then_sample_uid",
+  "preserve_extensions": true,
+  "preserve_round_feedback": true,
+  "preserve_conversation": true,
+  "task_describe_en_suffix": true,
+  "turn_feedback_field": "round_feedback",
+  "think_split_strategy": "tag",
+  "english_detection_mode": "simple"
+}

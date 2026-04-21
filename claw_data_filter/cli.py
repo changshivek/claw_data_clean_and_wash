@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import click
@@ -18,6 +19,7 @@ from claw_data_filter.exporters.unified_exporter import (
     UnifiedExporter,
 )
 from claw_data_filter.importers.jsonl_importer import JSONLImporter
+from claw_data_filter.pipeline import PipelineConfig, PipelineService
 from claw_data_filter.storage.duckdb_store import DuckDBStore
 
 
@@ -33,6 +35,31 @@ def _configure_logging() -> None:
 
 _configure_logging()
 logger = logging.getLogger(__name__)
+
+
+def _default_isolated_round_feedback_db_path(source_db_path: Path) -> Path:
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return source_db_path.parent / "isolated" / f"round_feedback_sample_{timestamp}.duckdb"
+
+
+def _summarize_round_feedback_sample(sample_uid: str, raw_json: dict) -> dict[str, int]:
+    from claw_data_filter.models.sample import extract_messages_from_payload
+    from claw_data_filter.processors.round_feedback import TurnContextBuilder
+
+    messages = extract_messages_from_payload(raw_json)
+    builder = TurnContextBuilder()
+    response_contexts = builder.extract_response_contexts(sample_uid, messages)
+    episode_contexts = builder.extract_episode_contexts(sample_uid, messages)
+    response_prompt_lengths = [len(builder.build_response_progress_prompt(context)) for context in response_contexts]
+    episode_prompt_lengths = [len(builder.build_user_satisfied_prompt(context)) for context in episode_contexts]
+
+    return {
+        "message_count": len(messages),
+        "response_context_count": len(response_contexts),
+        "episode_context_count": len(episode_contexts),
+        "max_response_prompt_chars": max(response_prompt_lengths, default=0),
+        "max_episode_prompt_chars": max(episode_prompt_lengths, default=0),
+    }
 
 def _shared_cpu_budget(max_cap: int | None = None) -> int:
     cpu_count = max(1, os.cpu_count() or 1)
@@ -312,6 +339,96 @@ def round_feedback(ctx, workers, batch_size):
     asyncio.run(_run_round_feedback())
 
 
+@cli.command(name="round-feedback-sample")
+@click.option("--sample-uid", "sample_uids", multiple=True, required=True, help="Sample UID to isolate and process; repeat for multiple samples")
+@click.option("--source-db-path", type=click.Path(exists=True, dir_okay=False, path_type=Path), help="Source DuckDB path; defaults to --db-path")
+@click.option("--isolated-db-path", type=click.Path(dir_okay=False, path_type=Path), help="Output DuckDB path for isolated reproduction")
+@click.option("--workers", type=int, default=1, show_default=True, help="Internal concurrency used while processing each isolated sample")
+@click.pass_context
+def round_feedback_sample(ctx, sample_uids, source_db_path, isolated_db_path, workers):
+    """Run round-feedback on specific sample_uids in an isolated DuckDB."""
+    from claw_data_filter.models.sample import Sample
+
+    config = ctx.obj["config"]
+    source_path = source_db_path or Path(config.db_path)
+    isolated_path = isolated_db_path or _default_isolated_round_feedback_db_path(source_path)
+    isolated_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if isolated_path.exists():
+        raise click.ClickException(f"Isolated DB already exists: {isolated_path}")
+
+    source_store = DuckDBStore(source_path, read_only=True)
+    try:
+        sample_records: list[tuple[str, dict, dict[str, int]]] = []
+        for sample_uid in sample_uids:
+            record = source_store.get_sample_by_uid(sample_uid)
+            if not record:
+                raise click.ClickException(f"Sample UID not found in source DB: {sample_uid}")
+            summary = _summarize_round_feedback_sample(sample_uid, record["raw_json"])
+            sample_records.append((sample_uid, record["raw_json"], summary))
+    finally:
+        source_store.close()
+
+    click.echo(f"Preparing isolated round-feedback run for {len(sample_records)} sample(s)...")
+    click.echo(f"Source DB: {source_path}")
+    click.echo(f"Isolated DB: {isolated_path}")
+    logger.info(
+        "CLI round feedback sample command starting: source_db=%s isolated_db=%s sample_count=%s workers=%s endpoint=%s model=%s",
+        source_path,
+        isolated_path,
+        len(sample_records),
+        workers,
+        config.llm_endpoint,
+        config.llm_model_id,
+    )
+    for sample_uid, _, summary in sample_records:
+        click.echo(
+            "Sample summary: "
+            f"sample_uid={sample_uid} messages={summary['message_count']} "
+            f"response_contexts={summary['response_context_count']} episode_contexts={summary['episode_context_count']} "
+            f"max_response_prompt_chars={summary['max_response_prompt_chars']} "
+            f"max_episode_prompt_chars={summary['max_episode_prompt_chars']}"
+        )
+
+    async def _run_round_feedback_sample() -> None:
+        from claw_data_filter.llm.async_client import AsyncLLMClient
+        from claw_data_filter.processors.round_feedback import RoundFeedbackProcessor
+
+        llm = AsyncLLMClient(
+            endpoint=config.llm_endpoint,
+            api_key=config.llm_api_key,
+            model=config.llm_model_id,
+            timeout=config.llm_timeout,
+        )
+        isolated_store = DuckDBStore(isolated_path)
+        processor = RoundFeedbackProcessor(
+            isolated_store,
+            llm,
+            max(1, workers),
+            llm_max_retries=config.max_retries,
+            llm_retry_base_delay=config.llm_retry_base_delay,
+            llm_retry_max_delay=config.llm_retry_max_delay,
+        )
+
+        try:
+            for sample_uid, raw_json, summary in sample_records:
+                isolated_store.insert_sample(Sample.from_dict(raw_json))
+                result = await processor.process_sample(sample_uid, raw_json)
+                response_llm_errors = sum(1 for row in result.response_judgments if row.llm_error)
+                episode_llm_errors = sum(1 for row in result.episode_judgments if row.llm_error)
+                click.echo(
+                    "Isolated sample complete: "
+                    f"sample_uid={sample_uid} response_contexts={summary['response_context_count']} "
+                    f"episode_contexts={summary['episode_context_count']} response_llm_errors={response_llm_errors} "
+                    f"episode_llm_errors={episode_llm_errors} has_error={bool(result.tool_stats.get('has_error'))}"
+                )
+        finally:
+            await llm.close()
+            isolated_store.close()
+
+    asyncio.run(_run_round_feedback_sample())
+
+
 @cli.command(name="session-merge")
 @click.option("--workers", type=int, default=DEFAULT_SESSION_MERGE_WORKERS, help="Number of parallel workers")
 @click.option("--batch-size", type=int, default=512, help="Batch size per worker")
@@ -339,6 +456,28 @@ def session_merge_cmd(ctx, workers, batch_size, min_prefix_turns, dry_run):
         min_prefix_turns=min_prefix_turns,
     )
     click.echo("=== Session Merge Summary ===")
+    for key in sorted(summary):
+        click.echo(f"{key}: {summary[key]}")
+
+
+@cli.command(name="pipeline-run")
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    required=True,
+    help="Path to the incremental pipeline TOML config",
+)
+def pipeline_run_cmd(config_path: Path):
+    """Run the incremental tar-to-Unisound pipeline once."""
+    pipeline_config = PipelineConfig.from_toml(config_path)
+    service = PipelineService(pipeline_config)
+    try:
+        summary = service.run_once()
+    finally:
+        service.close()
+
+    click.echo("=== Pipeline Run Summary ===")
     for key in sorted(summary):
         click.echo(f"{key}: {summary[key]}")
 

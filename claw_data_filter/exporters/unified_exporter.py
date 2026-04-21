@@ -43,6 +43,7 @@ class ExportFilterSpec:
     date_from: str | None = None
     date_to: str | None = None
     selected_ids: list[int] = field(default_factory=list)
+    selected_sample_uids: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -53,18 +54,23 @@ class ExportRequest:
     export_format: str = RAW_JSONL
     filter_spec: ExportFilterSpec = field(default_factory=ExportFilterSpec)
     limit: int | None = None
+    allowed_output_dirs: list[Path] = field(default_factory=list)
 
 
-def _validate_output_path(path: Path) -> None:
+def _validate_output_path(path: Path, extra_allowed_dirs: list[Path] | None = None) -> None:
     """Validate output path is within allowed directories."""
     resolved_path = path.resolve()
-    for allowed_dir in [Path.cwd() / item for item in ALLOWED_IO_DIRS]:
+    allowed_dirs = [Path.cwd() / item for item in ALLOWED_IO_DIRS]
+    if extra_allowed_dirs:
+        allowed_dirs.extend(extra_allowed_dirs)
+    for allowed_dir in allowed_dirs:
         try:
             resolved_path.relative_to(allowed_dir.resolve())
             return
         except ValueError:
             continue
-    raise ValueError(f"Output path must be within allowed directories: {ALLOWED_IO_DIRS}")
+    allowed_display = [str(path) for path in allowed_dirs]
+    raise ValueError(f"Output path must be within allowed directories: {allowed_display}")
 
 
 class UnifiedExporter:
@@ -80,6 +86,8 @@ class UnifiedExporter:
             f"SELECT COUNT(*), COALESCE(AVG(length(CAST(raw_json AS VARCHAR))), 0) FROM samples WHERE {where_clause}",
             params,
         ).fetchone()
+        if row is None:
+            row = (0, 0)
         count = int(row[0] or 0)
         avg_chars = int(row[1] or 0)
         return {
@@ -92,7 +100,7 @@ class UnifiedExporter:
         if request.export_format not in SUPPORTED_EXPORT_FORMATS:
             raise ValueError(f"Unsupported export format: {request.export_format}")
 
-        _validate_output_path(request.output_path)
+        _validate_output_path(request.output_path, request.allowed_output_dirs)
         rows = self._fetch_sample_rows(request.filter_spec, request.limit)
         request.output_path.parent.mkdir(parents=True, exist_ok=True)
         temp_path: Path | None = None
@@ -199,6 +207,10 @@ class UnifiedExporter:
             placeholders = ", ".join(["?"] * len(filter_spec.selected_ids))
             extra_clauses.append(f"{table_name}.id IN ({placeholders})")
             params.extend(filter_spec.selected_ids)
+        if filter_spec.selected_sample_uids:
+            placeholders = ", ".join(["?"] * len(filter_spec.selected_sample_uids))
+            extra_clauses.append(f"{table_name}.sample_uid IN ({placeholders})")
+            params.extend(filter_spec.selected_sample_uids)
 
         if extra_clauses:
             return (
@@ -290,9 +302,12 @@ class UnifiedExporter:
         }
 
     def _build_source_metadata(self, raw_json: dict[str, Any]) -> dict[str, Any]:
-        request = raw_json.get("request") if isinstance(raw_json.get("request"), dict) else {}
-        headers = request.get("headers") if isinstance(request.get("headers"), dict) else {}
-        body_json = request.get("bodyJson") if isinstance(request.get("bodyJson"), dict) else {}
+        request_payload = raw_json.get("request")
+        request = request_payload if isinstance(request_payload, dict) else {}
+        headers_payload = request.get("headers")
+        headers = headers_payload if isinstance(headers_payload, dict) else {}
+        body_json_payload = request.get("bodyJson")
+        body_json = body_json_payload if isinstance(body_json_payload, dict) else {}
         messages = extract_messages_from_payload(raw_json)
         source_metadata = raw_json.get("metadata")
 

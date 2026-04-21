@@ -35,12 +35,15 @@ DB_PATH="${DB_PATH:-${PROJECT_ROOT}/data/pipeline_e2e/e2e_100_progress.duckdb}"
 EXPORT_DIR="${EXPORT_DIR:-${PROJECT_ROOT}/data/pipeline_e2e/validation_progress}"
 TMP_DB_PATH="${DB_PATH}.tmp.$$"
 
-LLM_ENDPOINT="${LLM_ENDPOINT:-http://127.0.0.1:8000/v1}"
-LLM_API_KEY="${LLM_API_KEY:-dummy}"
-LLM_MODEL_ID="${LLM_MODEL_ID:-qwen35}"
-MAX_CONCURRENCY="${MAX_CONCURRENCY:-16}"
-BATCH_SIZE="${BATCH_SIZE:-20}"
-LLM_TIMEOUT="${LLM_TIMEOUT:-60}"
+LLM_ENDPOINT="${LLM_ENDPOINT:-https://openrouter.ai/api/v1}"
+LLM_API_KEY="${LLM_API_KEY:-}"
+LLM_MODEL_ID="${LLM_MODEL_ID:-google/gemma-4-26b-a4b-it:free}"
+MAX_CONCURRENCY="${MAX_CONCURRENCY:-4}"
+BATCH_SIZE="${BATCH_SIZE:-8}"
+LLM_TIMEOUT="${LLM_TIMEOUT:-90}"
+MAX_RETRIES="${MAX_RETRIES:-6}"
+LLM_RETRY_BASE_DELAY="${LLM_RETRY_BASE_DELAY:-10}"
+LLM_RETRY_MAX_DELAY="${LLM_RETRY_MAX_DELAY:-120}"
 
 CPU_COUNT="$(detect_cpu_count)"
 IMPORT_WORKERS="${IMPORT_WORKERS:-$(shared_cpu_budget "${CPU_COUNT}" 8)}"
@@ -58,6 +61,11 @@ fi
 
 if [[ ! -f "${INPUT_FILE}" ]]; then
   log "Input file not found: ${INPUT_FILE}" >&2
+  exit 1
+fi
+
+if [[ -z "${LLM_API_KEY}" ]]; then
+  log "LLM_API_KEY is required. Export your OpenRouter key before running this script." >&2
   exit 1
 fi
 
@@ -80,7 +88,7 @@ run_cli() {
 log "Validation configuration: input=${INPUT_FILE} db=${DB_PATH} temp_db=${TMP_DB_PATH} cpu_count=${CPU_COUNT} import_workers=${IMPORT_WORKERS} import_chunk_size=${IMPORT_CHUNK_SIZE} session_merge_workers=${SESSION_MERGE_WORKERS} llm_concurrency=${MAX_CONCURRENCY} batch_size=${BATCH_SIZE} endpoint=${LLM_ENDPOINT} model=${LLM_MODEL_ID}"
 
 log "[0/7] pressure-test preflight ${LLM_ENDPOINT}"
-LLM_API_KEY="${LLM_API_KEY}" MAX_CONCURRENCY="${MAX_CONCURRENCY}" LLM_TIMEOUT="${LLM_TIMEOUT}" \
+LLM_API_KEY="${LLM_API_KEY}" MAX_CONCURRENCY="${MAX_CONCURRENCY}" LLM_TIMEOUT="${LLM_TIMEOUT}" MAX_RETRIES="${MAX_RETRIES}" LLM_RETRY_BASE_DELAY="${LLM_RETRY_BASE_DELAY}" LLM_RETRY_MAX_DELAY="${LLM_RETRY_MAX_DELAY}" \
   "${PYTHON_BIN}" -m claw_data_filter.cli \
   --db-path "${TMP_DB_PATH}" \
   --llm-endpoint "${LLM_ENDPOINT}" \
@@ -93,7 +101,7 @@ log "[1/7] import ${INPUT_FILE}"
 run_cli import --workers "${IMPORT_WORKERS}" --chunk-size "${IMPORT_CHUNK_SIZE}" "${INPUT_FILE}"
 
 log "[2/7] pressure-test ${LLM_ENDPOINT}"
-LLM_API_KEY="${LLM_API_KEY}" LLM_TIMEOUT="${LLM_TIMEOUT}" run_cli pressure-test
+LLM_API_KEY="${LLM_API_KEY}" LLM_TIMEOUT="${LLM_TIMEOUT}" MAX_RETRIES="${MAX_RETRIES}" LLM_RETRY_BASE_DELAY="${LLM_RETRY_BASE_DELAY}" LLM_RETRY_MAX_DELAY="${LLM_RETRY_MAX_DELAY}" run_cli pressure-test
 
 log "[3/7] session-merge"
 run_cli session-merge \
@@ -102,7 +110,7 @@ run_cli session-merge \
   --min-prefix-turns "${SESSION_MERGE_MIN_PREFIX_TURNS}"
 
 log "[4/7] round-feedback"
-LLM_API_KEY="${LLM_API_KEY}" MAX_CONCURRENCY="${MAX_CONCURRENCY}" BATCH_SIZE="${BATCH_SIZE}" LLM_TIMEOUT="${LLM_TIMEOUT}" \
+LLM_API_KEY="${LLM_API_KEY}" MAX_CONCURRENCY="${MAX_CONCURRENCY}" BATCH_SIZE="${BATCH_SIZE}" LLM_TIMEOUT="${LLM_TIMEOUT}" MAX_RETRIES="${MAX_RETRIES}" LLM_RETRY_BASE_DELAY="${LLM_RETRY_BASE_DELAY}" LLM_RETRY_MAX_DELAY="${LLM_RETRY_MAX_DELAY}" \
   run_cli round-feedback --workers "${MAX_CONCURRENCY}" --batch-size "${BATCH_SIZE}"
 
 log "[5/7] stats"

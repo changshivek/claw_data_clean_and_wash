@@ -2,6 +2,17 @@
 
 LLM-powered agent conversation data filtering tool. Import JSONL files, run round feedback judgments, filter and export high-quality data.
 
+当前推荐的验证用远端 LLM 配置是 OpenRouter 免费模型：
+
+- LLM_ENDPOINT=https://openrouter.ai/api/v1
+- LLM_MODEL_ID=google/gemma-4-26b-a4b-it:free
+- LLM_API_KEY 通过环境变量提供，不写入仓库配置文件
+
+约束：
+
+- OpenRouter 免费模型只用于小样本验证、pressure-test 和链路冒烟。
+- 增量正式跑批默认配置仍应使用独立可控的正式 LLM 服务，不应直接依赖免费模型。
+
 当前主链路:
 
 1. 导入 OpenAI 或 UniRouter 对话数据。
@@ -19,7 +30,11 @@ LLM-powered agent conversation data filtering tool. Import JSONL files, run roun
 # 1. 导入数据
 claw-filter import data.jsonl
 
-# 2. 运行 round feedback 评分（需要 LLM 服务器）
+# 2. 运行 round feedback 评分（需要 LLM 服务）
+export LLM_ENDPOINT=https://openrouter.ai/api/v1
+export LLM_MODEL_ID=google/gemma-4-26b-a4b-it:free
+export LLM_API_KEY=your_openrouter_key
+
 claw-filter pressure-test  # 先测试稳定性
 claw-filter session-merge --workers 4 --batch-size 512 --min-prefix-turns 2
 claw-filter round-feedback --workers 32 --batch-size 50
@@ -50,6 +65,79 @@ bash scripts/run_import_to_stats.sh
 bash scripts/run_export.sh
 bash scripts/validate_pipeline_100.sh
 ```
+
+## 增量 Pipeline
+
+用于 manydata 新增 tar 数据的持续处理链路已经接入：扫描新包、递归解压、导入、session merge、round feedback、增量筛选导出、Unisound 转换，以及运行状态记账。
+
+默认配置文件：
+
+- configs/autoprocess.pipeline.toml
+- configs/unisound_export.autoprocess.json
+
+本地执行一次：
+
+```bash
+export LLM_API_KEY=your_openrouter_key
+
+bash scripts/run_incremental_pipeline.sh
+```
+
+注意：上面的环境变量示例仅用于临时验证链路是否打通。configs/autoprocess.pipeline.toml 的默认值仍然面向正式跑批环境，本地或容器中的全量增量任务不建议直接使用 OpenRouter 免费模型。
+
+也可以显式指定配置文件：
+
+```bash
+LLM_API_KEY=your_openrouter_key \
+./.venv/bin/python -m claw_data_filter.cli pipeline-run \
+  --config configs/autoprocess.pipeline.toml
+```
+
+增量 pipeline 的默认路径指向当前任务约定的 manydata 目录：
+
+- source_dir=/kanas/nlp/liuchang/manydata/unirouter
+- unpack_dir=/kanas/nlp/liuchang/manydata/unirouter_uncompress
+- work_dir=/kanas/nlp/liuchang/manydata/unirouter_in_process
+- db_path=/kanas/nlp/liuchang/manydata/unirouter_duckdb/incremental_pipeline.duckdb
+- export_dir=/kanas/nlp/liuchang/manydata/unirouter_unisound_format
+
+运行结果会写入同一个 DuckDB 中的 pipeline_runs、pipeline_source_files、pipeline_run_files、pipeline_run_samples 表，并在 log_dir 下生成逐次运行日志。
+
+## 容器部署
+
+已提供以下部署文件：
+
+- Dockerfile
+- docker/entrypoint.sh
+- docker/pipeline.cron
+- scripts/docker_build_incremental_pipeline.sh
+- scripts/docker_run_incremental_pipeline.sh
+
+构建镜像：
+
+```bash
+bash scripts/docker_build_incremental_pipeline.sh
+```
+
+启动容器：
+
+```bash
+LLM_API_KEY=your_openrouter_key bash scripts/docker_run_incremental_pipeline.sh
+```
+
+容器行为：
+
+- 前台常驻启动 Streamlit Web。
+- 后台通过 cron 定时执行 pipeline-run。
+- 不会自动 stop、restart、rm、rmi 或复用同名容器。
+- manydata 目录通过显式 volume 挂载进入容器。
+
+如果需要调整定时表达式、配置路径或 Streamlit 端口，可通过环境变量覆盖：
+
+- CONFIG_PATH
+- CRON_SCHEDULE
+- RUN_ON_START
+- STREAMLIT_PORT
 
 导入脚本可配置项包括：
 - INPUT_FILE
@@ -95,6 +183,13 @@ bash scripts/validate_pipeline_100.sh
 - SESSION_MERGE_BATCH_SIZE
 - SESSION_MERGE_MIN_PREFIX_TURNS
 - PYTHON_BIN
+
+OpenRouter 使用说明：
+- scripts/validate_pipeline_100.sh 默认会使用 OpenRouter 免费模型。
+- 运行前必须导出 LLM_API_KEY。
+- 默认并发和 batch 已下调，避免免费模型配额下触发过多限流。
+- 增量 pipeline 默认 round feedback 并发为 2、batch 为 4，并把 LLM 重试提高到 6 次。
+- 该脚本定位是小样本验证，不应用作全量数据跑批入口。
 
 脚本行为说明：
 - 当 `EXPORT_FORMAT=raw_jsonl` 时，默认输出文件名是 `data/exported.jsonl`。
@@ -251,8 +346,9 @@ rate 计算说明:
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `LLM_ENDPOINT` | http://localhost:8000/v1 | LLM API 地址 |
+| `LLM_ENDPOINT` | https://openrouter.ai/api/v1 | LLM API 地址 |
 | `LLM_API_KEY` | - | API 密钥 |
+| `LLM_MODEL_ID` | google/gemma-4-26b-a4b-it:free | 模型 ID |
 | `DB_PATH` | ./data.duckdb | 数据库路径 |
 | `BATCH_SIZE` | 10 | round feedback 每批领取样本数 |
 | `MAX_CONCURRENCY` | 10 | 最大并发数 |

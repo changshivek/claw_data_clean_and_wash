@@ -1,0 +1,4 @@
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+${CRON_SCHEDULE} cd /app && python -m claw_data_filter.cli pipeline-run --config ${CONFIG_PATH} >> /app/runtime/cron.log 2>&1
