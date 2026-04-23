@@ -377,6 +377,64 @@ def _extract_text_content(content: Any) -> str:
     return str(content) if content else ""
 
 
+def extract_import_fields_from_payload(data: dict[str, Any]) -> dict[str, Any]:
+    """Extract import-time fields without constructing a Pydantic Sample model."""
+    messages = extract_normalized_messages_from_payload(data)
+
+    user_query = ""
+    for message in reversed(messages):
+        if message.get("role") == "user":
+            user_query = _extract_text_content(message.get("content"))
+            break
+
+    assistant_parts: list[str] = []
+    tool_calls: list[dict[str, Any]] = []
+    for message in messages:
+        if message.get("role") != "assistant":
+            continue
+        content = _extract_text_content(message.get("content"))
+        if content:
+            assistant_parts.append(content)
+        message_tool_calls = message.get("tool_calls")
+        if isinstance(message_tool_calls, list):
+            tool_calls.extend(message_tool_calls)
+
+    assistant_response = "\n".join(assistant_parts)
+
+    expected_episode_judgment_count = count_user_episodes(messages)
+    expected_response_judgment_count = count_assistant_response_units(messages)
+    expected_judgment_count = expected_episode_judgment_count + expected_response_judgment_count
+    num_turns = expected_episode_judgment_count
+
+    if tool_calls:
+        num_tool_calls = len(tool_calls)
+    else:
+        num_tool_calls = sum(1 for message in messages if message.get("role") == "tool")
+
+    has_error = False
+    for message in messages:
+        if message.get("role") != "tool":
+            continue
+        content = _extract_text_content(message.get("content"))
+        if content and ("error" in content.lower() or "exception" in content.lower()):
+            has_error = True
+            break
+
+    return {
+        "sample_uid": generate_sample_uid(data),
+        "raw_json": data,
+        "user_query": user_query,
+        "assistant_response": assistant_response,
+        "num_turns": num_turns,
+        "expected_judgment_count": expected_judgment_count,
+        "expected_response_judgment_count": expected_response_judgment_count,
+        "expected_episode_judgment_count": expected_episode_judgment_count,
+        "num_tool_calls": num_tool_calls,
+        "empty_response": has_empty_response(messages),
+        "has_error": has_error,
+    }
+
+
 class Sample(BaseModel):
     """Represents a single agent conversation sample."""
 
@@ -410,59 +468,4 @@ class Sample(BaseModel):
             ]
         }
         """
-        messages = extract_normalized_messages_from_payload(data)
-
-        # Extract user query (last user message)
-        user_query = ""
-        for msg in reversed(messages):
-            if msg.get("role") == "user":
-                user_query = _extract_text_content(msg.get("content"))
-                break
-
-        # Extract formatted assistant response (concatenate all assistant messages)
-        assistant_parts = []
-        tool_calls = []
-        for msg in messages:
-            if msg.get("role") == "assistant":
-                content = _extract_text_content(msg.get("content"))
-                if content:
-                    assistant_parts.append(content)
-                tc = msg.get("tool_calls", [])
-                tool_calls.extend(tc)
-
-        assistant_response = "\n".join(assistant_parts)
-
-        expected_episode_judgment_count = count_user_episodes(messages)
-        expected_response_judgment_count = count_assistant_response_units(messages)
-        expected_judgment_count = expected_episode_judgment_count + expected_response_judgment_count
-        num_turns = expected_episode_judgment_count
-
-        # Count tool calls: use tool_calls from assistant if available, otherwise count tool role messages
-        # (tool role messages come from Anthropic format conversion or are OpenAI tool results)
-        if tool_calls:
-            num_tool_calls = len(tool_calls)
-        else:
-            num_tool_calls = sum(1 for msg in messages if msg.get("role") == "tool")
-
-        # Check for errors (tool results that indicate errors)
-        has_error = False
-        for msg in messages:
-            if msg.get("role") == "tool":
-                content = _extract_text_content(msg.get("content"))
-                if content and ("error" in content.lower() or "exception" in content.lower()):
-                    has_error = True
-                    break
-
-        return cls(
-            sample_uid=generate_sample_uid(data),
-            raw_json=data,
-            user_query=user_query,
-            assistant_response=assistant_response,
-            num_turns=num_turns,
-            expected_judgment_count=expected_judgment_count,
-            expected_response_judgment_count=expected_response_judgment_count,
-            expected_episode_judgment_count=expected_episode_judgment_count,
-            num_tool_calls=num_tool_calls,
-            empty_response=has_empty_response(messages),
-            has_error=has_error,
-        )
+        return cls(**extract_import_fields_from_payload(data))

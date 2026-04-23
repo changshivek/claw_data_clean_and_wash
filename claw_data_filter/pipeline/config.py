@@ -34,6 +34,8 @@ class PathSettings(BaseModel):
 class ImportSettings(BaseModel):
     workers: int = Field(default_factory=lambda: _shared_cpu_budget(max_cap=8))
     chunk_size: int = 64
+    max_pending_chunks: int | None = None
+    reconnect_every_chunks: int = 0
     skip_errors: bool = True
 
 

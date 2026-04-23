@@ -46,6 +46,7 @@ ARCHIVE_SUFFIXES = (
     ".txz",
     ".gz",
 )
+SOURCE_ARCHIVE_SUFFIXES = tuple(suffix for suffix in ARCHIVE_SUFFIXES if suffix != ".gz")
 
 
 @dataclass(slots=True)
@@ -278,7 +279,7 @@ class PipelineService:
     def _discover_source_files(self, run_id: str) -> list[SourceFilePlan]:
         plans: list[SourceFilePlan] = []
         for path in sorted(self.config.paths.source_dir.rglob("*")):
-            if not path.is_file() or not self._is_supported_archive(path):
+            if not path.is_file() or not self._is_supported_source_archive(path):
                 continue
             stat = path.stat()
             fingerprint = self._fingerprint_file(path, stat.st_size, stat.st_mtime_ns)
@@ -304,7 +305,7 @@ class PipelineService:
             "SELECT fingerprint, status FROM pipeline_source_files WHERE source_path = ?",
             [str(plan.source_path)],
         ).fetchone()
-        if existing and existing[0] == plan.fingerprint and existing[1] == "completed":
+        if existing and existing[0] == plan.fingerprint and existing[1] in {"processing", "completed", "exported"}:
             self.store.conn.execute(
                 "UPDATE pipeline_source_files SET last_seen_at = ?, last_run_id = ? WHERE source_path = ?",
                 [now, run_id, str(plan.source_path)],
@@ -356,6 +357,8 @@ class PipelineService:
                             skip_errors=self.config.import_settings.skip_errors,
                             workers=self.config.import_settings.workers,
                             chunk_size=self.config.import_settings.chunk_size,
+                            max_pending_chunks=self.config.import_settings.max_pending_chunks,
+                            reconnect_every_chunks=self.config.import_settings.reconnect_every_chunks,
                         )
                 finally:
                     importer.close()
@@ -498,7 +501,7 @@ class PipelineService:
                 run_id=run_id,
                 source_path=result.source_path,
                 source_name=result.source_name,
-                status="completed",
+                status="imported",
                 extracted_dir=result.extracted_dir,
                 items_paths=result.items_paths,
                 imported_samples=result.imported_count,
@@ -507,7 +510,7 @@ class PipelineService:
             )
             self._update_source_file_status(
                 result.source_path,
-                status="completed",
+                status="imported",
                 last_run_id=run_id,
                 last_seen_at=finished_at,
                 imported_samples=result.imported_count,
@@ -525,7 +528,7 @@ class PipelineService:
                     run_id=run_id,
                     source_path=result.source_path,
                     source_name=result.source_name,
-                    status="completed",
+                    status="imported",
                     extracted_dir=result.extracted_dir,
                     items_paths=result.items_paths,
                     imported_samples=result.imported_count,
@@ -534,7 +537,7 @@ class PipelineService:
                 )
                 self._update_source_file_status(
                     result.source_path,
-                    status="completed",
+                    status="imported",
                     last_run_id=run_id,
                     last_seen_at=finished_at,
                     imported_samples=result.imported_count,
@@ -579,7 +582,7 @@ class PipelineService:
                 run_id=run_id,
                 source_path=result.source_path,
                 source_name=result.source_name,
-                status="completed",
+                status="exported",
                 extracted_dir=result.extracted_dir,
                 items_paths=result.items_paths,
                 imported_samples=result.imported_count,
@@ -592,7 +595,7 @@ class PipelineService:
             )
             self._update_source_file_status(
                 result.source_path,
-                status="completed",
+                status="exported",
                 last_run_id=run_id,
                 last_seen_at=finished_at,
                 processed_at=finished_at,
@@ -900,6 +903,12 @@ class PipelineService:
     def _is_supported_archive(self, path: Path) -> bool:
         name = path.name.lower()
         return any(name.endswith(suffix) for suffix in ARCHIVE_SUFFIXES)
+
+    def _is_supported_source_archive(self, path: Path) -> bool:
+        name = path.name.lower()
+        if name.startswith("."):
+            return False
+        return any(name.endswith(suffix) for suffix in SOURCE_ARCHIVE_SUFFIXES)
 
     def _safe_file_stem(self, name: str) -> str:
         stem = name

@@ -15,8 +15,10 @@ retry_base_delay = 10.0
 retry_max_delay = 120.0
 
 [import]
-workers = 8
-chunk_size = 64
+workers = 2
+chunk_size = 4
+max_pending_chunks = 2
+reconnect_every_chunks = 25
 skip_errors = true
 
 [session_merge]
@@ -31,7 +33,7 @@ workers = 2
 batch_size = 4
 
 [export]
-response_progress_rate = ">=0.7"
+response_progress_rate = ""
 user_satisfied_rate = ""
 user_negative_feedback_rate = ""
 empty_response = false

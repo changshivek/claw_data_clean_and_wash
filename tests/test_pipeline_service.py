@@ -243,11 +243,11 @@ def test_pipeline_service_runs_once_and_exports_incremental_files(tmp_path: Path
             "SELECT status, imported_samples FROM pipeline_source_files WHERE source_path = ?",
             [str(archive_path)],
         ).fetchone()
-        assert source_status == ("completed", 2)
+        assert source_status == ("exported", 2)
         run_file_status = service.store.conn.execute(
             "SELECT status, qualified_samples FROM pipeline_run_files"
         ).fetchone()
-        assert run_file_status == ("completed", 2)
+        assert run_file_status == ("exported", 2)
     finally:
         service.close()
 
@@ -286,6 +286,46 @@ def test_pipeline_service_skips_unchanged_archives_on_second_run(tmp_path: Path)
         assert second_summary["imported_samples"] == 0
         assert second_summary["processed_files"] == 0
         assert second_summary["exported_samples"] == 0
+    finally:
+        service.close()
+
+
+def test_pipeline_service_ignores_hidden_temp_archives_in_source_dir(tmp_path: Path):
+    source_dir = tmp_path / "source"
+    unpack_dir = tmp_path / "unpack"
+    work_dir = tmp_path / "work"
+    db_path = tmp_path / "db" / "pipeline.duckdb"
+    export_dir = tmp_path / "exports"
+    log_dir = tmp_path / "logs"
+    unisound_config_path = tmp_path / "unisound_config.json"
+
+    for path in (source_dir, unpack_dir, work_dir, export_dir, log_dir, db_path.parent):
+        path.mkdir(parents=True, exist_ok=True)
+    _write_unisound_config(unisound_config_path)
+
+    archive_path = source_dir / "incremental_bundle.tar"
+    _write_nested_archive(archive_path)
+    (source_dir / ".unirouter-temp-test.gz").write_bytes(b"not a pipeline source archive")
+
+    service = PipelineService(
+        _build_config(
+            source_dir=source_dir,
+            unpack_dir=unpack_dir,
+            work_dir=work_dir,
+            db_path=db_path,
+            export_dir=export_dir,
+            log_dir=log_dir,
+            unisound_config_path=unisound_config_path,
+        )
+    )
+    try:
+        summary = service.run_once()
+        assert summary["status"] == "completed"
+        assert summary["processed_files"] == 1
+        processed_sources = service.store.conn.execute(
+            "SELECT source_name FROM pipeline_source_files ORDER BY source_name"
+        ).fetchall()
+        assert processed_sources == [("incremental_bundle.tar",)]
     finally:
         service.close()
 
@@ -477,10 +517,56 @@ def test_pipeline_service_retries_failed_archive_on_next_run(tmp_path: Path, mon
             [str(archive_path)],
         ).fetchone()
         assert source_status == ("failed",)
-
         summary = service.run_once()
         assert summary["status"] == "completed"
         assert summary["imported_samples"] == 2
+    finally:
+        service.close()
+
+
+def test_pipeline_service_skips_same_fingerprint_when_processing(tmp_path: Path):
+    source_dir = tmp_path / "source"
+    unpack_dir = tmp_path / "unpack"
+    work_dir = tmp_path / "work"
+    db_path = tmp_path / "db" / "pipeline.duckdb"
+    export_dir = tmp_path / "exports"
+    log_dir = tmp_path / "logs"
+    unisound_config_path = tmp_path / "unisound_config.json"
+
+    for path in (source_dir, unpack_dir, work_dir, export_dir, log_dir, db_path.parent):
+        path.mkdir(parents=True, exist_ok=True)
+    _write_unisound_config(unisound_config_path)
+
+    archive_path = source_dir / "processing.tar"
+    _write_nested_archive(archive_path)
+
+    service = PipelineService(
+        _build_config(
+            source_dir=source_dir,
+            unpack_dir=unpack_dir,
+            work_dir=work_dir,
+            db_path=db_path,
+            export_dir=export_dir,
+            log_dir=log_dir,
+            unisound_config_path=unisound_config_path,
+        )
+    )
+    try:
+        stat = archive_path.stat()
+        fingerprint = service._fingerprint_file(archive_path, stat.st_size, stat.st_mtime_ns)
+        service.store.conn.execute(
+            """
+            INSERT INTO pipeline_source_files (
+                source_path, source_name, size_bytes, mtime_ns, fingerprint, status,
+                last_seen_at, last_run_id, imported_samples
+            ) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?)
+            """,
+            [str(archive_path), archive_path.name, stat.st_size, stat.st_mtime_ns, fingerprint, "processing", "existing-run", 0],
+        )
+
+        summary = service.run_once()
+        assert summary["processed_files"] == 0
+        assert summary["imported_samples"] == 0
     finally:
         service.close()
 

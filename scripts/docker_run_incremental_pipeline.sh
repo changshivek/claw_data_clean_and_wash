@@ -9,6 +9,13 @@ IMAGE_TAG="${IMAGE_TAG:-latest}"
 CONTAINER_NAME="${CONTAINER_NAME:-claw-incremental-pipeline}"
 CONFIG_PATH="${CONFIG_PATH:-${PROJECT_ROOT}/configs/autoprocess.pipeline.toml}"
 STREAMLIT_PORT="${STREAMLIT_PORT:-8501}"
+CRON_SCHEDULE="${CRON_SCHEDULE:-}"
+CRON_MIN_INTERVAL_HOURS="${CRON_MIN_INTERVAL_HOURS:-0}"
+RUN_ON_START="${RUN_ON_START:-false}"
+SCHEDULER_MODE="${SCHEDULER_MODE:-cron}"
+SCHEDULER_POLL_SECONDS="${SCHEDULER_POLL_SECONDS:-3600}"
+DOCKER_USER="${DOCKER_USER:-}"
+CLAW_IMPORT_FORCE_SERIAL="${CLAW_IMPORT_FORCE_SERIAL:-1}"
 
 if command -v python3 >/dev/null 2>&1; then
   PYTHON_BIN="python3"
@@ -72,17 +79,32 @@ if [[ "${ROUND_FEEDBACK_ENABLED}" == "true" ]]; then
 fi
 
 cd "${PROJECT_ROOT}"
-exec docker run -d \
-  --name "${CONTAINER_NAME}" \
-  -p "${STREAMLIT_PORT}:8501" \
-  -e CONFIG_PATH="/app/configs/autoprocess.pipeline.toml" \
-  -e LLM_ENDPOINT="${EFFECTIVE_LLM_ENDPOINT}" \
-  -e LLM_API_KEY="${EFFECTIVE_LLM_API_KEY}" \
-  -e LLM_MODEL_ID="${EFFECTIVE_LLM_MODEL_ID}" \
-  -v "${CONFIG_PATH}:/app/configs/autoprocess.pipeline.toml:ro" \
-  -v /kanas/nlp/liuchang/manydata/unirouter:/kanas/nlp/liuchang/manydata/unirouter:ro \
-  -v /kanas/nlp/liuchang/manydata/unirouter_uncompress:/kanas/nlp/liuchang/manydata/unirouter_uncompress \
-  -v /kanas/nlp/liuchang/manydata/unirouter_duckdb:/kanas/nlp/liuchang/manydata/unirouter_duckdb \
-  -v /kanas/nlp/liuchang/manydata/unirouter_in_process:/kanas/nlp/liuchang/manydata/unirouter_in_process \
-  -v /kanas/nlp/liuchang/manydata/unirouter_unisound_format:/kanas/nlp/liuchang/manydata/unirouter_unisound_format \
-  "${IMAGE_NAME}:${IMAGE_TAG}"
+DOCKER_ARGS=(
+  run -d
+  --name "${CONTAINER_NAME}"
+  -p "${STREAMLIT_PORT}:8501"
+  -e CONFIG_PATH="/app/configs/autoprocess.pipeline.toml"
+  -e CRON_SCHEDULE="${CRON_SCHEDULE}"
+  -e CRON_MIN_INTERVAL_HOURS="${CRON_MIN_INTERVAL_HOURS}"
+  -e RUN_ON_START="${RUN_ON_START}"
+  -e SCHEDULER_MODE="${SCHEDULER_MODE}"
+  -e SCHEDULER_POLL_SECONDS="${SCHEDULER_POLL_SECONDS}"
+  -e CLAW_IMPORT_FORCE_SERIAL="${CLAW_IMPORT_FORCE_SERIAL}"
+  -e LLM_ENDPOINT="${EFFECTIVE_LLM_ENDPOINT}"
+  -e LLM_API_KEY="${EFFECTIVE_LLM_API_KEY}"
+  -e LLM_MODEL_ID="${EFFECTIVE_LLM_MODEL_ID}"
+  -v "${CONFIG_PATH}:/app/configs/autoprocess.pipeline.toml:ro"
+  -v /kanas/nlp/liuchang/manydata/unirouter:/kanas/nlp/liuchang/manydata/unirouter:ro
+  -v /kanas/nlp/liuchang/manydata/unirouter_uncompress:/kanas/nlp/liuchang/manydata/unirouter_uncompress
+  -v /kanas/nlp/liuchang/manydata/unirouter_duckdb:/kanas/nlp/liuchang/manydata/unirouter_duckdb
+  -v /kanas/nlp/liuchang/manydata/unirouter_in_process:/kanas/nlp/liuchang/manydata/unirouter_in_process
+  -v /kanas/nlp/liuchang/manydata/unirouter_unisound_format:/kanas/nlp/liuchang/manydata/unirouter_unisound_format
+)
+
+if [[ -n "${DOCKER_USER}" ]]; then
+  DOCKER_ARGS+=(--user "${DOCKER_USER}")
+fi
+
+DOCKER_ARGS+=("${IMAGE_NAME}:${IMAGE_TAG}")
+
+exec docker "${DOCKER_ARGS[@]}"
