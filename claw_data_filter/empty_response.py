@@ -4,14 +4,8 @@ import json
 from pathlib import Path
 from typing import Any
 
-from claw_data_filter.models.sample import extract_messages_from_payload, has_empty_response
+from claw_data_filter.models.sample import has_empty_response
 from claw_data_filter.storage.duckdb_store import DuckDBStore
-
-
-def detect_empty_response(raw_json: dict[str, Any]) -> bool:
-    """Apply the shared empty-response rule to a raw payload."""
-    messages = extract_messages_from_payload(raw_json)
-    return has_empty_response(messages)
 
 
 def detect_empty_response_from_normalized_messages(messages: list[dict[str, Any]]) -> bool:

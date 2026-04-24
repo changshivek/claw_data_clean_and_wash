@@ -7,24 +7,21 @@ def test_filter_builder_basic():
     builder = FilterQueryBuilder()
     builder.add_condition("num_turns", ComparisonOp.GT, 7.0)
 
-    where = builder.build_where_clause()
-    assert "num_turns > 7.0" in where
-    print(f"WHERE clause: {where}")
-    print("test_filter_builder_basic passed")
+    sql, params = builder.build_parameterized_where_clause()
+    assert "num_turns > ?" in sql
+    assert params == [7.0]
 
 
 def test_filter_builder_expression_parsing():
     """Test expression parsing for num_tool_calls."""
     builder = FilterQueryBuilder()
-    # Use num_tool_calls which is a valid field
     builder.add_condition("num_tool_calls", ComparisonOp.GTE, 4)
     builder.add_condition("num_tool_calls", ComparisonOp.LT, 5)
 
-    where = builder.build_where_clause()
-    assert ">=" in where
-    assert "<" in where
-    print(f"WHERE clause: {where}")
-    print("test_filter_builder_expression_parsing passed")
+    sql, params = builder.build_parameterized_where_clause()
+    assert ">=" in sql
+    assert "<" in sql
+    assert params == [4, 5]
 
 
 def test_filter_builder_chained():
@@ -33,24 +30,23 @@ def test_filter_builder_chained():
     result = builder.add_condition("num_tool_calls", ComparisonOp.GTE, 4).add_condition("num_turns", ComparisonOp.GTE, 2)
 
     assert result is builder  # returns self
-    where = builder.build_where_clause()
-    assert "num_tool_calls >= 4" in where
-    assert "num_turns >= 2" in where
-    print("test_filter_builder_chained passed")
+    sql, params = builder.build_parameterized_where_clause()
+    assert "num_tool_calls >= ?" in sql
+    assert "num_turns >= ?" in sql
+    assert params == [4, 2]
 
 
 def test_filtered_samples_query():
-    """Test full query generation."""
+    """Test full parameterized query generation."""
     builder = FilterQueryBuilder()
     builder.add_condition("num_turns", ComparisonOp.GTE, 2)
 
-    query = builder.get_filtered_samples_query(limit=100)
+    query, params = builder.get_parameterized_query(limit=100)
     assert "SELECT" in query
     assert "FROM samples s" in query
-    assert "WHERE s.num_turns >= 2" in query
-    assert "LIMIT 100" in query
-    print(f"Query: {query}")
-    print("test_filtered_samples_query passed")
+    assert "s.num_turns >= ?" in query
+    assert "LIMIT ?" in query
+    assert params == [2, 100]
 
 
 def test_invalid_expression():
@@ -58,21 +54,19 @@ def test_invalid_expression():
     builder = FilterQueryBuilder()
     builder.add_condition("nonexistent_field", ComparisonOp.GTE, 4)
     try:
-        builder.build_where_clause()
+        builder.build_parameterized_where_clause()
         assert False, "Should have raised ValueError"
     except ValueError:
         pass
-    print("test_invalid_expression passed")
 
 
 def test_filter_tool_stats_fields():
     """Test filtering by tool_stats fields"""
-    from claw_data_filter.filters.query import FilterQueryBuilder, ComparisonOp
-
     builder = FilterQueryBuilder()
     builder.add_condition("response_progress_rate", ComparisonOp(">="), 0.8)
-    sql = builder.build_where_clause()
+    sql, params = builder.build_parameterized_where_clause()
     assert "response_progress_rate" in sql
+    assert params == [0.8]
 
 
 def test_filter_builder_supports_negative_feedback_rate():

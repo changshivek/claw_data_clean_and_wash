@@ -327,9 +327,3 @@ class UnifiedExporter:
                     parts.append(part.get("text", ""))
             return "".join(parts)
         return str(content) if content else ""
-
-    def _first_non_empty(self, *values: Any) -> Any:
-        for value in values:
-            if value not in (None, "", {}):
-                return value
-        return None

@@ -3,23 +3,14 @@
 import tempfile
 from pathlib import Path
 
-from claw_data_filter.empty_response import backfill_empty_response, detect_empty_response
+from claw_data_filter.empty_response import backfill_empty_response, has_empty_response
 from claw_data_filter.models.sample import Sample
 from claw_data_filter.storage.duckdb_store import DuckDBStore
 
 
 def test_detect_empty_response_returns_true_for_user_only_payload():
-    payload = {
-        "request": {
-            "bodyJson": {
-                "messages": [
-                    {"role": "user", "content": "只有用户消息"},
-                ]
-            }
-        }
-    }
-
-    assert detect_empty_response(payload) is True
+    messages = [{"role": "user", "content": "只有用户消息"}]
+    assert has_empty_response(messages) is True
 
 
 def test_backfill_empty_response_updates_existing_rows():

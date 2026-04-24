@@ -30,12 +30,6 @@ class ComparisonOp(Enum):
     LTE = "<="
 
 
-# JSON fields stored in tool_stats column
-JSON_FIELDS = frozenset([
-    "has_error",
-    "total_turns",
-])
-
 
 def _field_sql_expression(field: str, table_name: str = "samples") -> str:
     """Return SQL expression for a supported filter field."""
@@ -77,15 +71,6 @@ class FilterCondition:
         field_ref = _field_sql_expression(self.field, table_name)
         return f"{field_ref} {self.op.value} ?", [self.value]
 
-    def to_sql(self, table_name: str = "samples") -> str:
-        """Convert to SQL WHERE clause fragment."""
-        field_ref = _field_sql_expression(self.field, table_name)
-        if isinstance(self.value, str):
-            escaped = self.value.replace("'", "''")  # SQL escape single quotes
-            return f"{field_ref} {self.op.value} '{escaped}'"
-        return f"{field_ref} {self.op.value} {self.value}"
-
-
 class FilterQueryBuilder:
     """Build SQL WHERE clauses from filter conditions."""
 
@@ -106,22 +91,6 @@ class FilterQueryBuilder:
         self.conditions.append(FilterCondition(field, op, value))
         return self
 
-    def build_where_clause(self, table_name: str = "samples") -> str:
-        """Build WHERE clause SQL fragment.
-
-        Args:
-            table_name: Table name for JSON field references
-
-        Returns:
-            SQL WHERE clause string (e.g., "progress_score >= 4 AND num_turns >= 2")
-        """
-        parts = []
-
-        for cond in self.conditions:
-            parts.append(cond.to_sql(table_name))
-
-        return " AND ".join(parts) if parts else "1=1"
-
     def build_parameterized_where_clause(self, table_name: str = "samples") -> tuple[str, list[Any]]:
         """Build a parameterized WHERE clause and corresponding params."""
         parts: list[str] = []
@@ -133,21 +102,6 @@ class FilterQueryBuilder:
             params.extend(clause_params)
 
         return (" AND ".join(parts) if parts else "1=1", params)
-
-    def get_filtered_samples_query(self, limit: Optional[int] = None) -> str:
-        """Build complete SELECT query with filters.
-
-        For tool_stats fields, extracts from JSON using json_extract.
-        """
-        where = self.build_where_clause(table_name="s")
-        limit_str = f"LIMIT {limit}" if limit else ""
-
-        return f"""
-            SELECT s.id, s.sample_uid, s.tool_stats
-            FROM samples s
-            WHERE {where}
-            {limit_str}
-        """
 
     def get_parameterized_query(self, limit: Optional[int] = None) -> tuple[str, list[Any]]:
         """Build complete SELECT query with placeholders and params."""
