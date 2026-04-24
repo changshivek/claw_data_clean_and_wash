@@ -2,6 +2,8 @@
 
 面向 agent 对话数据的筛选、评分、导出与增量处理工具。
 
+当前主链路已经完成 route B 重构：samples 运行时改为结构化字段驱动，不再依赖 `raw_json` 作为运行时输入，也不再提供 `raw_jsonl` 导出。
+
 当前仓库覆盖两类主要使用方式：
 
 1. 普通 JSONL 数据导入 DuckDB，执行 session merge、round feedback、筛选导出。
@@ -11,13 +13,39 @@
 
 - 导入 OpenAI / UniRouter 风格 JSONL 数据。
 - 写入 DuckDB，并生成稳定的 sample_uid。
+- 在 import 阶段直接生成结构化运行时字段与 source locator。
 - 标记 empty_response 样本。
 - 执行 session merge，去掉重复会话快照。
 - 执行 round feedback，生成 response_progress 和 user_satisfied 两层 judgment。
-- 按统一条件导出 raw_jsonl 或 openai_round_feedback。
+- 按统一条件导出 openai_round_feedback。
 - 将 openai_round_feedback JSONL 转成 Unisound JSONL。
 - 通过 Streamlit Web 页面查看、筛选和导出数据。
-- 通过增量 pipeline 处理新增 tar 包，并支持容器内 cron 定时执行。
+- 通过增量 pipeline 处理新增 tar 包，并支持容器内后台调度定期执行。
+
+当前全量测试状态：`152 passed`。
+
+## 当前数据模型
+
+当前 `samples` 主表保留的核心运行时字段包括：
+
+- `normalized_messages_json`
+- `normalized_tools_json`
+- `normalized_user_turns_json`
+- `source_metadata_json`
+- `message_count`
+- `sample_uid`
+- `items_path`
+- `source_path`
+- `line_number`
+- `byte_offset`
+- `source_fingerprint`
+
+约束与现状：
+
+- 主运行链路只消费结构化字段，不再从 `samples` 表回读 `raw_json`。
+- source locator 只用于审计、排障、追溯，不承担默认运行时输入职责。
+- round feedback、session merge、Web detail、pipeline service、CLI isolated round-feedback 都已经切到结构化输入契约。
+- 统一导出格式只保留 `openai_round_feedback`。
 
 ## 环境准备
 
@@ -102,10 +130,13 @@ export LLM_API_KEY=dummy
   --empty-response false \
   --num-turns-min 3 \
   --has-error false \
-  --export-format openai_round_feedback \
   --export data/exported_round_feedback.jsonl \
   --report data/export_report.json
 ```
+
+说明：
+
+- `filter` 当前只导出 `openai_round_feedback`，`--export-format` 可保留也可省略。
 
 ## 常用 CLI 命令
 
@@ -128,7 +159,7 @@ claw-filter pipeline-run --config <toml>
 - `session-merge`: 标记重复会话快照。
 - `round-feedback`: 生成评分结果。
 - `round-feedback-sample`: 将单个 sample_uid 抽到隔离 DuckDB 单独复现。
-- `filter`: 按条件导出样本。
+- `filter`: 按条件导出 `openai_round_feedback` 并可附带 report。
 - `pipeline-run`: 手动执行一次增量 tar pipeline。
 
 ## 常见使用流程
@@ -166,7 +197,7 @@ DB_PATH=data.duckdb ./.venv/bin/streamlit run claw_data_filter/web/app.py --serv
 页面包括：
 
 - overview：统计概览
-- filter：筛选与导出
+- filter：筛选与 `openai_round_feedback` 导出
 - tables：数据表预览
 - detail：样本详情
 
@@ -182,6 +213,8 @@ DB_PATH=data.duckdb ./.venv/bin/streamlit run claw_data_filter/web/app.py --serv
 6. 增量筛选导出
 7. Unisound 转换
 8. 记录运行状态与日志
+
+当前增量 pipeline 的导入、session merge、round feedback 和导出链路已经全部切到结构化 samples 输入，不再依赖 `raw_json` 运行时回放。
 
 默认配置文件：
 
@@ -225,6 +258,7 @@ bash scripts/run_incremental_pipeline.sh
 - `docker/pipeline.cron`
 - `scripts/docker_build_incremental_pipeline.sh`
 - `scripts/docker_run_incremental_pipeline.sh`
+- `scripts/docker_run_incremental_pipeline_guarded.sh`
 
 构建镜像：
 
@@ -244,15 +278,38 @@ bash scripts/docker_run_incremental_pipeline.sh
 容器默认行为：
 
 - 前台启动 Streamlit Web
-- 后台通过 cron 定时执行 `pipeline-run`
+- 后台启动调度器并按配置定期执行 `pipeline-run`
 - 不自动复用或删除已有同名容器
+
+当前实现说明：
+
+- `SCHEDULER_MODE=loop` 是当前正式部署的默认推荐模式，适合非 root 容器用户。
+- `SCHEDULER_MODE=cron` 仍可用，但依赖容器内 cron 权限写入 `/etc/cron.d`。
+- loop 模式下由 `docker/entrypoint.sh` 后台启动 `bash /app/docker/scheduler_loop.sh ...`，再由该脚本定期调用 `bash /app/docker/run_pipeline_if_due.sh ...`。
+- `RUN_ON_START=true` 时会在容器启动后立即补跑一次 `pipeline-run`；`RUN_ON_START=false` 时只保留周期调度。
+- 当前镜像已内置基础排障工具 `ps`、`grep`、`less`，便于容器内直接查看调度和 pipeline 进程。
 
 可通过环境变量覆盖：
 
 - `CONFIG_PATH`
+- `SCHEDULER_MODE`
+- `SCHEDULER_POLL_SECONDS`
 - `CRON_SCHEDULE`
+- `CRON_MIN_INTERVAL_HOURS`
 - `RUN_ON_START`
 - `STREAMLIT_PORT`
+
+如果需要做正式环境的内存守护复验，优先使用：
+
+```bash
+LLM_ENDPOINT=http://127.0.0.1:8000/v1 \
+LLM_MODEL_ID=qwen35 \
+LLM_API_KEY=your_key \
+MEMORY_LIMIT_GIB=256 \
+bash scripts/docker_run_incremental_pipeline_guarded.sh
+```
+
+最近一次 route B guarded 复验中，观测峰值约为 `146.8 GiB`，未再出现此前 `256 GiB` 守护阈值以上的失控爬升。
 
 ## Unisound 离线转换
 
@@ -322,6 +379,8 @@ bash scripts/validate_pipeline_100.sh
 
 - OpenAI 风格 `messages`
 - UniRouter 风格 `request.bodyJson.messages`
+
+导入后会统一归一化为结构化运行时字段，而不是把原始 payload 作为主运行时输入长期保留在 `samples` 表中。
 
 最小 OpenAI 示例：
 
