@@ -22,6 +22,9 @@ RUN uv pip install --system .
 
 RUN mkdir -p /app/runtime
 
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health')"
+
 EXPOSE 8501
 
 ENTRYPOINT ["/app/docker/entrypoint.sh"]
