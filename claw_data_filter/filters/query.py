@@ -1,5 +1,4 @@
 """Filter query builder for selecting samples by evaluation criteria."""
-import re
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Optional
@@ -88,15 +87,7 @@ class FilterCondition:
 
 
 class FilterQueryBuilder:
-    """Build SQL WHERE clauses from filter conditions.
-
-    Supports expressions like ">=4", "<5", "=coding" etc.
-    """
-
-    # Pattern for expressions with explicit field: "progress_score >= 4"
-    OPERATOR_PATTERN = re.compile(r"^(\w+)\s*(>=|<=|>|<|!=|=)\s*(.+)$")
-    # Pattern for shorthand expressions: ">=4", "<5"
-    SHORTHAND_PATTERN = re.compile(r"^(>=|<=|>|<|!=|=)\s*(.+)$")
+    """Build SQL WHERE clauses from filter conditions."""
 
     def __init__(self):
         self.conditions: list[FilterCondition] = []
@@ -114,39 +105,6 @@ class FilterQueryBuilder:
         """
         self.conditions.append(FilterCondition(field, op, value))
         return self
-
-    def add_progress_score_filter(self, expr: str) -> "FilterQueryBuilder":
-        """Parse expression like '>=4' and add progress_score filter.
-
-        Args:
-            expr: Filter expression like '>=4', '<5', '=4', 'progress_score >= 4'
-
-        Returns:
-            self for chaining
-
-        Raises:
-            ValueError: If expression is invalid
-        """
-        expr = expr.strip()
-
-        # Try shorthand pattern first (no field name, e.g., ">=4")
-        shorthand_match = self.SHORTHAND_PATTERN.match(expr)
-        if shorthand_match:
-            op_str, value_str = shorthand_match.groups()
-            value = float(value_str) if "." in value_str else int(value_str)
-            return self.add_condition("progress_score", ComparisonOp(op_str), value)
-
-        # Try full pattern (with field name, e.g., "progress_score >= 4")
-        match = self.OPERATOR_PATTERN.match(expr)
-        if not match:
-            raise ValueError(f"Invalid filter expression: {expr}")
-
-        field, op_str, value_str = match.groups()
-        if field not in ALLOWED_FIELDS:
-            raise ValueError(f"Invalid field name: {field}")
-        value = float(value_str) if "." in value_str else int(value_str)
-
-        return self.add_condition(field, ComparisonOp(op_str), value)
 
     def build_where_clause(self, table_name: str = "samples") -> str:
         """Build WHERE clause SQL fragment.

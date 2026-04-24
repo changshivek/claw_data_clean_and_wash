@@ -65,9 +65,21 @@ def build_sample_detail_view(
         sample_uid=sample_record.get("sample_uid") or "-",
         empty_response=bool(sample_record.get("empty_response")),
         num_turns=sample_record.get("num_turns") or 0,
-        expected_judgment_count=sample_record.get("expected_judgment_count") or (len(response_steps) + len(user_episodes)),
-        expected_response_judgment_count=sample_record.get("expected_response_judgment_count") or len(response_steps),
-        expected_episode_judgment_count=sample_record.get("expected_episode_judgment_count") or len(user_episodes),
+        expected_judgment_count=(
+            sample_record.get("expected_judgment_count")
+            if sample_record.get("expected_judgment_count") is not None
+            else (len(response_steps) + len(user_episodes))
+        ),
+        expected_response_judgment_count=(
+            sample_record.get("expected_response_judgment_count")
+            if sample_record.get("expected_response_judgment_count") is not None
+            else len(response_steps)
+        ),
+        expected_episode_judgment_count=(
+            sample_record.get("expected_episode_judgment_count")
+            if sample_record.get("expected_episode_judgment_count") is not None
+            else len(user_episodes)
+        ),
         num_tool_calls=sample_record.get("num_tool_calls") or 0,
         progress_rate=tool_stats.get("response_progress_rate", 0.0),
         regress_rate=tool_stats.get("response_regress_rate", 0.0),
