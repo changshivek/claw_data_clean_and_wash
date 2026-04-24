@@ -5,9 +5,10 @@ import tempfile
 
 import duckdb
 
-from claw_data_filter.cli import _configure_logging, cli
+from claw_data_filter.cli import cli
 from claw_data_filter.exporters.unified_exporter import OPENAI_ROUND_FEEDBACK
 from claw_data_filter.importers.jsonl_importer import JSONLImporter
+from claw_data_filter.logging_config import configure_logging
 from claw_data_filter.models.sample import Sample
 from claw_data_filter.storage.duckdb_store import DuckDBStore
 
@@ -16,7 +17,7 @@ def test_configure_logging_suppresses_http_client_info_logs():
     logging.getLogger("httpx").setLevel(logging.INFO)
     logging.getLogger("httpcore").setLevel(logging.INFO)
 
-    _configure_logging()
+    configure_logging()
 
     assert logging.getLogger("httpx").level == logging.WARNING
     assert logging.getLogger("httpcore").level == logging.WARNING

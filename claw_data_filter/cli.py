@@ -18,21 +18,11 @@ from claw_data_filter.exporters.unified_exporter import (
     UnifiedExporter,
 )
 from claw_data_filter.importers.jsonl_importer import JSONLImporter
+from claw_data_filter.logging_config import configure_logging
 from claw_data_filter.pipeline import PipelineConfig, PipelineService
 from claw_data_filter.storage.duckdb_store import DuckDBStore
 
-
-def _configure_logging() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    )
-    # Keep third-party HTTP client noise out of long-running rebuild logs.
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("httpcore").setLevel(logging.WARNING)
-
-
-_configure_logging()
+configure_logging()
 logger = logging.getLogger(__name__)
 
 

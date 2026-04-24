@@ -195,5 +195,23 @@ def _pick_latest_log_file(log_dir: Path) -> Path | None:
 
 
 def _tail_lines(path: Path, limit: int = 20) -> list[str]:
-    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    return lines[-limit:]
+    """Return the last *limit* lines from *path* without reading the entire file."""
+    chunk_size = 4096
+    with path.open("rb") as f:
+        f.seek(0, 2)
+        file_size = f.tell()
+        if file_size == 0:
+            return []
+        buffer: list[bytes] = []
+        lines_found = 0
+        remaining = file_size
+        while remaining > 0 and lines_found <= limit:
+            read_size = min(chunk_size, remaining)
+            f.seek(-read_size, 1)
+            block = f.read(read_size)
+            buffer.insert(0, block)
+            lines_found += block.count(b"\n")
+            remaining -= read_size
+            f.seek(-read_size, 1)
+        tail_bytes = b"".join(buffer)
+        return tail_bytes.decode("utf-8", errors="replace").splitlines()[-limit:]

@@ -23,6 +23,7 @@ from claw_data_filter.config import Config
 from claw_data_filter.exporters.unified_exporter import ExportFilterSpec, ExportRequest, UnifiedExporter
 from claw_data_filter.importers.jsonl_importer import JSONLImporter
 from claw_data_filter.llm.async_client import AsyncLLMClient
+from claw_data_filter.logging_config import make_file_handler
 from claw_data_filter.models.sample import Sample
 from claw_data_filter.pipeline.config import PipelineConfig
 from claw_data_filter.processors.round_feedback import RoundFeedbackProcessor
@@ -131,6 +132,7 @@ class PipelineService:
                     "log_path": str(log_path),
                 }
                 self._finish_pipeline_run(run_id, "completed", summary)
+                self._cleanup_old_pipeline_logs(retain=50)
                 logger.info("Incremental pipeline run completed: %s", json.dumps(summary, ensure_ascii=False))
                 return summary
             except BlockingIOError:
@@ -178,6 +180,18 @@ class PipelineService:
             self.config.paths.db_path.parent,
         ):
             path.mkdir(parents=True, exist_ok=True)
+
+    def _cleanup_old_pipeline_logs(self, retain: int = 50) -> None:
+        """Remove old per-run pipeline log files, keeping the most recent *retain*."""
+        log_dir = self.config.paths.log_dir
+        if not log_dir.exists():
+            return
+        candidates = sorted(log_dir.glob("pipeline_*.log"), key=lambda p: p.stat().st_mtime, reverse=True)
+        for stale in candidates[retain:]:
+            try:
+                stale.unlink()
+            except OSError:
+                pass
 
     def _ensure_pipeline_schema(self) -> None:
         self.store.conn.execute(
@@ -252,8 +266,7 @@ class PipelineService:
 
     @contextmanager
     def _pipeline_log_handler(self, log_path: Path) -> Iterator[None]:
-        handler = logging.FileHandler(log_path, encoding="utf-8")
-        handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
+        handler = make_file_handler(log_path)
         root_logger = logging.getLogger()
         root_logger.addHandler(handler)
         try:
