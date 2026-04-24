@@ -6,7 +6,6 @@ import streamlit as st
 
 from claw_data_filter.exporters.unified_exporter import (
     OPENAI_ROUND_FEEDBACK,
-    RAW_JSONL,
     ExportFilterSpec,
     ExportRequest,
     UnifiedExporter,
@@ -15,6 +14,7 @@ from claw_data_filter.storage.duckdb_store import DuckDBStore
 from claw_data_filter.web.components.page_shell import render_page_header
 from claw_data_filter.web.components.sample_table import render_samples_table
 from claw_data_filter.web.config import get_active_db_path
+from claw_data_filter.web.services.database_access import open_read_only_store_or_render_waiting
 from claw_data_filter.web.services.sample_query_service import get_filtered_samples
 from claw_data_filter.web.state.models import RouteState
 from claw_data_filter.web.state.router import go_to_detail
@@ -151,97 +151,100 @@ def render(route: RouteState):
             view.selected_ids = set()
         save_filter_list_view(st.session_state, view)
 
-    store = DuckDBStore(get_active_db_path(st.session_state), read_only=True)
-    with st.spinner("加载数据中..."):
-        samples, total = get_filtered_samples(store, view.criteria, view.page_index, view.page_size)
+    store = open_read_only_store_or_render_waiting(get_active_db_path(st.session_state))
+    if store is None:
+        return
 
-    total_pages = max(1, (total + view.page_size - 1) // view.page_size)
-    if view.page_index > total_pages:
-        view.page_index = total_pages
-        save_filter_list_view(st.session_state, view)
-        st.rerun()
+    try:
+        with st.spinner("加载数据中..."):
+            samples, total = get_filtered_samples(store, view.criteria, view.page_index, view.page_size)
 
-    st.divider()
-    st.caption("当前 num_turns 筛选字段表示 user episode 数；response_progress_rate 和 user_satisfied_rate 已使用双层 judgment 分母。")
-    st.markdown(f"**共 {total} 条结果**")
+        total_pages = max(1, (total + view.page_size - 1) // view.page_size)
+        if view.page_index > total_pages:
+            view.page_index = total_pages
+            save_filter_list_view(st.session_state, view)
+            st.rerun()
 
-    export_scope_options = ["filtered"]
-    if view.selection_enabled:
-        export_scope_options.append("selected")
+        st.divider()
+        st.caption("当前 num_turns 筛选字段表示 user episode 数；response_progress_rate 和 user_satisfied_rate 已使用双层 judgment 分母。")
+        st.markdown(f"**共 {total} 条结果**")
 
-    with st.expander("导出当前结果", expanded=False):
-        col_export1, col_export2, col_export3 = st.columns(3)
-        export_scope = col_export1.selectbox(
-            "导出范围",
-            export_scope_options,
-            key="filter.export_scope",
-            format_func=lambda value: {
-                "filtered": "当前筛选结果",
-                "selected": "当前勾选样本",
-            }[value],
-        )
-        export_format = col_export2.selectbox(
-            "导出格式",
-            [RAW_JSONL, OPENAI_ROUND_FEEDBACK],
-            key="filter.export_format",
-            format_func=lambda value: {
-                RAW_JSONL: "原始 raw_json JSONL",
-                OPENAI_ROUND_FEEDBACK: "OpenAI 兼容 + round feedback JSONL",
-            }[value],
-        )
-        default_path = "data/exported.jsonl" if export_format == RAW_JSONL else "data/exported_round_feedback.jsonl"
-        output_path = col_export3.text_input("输出文件路径", value=default_path, key="filter.export_output_path")
+        export_scope_options = ["filtered"]
+        if view.selection_enabled:
+            export_scope_options.append("selected")
 
-        if export_scope == "selected":
-            st.caption(f"当前已选 {len(view.selected_ids)} 条样本")
-        else:
-            st.caption(f"当前筛选结果共 {total} 条样本")
+        with st.expander("导出当前结果", expanded=False):
+            col_export1, col_export2, col_export3 = st.columns(3)
+            export_scope = col_export1.selectbox(
+                "导出范围",
+                export_scope_options,
+                key="filter.export_scope",
+                format_func=lambda value: {
+                    "filtered": "当前筛选结果",
+                    "selected": "当前勾选样本",
+                }[value],
+            )
+            export_format = col_export2.selectbox(
+                "导出格式",
+                [OPENAI_ROUND_FEEDBACK],
+                key="filter.export_format",
+                format_func=lambda value: {
+                    OPENAI_ROUND_FEEDBACK: "OpenAI 兼容 + round feedback JSONL",
+                }[value],
+            )
+            default_path = "data/exported_round_feedback.jsonl"
+            output_path = col_export3.text_input("输出文件路径", value=default_path, key="filter.export_output_path")
 
-        if st.button("开始导出", key="filter.export_button"):
-            selected_ids = sorted(view.selected_ids)
-            if export_scope == "selected" and not selected_ids:
-                st.warning("当前没有勾选样本可导出")
+            if export_scope == "selected":
+                st.caption(f"当前已选 {len(view.selected_ids)} 条样本")
             else:
-                filter_spec = _build_export_filter_spec(view.criteria, selected_ids if export_scope == "selected" else None)
-                with st.spinner("导出中..."):
-                    try:
-                        exporter = UnifiedExporter(store)
-                        count = exporter.export(
-                            ExportRequest(
-                                output_path=Path(output_path),
-                                export_format=export_format,
-                                filter_spec=filter_spec,
+                st.caption(f"当前筛选结果共 {total} 条样本")
+
+            if st.button("开始导出", key="filter.export_button"):
+                selected_ids = sorted(view.selected_ids)
+                if export_scope == "selected" and not selected_ids:
+                    st.warning("当前没有勾选样本可导出")
+                else:
+                    filter_spec = _build_export_filter_spec(view.criteria, selected_ids if export_scope == "selected" else None)
+                    with st.spinner("导出中..."):
+                        try:
+                            exporter = UnifiedExporter(store)
+                            count = exporter.export(
+                                ExportRequest(
+                                    output_path=Path(output_path),
+                                    export_format=export_format,
+                                    filter_spec=filter_spec,
+                                )
                             )
-                        )
-                        st.success(f"成功导出 {count} 条数据到 {output_path}")
-                    except Exception as exc:
-                        st.error(f"导出失败: {str(exc)}")
+                            st.success(f"成功导出 {count} 条数据到 {output_path}")
+                        except Exception as exc:
+                            st.error(f"导出失败: {str(exc)}")
 
-    def on_detail(sample_uid: str) -> None:
-        go_to_detail(st.query_params, sample_uid, route.active_main_page)
-        st.rerun()
+        def on_detail(sample_uid: str) -> None:
+            go_to_detail(st.query_params, sample_uid, route.active_main_page)
+            st.rerun()
 
-    def on_page_change(page_index: int) -> None:
-        view.page_index = page_index
-        save_filter_list_view(st.session_state, view)
-        st.rerun()
+        def on_page_change(page_index: int) -> None:
+            view.page_index = page_index
+            save_filter_list_view(st.session_state, view)
+            st.rerun()
 
-    def on_selection_change(selected_ids: set[int]) -> None:
-        view.selected_ids = selected_ids
-        save_filter_list_view(st.session_state, view)
+        def on_selection_change(selected_ids: set[int]) -> None:
+            view.selected_ids = selected_ids
+            save_filter_list_view(st.session_state, view)
 
-    render_samples_table(
-        samples,
-        view.page_index,
-        total_pages,
-        on_detail,
-        on_page_change=on_page_change,
-        on_selection_change=on_selection_change,
-        selected_ids=view.selected_ids,
-        show_checkboxes=view.selection_enabled,
-    )
-
-    store.close()
+        render_samples_table(
+            samples,
+            view.page_index,
+            total_pages,
+            on_detail,
+            on_page_change=on_page_change,
+            on_selection_change=on_selection_change,
+            selected_ids=view.selected_ids,
+            show_checkboxes=view.selection_enabled,
+        )
+    finally:
+        store.close()
 
 
 def _build_export_filter_spec(criteria: FilterCriteria, selected_ids: list[int] | None = None) -> ExportFilterSpec:

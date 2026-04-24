@@ -30,7 +30,6 @@ st.sidebar.caption(str(active_db_path))
 with st.sidebar.form("db_switch_form"):
     new_db_path = st.text_input(
         "数据库路径",
-        value=st.session_state.get(ACTIVE_DB_PATH_INPUT_KEY, str(active_db_path)),
         key=ACTIVE_DB_PATH_INPUT_KEY,
         help="输入 DuckDB 文件路径并点击加载，无需重启 Web。",
     )
