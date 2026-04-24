@@ -828,6 +828,47 @@ def test_init_schema_recomputes_tool_stats_from_dual_judgments():
         store.close()
 
 
+def test_touch_processing_sample_refreshes_timestamp_only_for_processing(tmp_path):
+    from datetime import datetime, timedelta
+
+    from claw_data_filter.models.sample import Sample
+    from claw_data_filter.storage.duckdb_store import DuckDBStore
+
+    store = DuckDBStore(tmp_path / "touch_processing.duckdb")
+    sample_id = store.insert_sample(Sample.from_dict({"messages": [{"role": "user", "content": "hello"}, {"role": "assistant", "content": "hi"}]}))
+    sample_uid = store.get_sample_by_id(sample_id)["sample_uid"]
+
+    old_timestamp = datetime.now() - timedelta(hours=5)
+    refreshed_timestamp = datetime.now()
+    store.conn.execute(
+        "UPDATE samples SET processing_status = 'processing', processing_updated_at = ? WHERE sample_uid = ?",
+        [old_timestamp, sample_uid],
+    )
+
+    store.touch_processing_sample(sample_uid, touched_at=refreshed_timestamp)
+
+    row = store.conn.execute(
+        "SELECT processing_status, processing_updated_at FROM samples WHERE sample_uid = ?",
+        [sample_uid],
+    ).fetchone()
+    assert row[0] == "processing"
+    assert row[1] == refreshed_timestamp
+
+    store.conn.execute(
+        "UPDATE samples SET processing_status = 'completed', processing_updated_at = ? WHERE sample_uid = ?",
+        [old_timestamp, sample_uid],
+    )
+    store.touch_processing_sample(sample_uid, touched_at=refreshed_timestamp)
+
+    row = store.conn.execute(
+        "SELECT processing_status, processing_updated_at FROM samples WHERE sample_uid = ?",
+        [sample_uid],
+    ).fetchone()
+    assert row[0] == "completed"
+    assert row[1] == old_timestamp
+    store.close()
+
+
 if __name__ == "__main__":
     test_store_and_retrieve_samples()
     test_insert_sample_deduplicates_by_sample_uid()

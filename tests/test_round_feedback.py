@@ -1,3 +1,4 @@
+import asyncio
 import json
 from unittest.mock import AsyncMock
 
@@ -394,4 +395,67 @@ async def test_process_batch_marks_sample_failed_when_prompt_still_too_long(tmp_
     assert tool_stats["error_reason"] == "user_satisfied_prompt_too_long_after_truncation"
     assert store.get_assistant_response_judgments(sample_uid) == []
     assert store.get_user_episode_judgments(sample_uid) == []
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_process_sample_heartbeat_refreshes_processing_timestamp(tmp_path):
+    from datetime import datetime, timedelta
+
+    from claw_data_filter.models.sample import Sample
+    from claw_data_filter.processors.round_feedback import RoundFeedbackProcessor
+    from claw_data_filter.storage.duckdb_store import DuckDBStore
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class SlowLLM:
+        async def chat(self, messages, max_tokens=50):
+            started.set()
+            await release.wait()
+            if "response_progress" in messages[0]["content"]:
+                return "response_progress=yes"
+            return "user_satisfied=yes"
+
+    store = DuckDBStore(tmp_path / "round_feedback_heartbeat.duckdb")
+    raw_json = {
+        "request": {
+            "bodyJson": {
+                "messages": [
+                    {"role": "user", "content": "Hi"},
+                    {"role": "assistant", "content": "Hello"},
+                    {"role": "tool", "content": "tool ok"},
+                    {"role": "assistant", "content": "Anything else?"},
+                ]
+            }
+        }
+    }
+
+    sample_id = store.insert_sample(Sample.from_dict(raw_json))
+    sample_uid = store.get_sample_by_id(sample_id)["sample_uid"]
+    old_timestamp = datetime.now() - timedelta(hours=5)
+    store.conn.execute(
+        "UPDATE samples SET processing_status = 'processing', processing_updated_at = ? WHERE sample_uid = ?",
+        [old_timestamp, sample_uid],
+    )
+
+    processor = RoundFeedbackProcessor(
+        store,
+        SlowLLM(),
+        max_concurrency=2,
+        processing_heartbeat_interval_seconds=0.01,
+    )
+    task = asyncio.create_task(processor.process_sample(sample_uid, raw_json))
+
+    await started.wait()
+    await asyncio.sleep(0.05)
+
+    heartbeat_timestamp = store.conn.execute(
+        "SELECT processing_updated_at FROM samples WHERE sample_uid = ?",
+        [sample_uid],
+    ).fetchone()[0]
+    assert heartbeat_timestamp > old_timestamp
+
+    release.set()
+    await task
     store.close()

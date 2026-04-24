@@ -1078,6 +1078,14 @@ class DuckDBStore:
             logger.info("Reclaimed stale processing samples: count=%s stale_minutes=%s", changes, stale_minutes)
         return changes
 
+    def touch_processing_sample(self, sample_uid: str, touched_at: datetime | None = None) -> None:
+        """Refresh processing_updated_at for an actively running sample."""
+        timestamp = touched_at or datetime.now()
+        self.conn.execute(
+            "UPDATE samples SET processing_updated_at = ? WHERE sample_uid = ? AND processing_status = 'processing'",
+            [timestamp, sample_uid],
+        )
+
     def count_pending_samples_needing_session_merge(self) -> int:
         """Count pending/failed samples whose session_merge_keep is still NULL.
 

@@ -745,6 +745,7 @@ class RoundFeedbackProcessor:
         episode_min_share: float = 0.2,
         episode_round_limit: int = DEFAULT_EPISODE_ROUND_LIMIT,
         prompt_char_limit: int = DEFAULT_PROMPT_CHAR_LIMIT,
+        processing_heartbeat_interval_seconds: float = 60.0,
         llm_max_retries: int = 2,
         llm_retry_base_delay: float = 5.0,
         llm_retry_max_delay: float = 30.0,
@@ -754,6 +755,7 @@ class RoundFeedbackProcessor:
         self.max_concurrency = max(1, max_concurrency)
         self.episode_min_share = min(max(episode_min_share, 0.0), 1.0)
         self.prompt_char_limit = max(1, prompt_char_limit)
+        self.processing_heartbeat_interval_seconds = max(0.0, processing_heartbeat_interval_seconds)
         self.semaphore = asyncio.Semaphore(self.max_concurrency)
         self.write_lock = asyncio.Lock()
         self.context_builder = TurnContextBuilder(episode_round_limit=episode_round_limit)
@@ -770,6 +772,24 @@ class RoundFeedbackProcessor:
             retry_max_delay=llm_retry_max_delay,
         )
         self.stats_aggregator = ToolStatsAggregator()
+
+    async def _run_processing_heartbeat(self, sample_uid: str, stop_event: asyncio.Event) -> None:
+        """Keep a processing sample lease alive while the sample is actively running."""
+        if self.processing_heartbeat_interval_seconds <= 0:
+            return
+
+        while True:
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=self.processing_heartbeat_interval_seconds)
+                return
+            except asyncio.TimeoutError:
+                pass
+
+            try:
+                async with self.write_lock:
+                    self.store.touch_processing_sample(sample_uid)
+            except Exception:
+                logger.exception("Failed to refresh processing heartbeat: sample_uid=%s", sample_uid)
 
     async def process_sample(self, sample_uid: str, sample_input: dict[str, Any]) -> SampleJudgmentResult:
         logger.info("Round feedback sample start: sample_uid=%s", sample_uid)
@@ -792,52 +812,59 @@ class RoundFeedbackProcessor:
             logger.warning("Round feedback sample has no messages: sample_uid=%s", sample_uid)
             return SampleJudgmentResult(sample_uid=sample_uid, response_judgments=[], episode_judgments=[], tool_stats=tool_stats)
 
-        response_contexts = self.context_builder.extract_response_contexts(sample_uid, messages)
-        episode_contexts = self.context_builder.extract_episode_contexts(sample_uid, messages)
-        launch_plan = self._build_launch_plan(response_contexts, episode_contexts)
-        prepared_plan = self._prepare_launch_plan(launch_plan)
+        heartbeat_stop_event = asyncio.Event()
+        heartbeat_task = asyncio.create_task(self._run_processing_heartbeat(sample_uid, heartbeat_stop_event))
 
-        tasks = [
-            asyncio.create_task(self._run_planned_task(kind, context, prompt))
-            for kind, context, prompt in prepared_plan
-        ]
-        response_judgments: list[AssistantResponseJudgment] = []
-        episode_judgments: list[UserEpisodeJudgment] = []
+        try:
+            response_contexts = self.context_builder.extract_response_contexts(sample_uid, messages)
+            episode_contexts = self.context_builder.extract_episode_contexts(sample_uid, messages)
+            launch_plan = self._build_launch_plan(response_contexts, episode_contexts)
+            prepared_plan = self._prepare_launch_plan(launch_plan)
 
-        for result in await asyncio.gather(*tasks):
-            if isinstance(result, AssistantResponseJudgment):
-                response_judgments.append(result)
-            else:
-                episode_judgments.append(result)
+            tasks = [
+                asyncio.create_task(self._run_planned_task(kind, context, prompt))
+                for kind, context, prompt in prepared_plan
+            ]
+            response_judgments: list[AssistantResponseJudgment] = []
+            episode_judgments: list[UserEpisodeJudgment] = []
 
-        response_judgments.sort(key=lambda row: row.response_index)
-        episode_judgments.sort(key=lambda row: row.episode_index)
-        tool_stats = self.stats_aggregator.aggregate(response_judgments, episode_judgments)
+            for result in await asyncio.gather(*tasks):
+                if isinstance(result, AssistantResponseJudgment):
+                    response_judgments.append(result)
+                else:
+                    episode_judgments.append(result)
 
-        async with self.write_lock:
-            self.store.replace_round_feedback_results(
+            response_judgments.sort(key=lambda row: row.response_index)
+            episode_judgments.sort(key=lambda row: row.episode_index)
+            tool_stats = self.stats_aggregator.aggregate(response_judgments, episode_judgments)
+
+            async with self.write_lock:
+                self.store.replace_round_feedback_results(
+                    sample_uid,
+                    len(response_contexts),
+                    len(episode_contexts),
+                    response_judgments,
+                    episode_judgments,
+                    tool_stats,
+                )
+            logger.info(
+                "Round feedback sample complete: sample_uid=%s response_contexts=%s episode_contexts=%s has_error=%s response_progress_rate=%.4f user_satisfied_rate=%.4f",
                 sample_uid,
                 len(response_contexts),
                 len(episode_contexts),
-                response_judgments,
-                episode_judgments,
-                tool_stats,
+                bool(tool_stats.get("has_error")),
+                float(tool_stats.get("response_progress_rate", 0.0) or 0.0),
+                float(tool_stats.get("user_satisfied_rate", 0.0) or 0.0),
             )
-        logger.info(
-            "Round feedback sample complete: sample_uid=%s response_contexts=%s episode_contexts=%s has_error=%s response_progress_rate=%.4f user_satisfied_rate=%.4f",
-            sample_uid,
-            len(response_contexts),
-            len(episode_contexts),
-            bool(tool_stats.get("has_error")),
-            float(tool_stats.get("response_progress_rate", 0.0) or 0.0),
-            float(tool_stats.get("user_satisfied_rate", 0.0) or 0.0),
-        )
-        return SampleJudgmentResult(
-            sample_uid=sample_uid,
-            response_judgments=response_judgments,
-            episode_judgments=episode_judgments,
-            tool_stats=tool_stats,
-        )
+            return SampleJudgmentResult(
+                sample_uid=sample_uid,
+                response_judgments=response_judgments,
+                episode_judgments=episode_judgments,
+                tool_stats=tool_stats,
+            )
+        finally:
+            heartbeat_stop_event.set()
+            await heartbeat_task
 
     async def process_batch(self, sample_batch: list[tuple[str, dict[str, Any]]]) -> tuple[int, int]:
         logger.info("Round feedback batch start: batch_size=%s", len(sample_batch))
