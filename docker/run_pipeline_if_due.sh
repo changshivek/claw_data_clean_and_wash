@@ -23,5 +23,4 @@ if (( MIN_INTERVAL_HOURS > 0 )) && [[ -f "${STATE_FILE}" ]]; then
   fi
 fi
 
-date +%s > "${STATE_FILE}"
-python -m claw_data_filter.cli pipeline-run --config "${CONFIG_PATH}"
+python -m claw_data_filter.cli pipeline-run --config "${CONFIG_PATH}" && date +%s > "${STATE_FILE}"
