@@ -56,7 +56,11 @@ class ReportExporter:
             "user_feedback_scored_episodes": 0,
         }
         for (tool_stats_raw,) in rows:
-            tool_stats = json.loads(tool_stats_raw) if isinstance(tool_stats_raw, str) else (tool_stats_raw or {})
+            try:
+                tool_stats = json.loads(tool_stats_raw) if isinstance(tool_stats_raw, str) else (tool_stats_raw or {})
+            except (json.JSONDecodeError, TypeError):
+                logger.warning("Skipping malformed tool_stats JSON in report")
+                continue
             if not tool_stats:
                 continue
             totals["processed_samples"] += 1
@@ -104,6 +108,7 @@ class ReportExporter:
     def export_report(self, output_path: Path) -> dict:
         """Export statistical report."""
         _validate_output_path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
         report = self._build_report_payload()
         report["generated_at"] = datetime.now().isoformat()
 

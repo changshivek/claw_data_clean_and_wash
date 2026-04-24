@@ -312,7 +312,7 @@ def ensure_session_merge_schema(conn: duckdb.DuckDBPyConnection) -> None:
         try:
             conn.execute(sql)
         except Exception:
-            pass
+            logger.debug("session_merge schema column may already exist: %s", sql.split()[-1])
 
 
 def _load_candidates(

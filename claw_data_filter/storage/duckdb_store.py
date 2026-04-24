@@ -235,115 +235,115 @@ class DuckDBStore:
         # Migration: add columns if they don't exist
         try:
             self.conn.execute("ALTER TABLE samples ADD COLUMN tool_stats JSON")
-        except:
+        except Exception:
             pass  # Column may already exist (ignore error)
         try:
             self.conn.execute("ALTER TABLE samples ADD COLUMN empty_response BOOLEAN")
-        except:
+        except Exception:
             pass
         try:
             self.conn.execute("ALTER TABLE samples ADD COLUMN normalized_messages_json JSON")
-        except:
+        except Exception:
             pass
         try:
             self.conn.execute("ALTER TABLE samples ADD COLUMN normalized_tools_json JSON")
-        except:
+        except Exception:
             pass
         try:
             self.conn.execute("ALTER TABLE samples ADD COLUMN normalized_user_turns_json JSON")
-        except:
+        except Exception:
             pass
         try:
             self.conn.execute("ALTER TABLE samples ADD COLUMN source_metadata_json JSON")
-        except:
+        except Exception:
             pass
         try:
             self.conn.execute("ALTER TABLE samples ADD COLUMN items_path TEXT")
-        except:
+        except Exception:
             pass
         try:
             self.conn.execute("ALTER TABLE samples ADD COLUMN source_path TEXT")
-        except:
+        except Exception:
             pass
         try:
             self.conn.execute("ALTER TABLE samples ADD COLUMN line_number BIGINT")
-        except:
+        except Exception:
             pass
         try:
             self.conn.execute("ALTER TABLE samples ADD COLUMN byte_offset BIGINT")
-        except:
+        except Exception:
             pass
         try:
             self.conn.execute("ALTER TABLE samples ADD COLUMN source_fingerprint TEXT")
-        except:
+        except Exception:
             pass
         try:
             self.conn.execute("ALTER TABLE samples ADD COLUMN message_count INTEGER")
-        except:
+        except Exception:
             pass
         try:
             self.conn.execute("ALTER TABLE samples ADD COLUMN expected_judgment_count INTEGER")
-        except:
+        except Exception:
             pass  # Column may already exist (ignore error)
         try:
             self.conn.execute("ALTER TABLE samples ADD COLUMN expected_response_judgment_count INTEGER")
-        except:
+        except Exception:
             pass
         try:
             self.conn.execute("ALTER TABLE samples ADD COLUMN expected_episode_judgment_count INTEGER")
-        except:
+        except Exception:
             pass
         try:
             self.conn.execute("ALTER TABLE samples ADD COLUMN processing_status TEXT")
-        except:
+        except Exception:
             pass  # Column may already exist (ignore error)
         try:
             self.conn.execute("ALTER TABLE samples ADD COLUMN processing_updated_at TIMESTAMP")
-        except:
+        except Exception:
             pass  # Column may already exist (ignore error)
         try:
             self.conn.execute("ALTER TABLE samples ADD COLUMN response_progress_rate DOUBLE")
-        except:
+        except Exception:
             pass
         try:
             self.conn.execute("ALTER TABLE samples ADD COLUMN response_regress_rate DOUBLE")
-        except:
+        except Exception:
             pass
         try:
             self.conn.execute("ALTER TABLE samples ADD COLUMN user_satisfied_rate DOUBLE")
-        except:
+        except Exception:
             pass
         try:
             self.conn.execute("ALTER TABLE samples ADD COLUMN user_negative_feedback_rate DOUBLE")
-        except:
+        except Exception:
             pass
         try:
             self.conn.execute("ALTER TABLE samples ADD COLUMN session_merge_status TEXT")
-        except:
+        except Exception:
             pass
         try:
             self.conn.execute("ALTER TABLE samples ADD COLUMN session_merge_keep BOOLEAN")
-        except:
+        except Exception:
             pass
         try:
             self.conn.execute("ALTER TABLE samples ADD COLUMN session_merge_group_id TEXT")
-        except:
+        except Exception:
             pass
         try:
             self.conn.execute("ALTER TABLE samples ADD COLUMN session_merge_group_size INTEGER")
-        except:
+        except Exception:
             pass
         try:
             self.conn.execute("ALTER TABLE samples ADD COLUMN session_merge_representative_uid TEXT")
-        except:
+        except Exception:
             pass
         try:
             self.conn.execute("ALTER TABLE samples ADD COLUMN session_merge_reason TEXT")
-        except:
+        except Exception:
             pass
         try:
             self.conn.execute("ALTER TABLE samples ADD COLUMN session_merge_updated_at TIMESTAMP")
-        except:
+        except Exception:
             pass
 
         self.conn.execute(
@@ -368,7 +368,7 @@ class DuckDBStore:
                   AND source.id = target.session_merge_representative_id
                 """
             )
-        except:
+        except Exception:
             pass
         self.conn.execute(
             """
@@ -383,11 +383,11 @@ class DuckDBStore:
 
         try:
             self.conn.execute("ALTER TABLE samples DROP COLUMN task_type")
-        except:
+        except Exception:
             pass
         try:
             self.conn.execute("ALTER TABLE samples DROP COLUMN has_error")
-        except:
+        except Exception:
             pass
 
         # Drop evaluations table completely
