@@ -302,15 +302,32 @@ class PipelineService:
 
     def _claim_source_file(self, plan: SourceFilePlan, run_id: str, now: datetime) -> bool:
         existing = self.store.conn.execute(
-            "SELECT fingerprint, status FROM pipeline_source_files WHERE source_path = ?",
+            "SELECT fingerprint, status, last_seen_at FROM pipeline_source_files WHERE source_path = ?",
             [str(plan.source_path)],
         ).fetchone()
-        if existing and existing[0] == plan.fingerprint and existing[1] in {"processing", "completed", "exported"}:
-            self.store.conn.execute(
-                "UPDATE pipeline_source_files SET last_seen_at = ?, last_run_id = ? WHERE source_path = ?",
-                [now, run_id, str(plan.source_path)],
-            )
-            return False
+        if existing and existing[0] == plan.fingerprint:
+            if existing[1] == "processing":
+                last_seen = existing[2]
+                if last_seen is not None:
+                    stale_seconds = (now - last_seen).total_seconds()
+                    # Allow re-claim if stuck in processing for more than 2 hours.
+                    # Do NOT refresh last_seen_at here — the timestamp must
+                    # preserve the original claim time so staleness can be
+                    # detected across successive scheduler ticks.
+                    if stale_seconds < 2 * 3600:
+                        return False
+                    logger.warning(
+                        "Reclaiming stale processing source file: source_path=%s stale_hours=%.1f",
+                        str(plan.source_path),
+                        stale_seconds / 3600,
+                    )
+                # else: last_seen is None (unusual), proceed to re-claim
+            elif existing[1] in {"completed", "exported"}:
+                self.store.conn.execute(
+                    "UPDATE pipeline_source_files SET last_seen_at = ?, last_run_id = ? WHERE source_path = ?",
+                    [now, run_id, str(plan.source_path)],
+                )
+                return False
 
         self._upsert_source_file(
             plan=plan,
@@ -442,6 +459,13 @@ class PipelineService:
         )
 
     def _run_round_feedback_for_samples(self, sample_uids: list[str]) -> None:
+        # Recover any samples stuck in processing from a previous crashed run
+        # before feeding the current batch.  This call is scoped to samples
+        # only; source-file-level recovery is handled by _claim_source_file.
+        reclaimed = self.store.reclaim_stale_processing_samples(stale_minutes=120)
+        if reclaimed:
+            logger.info("Reclaimed stale processing samples before round feedback: count=%s", reclaimed)
+
         candidate_rows = self._load_round_feedback_rows(sample_uids)
         if not candidate_rows:
             logger.info("No imported samples eligible for round feedback in current run")

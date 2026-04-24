@@ -272,8 +272,9 @@ def pressure_test(ctx):
 @cli.command()
 @click.option("--workers", type=int, default=None, help="Number of parallel workers")
 @click.option("--batch-size", type=int, default=None, help="Batch size per worker")
+@click.option("--reclaim-stale/--no-reclaim-stale", default=True, show_default=True, help="Reclaim processing samples stuck longer than 2 hours")
 @click.pass_context
-def round_feedback(ctx, workers, batch_size):
+def round_feedback(ctx, workers, batch_size, reclaim_stale):
     """Process round-level feedback judgments on samples."""
     config = ctx.obj["config"]
     if workers:
@@ -317,9 +318,20 @@ def round_feedback(ctx, workers, batch_size):
             total_success = 0
             total_failures = 0
 
+            if reclaim_stale:
+                reclaimed = store.reclaim_stale_processing_samples(stale_minutes=120)
+                if reclaimed:
+                    click.echo(f"Reclaimed {reclaimed} stale processing sample(s) back to pending")
+
             while True:
                 batch = store.claim_unprocessed_samples(limit=config.batch_size)
                 if not batch:
+                    # Check for pre-merge samples that were silently skipped.
+                    blocked = store.count_pending_samples_needing_session_merge()
+                    if blocked:
+                        click.echo(
+                            f"有 {blocked} 条样本尚未经过 session merge，请先运行 session-merge 命令。"
+                        )
                     break
 
                 logger.info(

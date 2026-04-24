@@ -4,7 +4,7 @@ import logging
 from pathlib import Path
 from typing import Any, Optional, Sequence
 import duckdb
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from claw_data_filter.filters.query import ComparisonOp, FilterQueryBuilder
 from claw_data_filter.models.sample import Sample, extract_import_fields_from_payload
@@ -1061,6 +1061,35 @@ class DuckDBStore:
             self.conn.execute("ROLLBACK")
             logger.exception("Round feedback result replacement rolled back: sample_uid=%s", sample_uid)
             raise
+
+    def reclaim_stale_processing_samples(self, stale_minutes: int = 120) -> int:
+        """Reset stuck processing samples back to pending after timeout.
+
+        Returns count of samples that were reclaimed.
+        """
+        cutoff = datetime.now() - timedelta(minutes=stale_minutes)
+        self.conn.execute(
+            "UPDATE samples SET processing_status = 'pending' "
+            "WHERE processing_status = 'processing' AND processing_updated_at < ?",
+            [cutoff],
+        )
+        changes = self.conn.changes()
+        if changes:
+            logger.info("Reclaimed stale processing samples: count=%s stale_minutes=%s", changes, stale_minutes)
+        return changes
+
+    def count_pending_samples_needing_session_merge(self) -> int:
+        """Count pending/failed samples whose session_merge_keep is still NULL.
+
+        These samples are eligible for round-feedback but silently blocked
+        by the session_merge_keep=TRUE filter inside claim_unprocessed_samples.
+        """
+        row = self.conn.execute(
+            "SELECT COUNT(*) FROM samples "
+            "WHERE COALESCE(processing_status, 'pending') IN ('pending', 'failed') "
+            "AND session_merge_keep IS NULL"
+        ).fetchone()
+        return int(row[0]) if row else 0
 
     def claim_unprocessed_samples(self, limit: int = 100) -> list[tuple[str, dict]]:
         """Claim pending or failed samples for round feedback processing."""
