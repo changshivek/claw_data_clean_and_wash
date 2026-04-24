@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from claw_data_filter.models.round_judgment import AssistantResponseJudgment, FeedbackKind, UserEpisodeJudgment
-from claw_data_filter.models.sample import extract_messages_from_payload, extract_normalized_messages
+from claw_data_filter.models.sample import extract_normalized_messages, extract_normalized_messages_from_payload
 
 logger = logging.getLogger(__name__)
 PRESSURE_TEST_PROGRESS_LOG_INTERVAL = 50
@@ -771,9 +771,11 @@ class RoundFeedbackProcessor:
         )
         self.stats_aggregator = ToolStatsAggregator()
 
-    async def process_sample(self, sample_uid: str, raw_json: dict[str, Any]) -> SampleJudgmentResult:
+    async def process_sample(self, sample_uid: str, sample_input: dict[str, Any]) -> SampleJudgmentResult:
         logger.info("Round feedback sample start: sample_uid=%s", sample_uid)
-        messages = extract_messages_from_payload(raw_json)
+        messages = sample_input.get("normalized_messages") or []
+        if not messages and ("messages" in sample_input or "request" in sample_input):
+            messages = extract_normalized_messages_from_payload(sample_input)
         if not messages:
             tool_stats = {
                 "response_progress_rate": 0.0,
@@ -840,9 +842,9 @@ class RoundFeedbackProcessor:
     async def process_batch(self, sample_batch: list[tuple[str, dict[str, Any]]]) -> tuple[int, int]:
         logger.info("Round feedback batch start: batch_size=%s", len(sample_batch))
 
-        async def process_one(sample_uid: str, raw_json: dict[str, Any]) -> bool:
+        async def process_one(sample_uid: str, sample_input: dict[str, Any]) -> bool:
             try:
-                await self.process_sample(sample_uid, raw_json)
+                await self.process_sample(sample_uid, sample_input)
                 return True
             except Exception as exc:
                 logger.exception("Failed to process sample %s", sample_uid)
@@ -850,7 +852,7 @@ class RoundFeedbackProcessor:
                     self.store.mark_sample_processing_failed(sample_uid, self._derive_error_reason(exc))
                 return False
 
-        results = await asyncio.gather(*(process_one(sample_uid, raw_json) for sample_uid, raw_json in sample_batch))
+        results = await asyncio.gather(*(process_one(sample_uid, sample_input) for sample_uid, sample_input in sample_batch))
         success = sum(1 for item in results if item)
         logger.info("Round feedback batch complete: batch_size=%s success=%s failures=%s", len(sample_batch), success, len(results) - success)
         return success, len(results) - success

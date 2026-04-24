@@ -8,20 +8,14 @@ def test_build_sample_detail_view_uses_turn_context_grouping():
     sample_record = {
         "id": 3,
         "sample_uid": "uid-3",
-        "raw_json": {
-            "request": {
-                "bodyJson": {
-                    "messages": [
-                        {"role": "user", "content": "查一下北京天气"},
-                        {"role": "assistant", "content": "我来查一下", "tool_calls": [{"function": {"name": "weather"}}]},
-                        {"role": "tool", "content": "晴天 25 度"},
-                        {"role": "assistant", "content": "北京今天晴天 25 度"},
-                        {"role": "user", "content": "谢谢"},
-                        {"role": "assistant", "content": "不客气"},
-                    ]
-                }
-            }
-        },
+        "normalized_messages": [
+            {"role": "user", "content": "查一下北京天气"},
+            {"role": "assistant", "content": "我来查一下", "tool_calls": [{"function": {"name": "weather"}}]},
+            {"role": "tool", "content": "晴天 25 度"},
+            {"role": "assistant", "content": "北京今天晴天 25 度"},
+            {"role": "user", "content": "谢谢"},
+            {"role": "assistant", "content": "不客气"},
+        ],
         "num_turns": 2,
         "expected_judgment_count": 5,
         "expected_response_judgment_count": 3,
@@ -111,12 +105,10 @@ def test_build_sample_detail_view_handles_missing_judgment():
         "id": 8,
         "sample_uid": "uid-8",
         "empty_response": True,
-        "raw_json": {
-            "messages": [
-                {"role": "user", "content": "hello"},
-                {"role": "assistant", "content": "hi"},
-            ]
-        },
+        "normalized_messages": [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi"},
+        ],
         "num_turns": 1,
         "expected_judgment_count": 2,
         "expected_response_judgment_count": 1,

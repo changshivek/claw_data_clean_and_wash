@@ -13,7 +13,6 @@ from claw_data_filter.config import Config
 from claw_data_filter.exporters.report_exporter import ReportExporter
 from claw_data_filter.exporters.unified_exporter import (
     OPENAI_ROUND_FEEDBACK,
-    RAW_JSONL,
     ExportFilterSpec,
     ExportRequest,
     UnifiedExporter,
@@ -42,11 +41,10 @@ def _default_isolated_round_feedback_db_path(source_db_path: Path) -> Path:
     return source_db_path.parent / "isolated" / f"round_feedback_sample_{timestamp}.duckdb"
 
 
-def _summarize_round_feedback_sample(sample_uid: str, raw_json: dict) -> dict[str, int]:
-    from claw_data_filter.models.sample import extract_messages_from_payload
+def _summarize_round_feedback_sample(sample_uid: str, sample_input: dict) -> dict[str, int]:
     from claw_data_filter.processors.round_feedback import TurnContextBuilder
 
-    messages = extract_messages_from_payload(raw_json)
+    messages = sample_input.get("normalized_messages") or []
     builder = TurnContextBuilder()
     response_contexts = builder.extract_response_contexts(sample_uid, messages)
     episode_contexts = builder.extract_episode_contexts(sample_uid, messages)
@@ -128,8 +126,8 @@ def import_cmd(ctx, input_file, workers, chunk_size):
 @click.option("--has-error", type=bool, help="Filter by has error (true/false)")
 @click.option(
     "--export-format",
-    type=click.Choice([RAW_JSONL, OPENAI_ROUND_FEEDBACK]),
-    default=RAW_JSONL,
+    type=click.Choice([OPENAI_ROUND_FEEDBACK]),
+    default=OPENAI_ROUND_FEEDBACK,
     show_default=True,
     help="Export format",
 )
@@ -368,8 +366,13 @@ def round_feedback_sample(ctx, sample_uids, source_db_path, isolated_db_path, wo
             record = source_store.get_sample_by_uid(sample_uid)
             if not record:
                 raise click.ClickException(f"Sample UID not found in source DB: {sample_uid}")
-            summary = _summarize_round_feedback_sample(sample_uid, record["raw_json"])
-            sample_records.append((sample_uid, record["raw_json"], summary))
+            runtime_input = {
+                "normalized_messages": record["normalized_messages"],
+                "normalized_tools": record["normalized_tools"],
+                "source_metadata": record["source_metadata"],
+            }
+            summary = _summarize_round_feedback_sample(sample_uid, runtime_input)
+            sample_records.append((sample_uid, runtime_input, summary))
     finally:
         source_store.close()
 
@@ -415,9 +418,17 @@ def round_feedback_sample(ctx, sample_uids, source_db_path, isolated_db_path, wo
         )
 
         try:
-            for sample_uid, raw_json, summary in sample_records:
-                isolated_store.insert_sample(Sample.from_dict(raw_json))
-                result = await processor.process_sample(sample_uid, raw_json)
+            for sample_uid, sample_input, summary in sample_records:
+                isolated_store.insert_sample(
+                    Sample(
+                        sample_uid=sample_uid,
+                        normalized_messages=sample_input.get("normalized_messages") or [],
+                        normalized_tools=sample_input.get("normalized_tools") or [],
+                        source_metadata=sample_input.get("source_metadata") or {},
+                        message_count=len(sample_input.get("normalized_messages") or []),
+                    )
+                )
+                result = await processor.process_sample(sample_uid, sample_input)
                 response_llm_errors = sum(1 for row in result.response_judgments if row.llm_error)
                 episode_llm_errors = sum(1 for row in result.episode_judgments if row.llm_error)
                 click.echo(

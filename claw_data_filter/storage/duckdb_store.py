@@ -7,13 +7,62 @@ import duckdb
 from datetime import datetime
 
 from claw_data_filter.filters.query import ComparisonOp, FilterQueryBuilder
-from claw_data_filter.models.sample import Sample, generate_sample_uid
+from claw_data_filter.models.sample import Sample, extract_import_fields_from_payload
 from claw_data_filter.models.round_judgment import (
     AssistantResponseJudgment,
     UserEpisodeJudgment,
 )
 
 logger = logging.getLogger(__name__)
+
+SAMPLE_RECORD_SELECT = """
+    id,
+    sample_uid,
+    normalized_messages_json,
+    normalized_tools_json,
+    normalized_user_turns_json,
+    source_metadata_json,
+    items_path,
+    source_path,
+    line_number,
+    byte_offset,
+    source_fingerprint,
+    user_query,
+    assistant_response,
+    message_count,
+    empty_response,
+    num_turns,
+    expected_judgment_count,
+    expected_response_judgment_count,
+    expected_episode_judgment_count,
+    num_tool_calls,
+    response_progress_rate,
+    response_regress_rate,
+    user_satisfied_rate,
+    user_negative_feedback_rate,
+    tool_stats,
+    session_merge_status,
+    session_merge_keep,
+    session_merge_group_id,
+    session_merge_group_size,
+    session_merge_representative_uid,
+    session_merge_reason,
+    session_merge_updated_at,
+    processing_status,
+    processing_updated_at
+"""
+
+
+def _json_dumps(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _json_loads(value: Any, fallback: Any) -> Any:
+    if value is None:
+        return fallback
+    if isinstance(value, str):
+        return json.loads(value)
+    return value
 
 
 class DuckDBStore:
@@ -32,9 +81,18 @@ class DuckDBStore:
             CREATE TABLE {table_name} (
                 sample_uid TEXT PRIMARY KEY,
                 id INTEGER UNIQUE,
-                raw_json JSON,
+                normalized_messages_json JSON,
+                normalized_tools_json JSON,
+                normalized_user_turns_json JSON,
+                source_metadata_json JSON,
+                items_path TEXT,
+                source_path TEXT,
+                line_number BIGINT,
+                byte_offset BIGINT,
+                source_fingerprint TEXT,
                 user_query TEXT,
                 assistant_response TEXT,
+                message_count INTEGER,
                 empty_response BOOLEAN,
                 num_turns INTEGER,
                 expected_judgment_count INTEGER,
@@ -68,10 +126,21 @@ class DuckDBStore:
 
         columns = self.conn.execute("PRAGMA table_info('samples')").fetchall()
         column_names = {row[1] for row in columns}
-        primary_keys = [row[1] for row in columns if row[5]]
-
-        needs_rebuild = primary_keys != ["sample_uid"] or "id" not in column_names
-        if not needs_rebuild:
+        expected_columns = {
+            "sample_uid",
+            "id",
+            "normalized_messages_json",
+            "normalized_tools_json",
+            "normalized_user_turns_json",
+            "source_metadata_json",
+            "items_path",
+            "source_path",
+            "line_number",
+            "byte_offset",
+            "source_fingerprint",
+            "message_count",
+        }
+        if expected_columns.issubset(column_names):
             return
 
         def existing(name: str, fallback_sql: str) -> str:
@@ -81,20 +150,57 @@ class DuckDBStore:
         self.conn.execute(
             f"""
             INSERT INTO samples_v2 (
-                sample_uid, id, raw_json, user_query, assistant_response, empty_response,
-                num_turns, expected_judgment_count, expected_response_judgment_count,
-                expected_episode_judgment_count, num_tool_calls, response_progress_rate,
-                response_regress_rate, user_satisfied_rate, user_negative_feedback_rate,
-                imported_at, tool_stats, session_merge_status, session_merge_keep,
-                session_merge_group_id, session_merge_group_size, session_merge_representative_uid,
-                session_merge_reason, session_merge_updated_at, processing_status, processing_updated_at
-            )
-            SELECT
-                COALESCE(sample_uid, sha256(CAST(raw_json AS VARCHAR))),
+                sample_uid,
                 id,
-                raw_json,
+                normalized_messages_json,
+                normalized_tools_json,
+                normalized_user_turns_json,
+                source_metadata_json,
+                items_path,
+                source_path,
+                line_number,
+                byte_offset,
+                source_fingerprint,
                 user_query,
                 assistant_response,
+                message_count,
+                empty_response,
+                num_turns,
+                expected_judgment_count,
+                expected_response_judgment_count,
+                expected_episode_judgment_count,
+                num_tool_calls,
+                response_progress_rate,
+                response_regress_rate,
+                user_satisfied_rate,
+                user_negative_feedback_rate,
+                imported_at,
+                tool_stats,
+                session_merge_status,
+                session_merge_keep,
+                session_merge_group_id,
+                session_merge_group_size,
+                session_merge_representative_uid,
+                session_merge_reason,
+                session_merge_updated_at,
+                processing_status,
+                processing_updated_at
+            )
+            SELECT
+                {existing('sample_uid', 'NULL')},
+                {existing('id', 'NULL')},
+                {existing('normalized_messages_json', 'NULL')},
+                {existing('normalized_tools_json', 'NULL')},
+                {existing('normalized_user_turns_json', 'NULL')},
+                {existing('source_metadata_json', 'NULL')},
+                {existing('items_path', 'NULL')},
+                {existing('source_path', 'NULL')},
+                {existing('line_number', 'NULL')},
+                {existing('byte_offset', 'NULL')},
+                {existing('source_fingerprint', 'NULL')},
+                {existing('user_query', "''")},
+                {existing('assistant_response', "''")},
+                {existing('message_count', 'NULL')},
                 COALESCE({existing('empty_response', 'FALSE')}, FALSE),
                 COALESCE({existing('num_turns', '0')}, 0),
                 COALESCE({existing('expected_judgment_count', 'num_turns')}, {existing('num_turns', '0')}, 0),
@@ -105,7 +211,7 @@ class DuckDBStore:
                 {existing('response_regress_rate', 'NULL')},
                 {existing('user_satisfied_rate', 'NULL')},
                 {existing('user_negative_feedback_rate', 'NULL')},
-                {existing('imported_at', 'CURRENT_TIMESTAMP')},
+                COALESCE({existing('imported_at', 'CURRENT_TIMESTAMP')}, CURRENT_TIMESTAMP),
                 {existing('tool_stats', 'NULL')},
                 {existing('session_merge_status', 'NULL')},
                 {existing('session_merge_keep', 'NULL')},
@@ -114,8 +220,8 @@ class DuckDBStore:
                 {existing('session_merge_representative_uid', 'NULL')},
                 {existing('session_merge_reason', 'NULL')},
                 {existing('session_merge_updated_at', 'NULL')},
-                {existing('processing_status', "'pending'")},
-                {existing('processing_updated_at', 'CURRENT_TIMESTAMP')}
+                COALESCE({existing('processing_status', "'pending'")}, 'pending'),
+                COALESCE({existing('processing_updated_at', 'CURRENT_TIMESTAMP')}, CURRENT_TIMESTAMP)
             FROM samples
             """
         )
@@ -132,11 +238,47 @@ class DuckDBStore:
         except:
             pass  # Column may already exist (ignore error)
         try:
-            self.conn.execute("ALTER TABLE samples ADD COLUMN sample_uid TEXT")
-        except:
-            pass  # Column may already exist (ignore error)
-        try:
             self.conn.execute("ALTER TABLE samples ADD COLUMN empty_response BOOLEAN")
+        except:
+            pass
+        try:
+            self.conn.execute("ALTER TABLE samples ADD COLUMN normalized_messages_json JSON")
+        except:
+            pass
+        try:
+            self.conn.execute("ALTER TABLE samples ADD COLUMN normalized_tools_json JSON")
+        except:
+            pass
+        try:
+            self.conn.execute("ALTER TABLE samples ADD COLUMN normalized_user_turns_json JSON")
+        except:
+            pass
+        try:
+            self.conn.execute("ALTER TABLE samples ADD COLUMN source_metadata_json JSON")
+        except:
+            pass
+        try:
+            self.conn.execute("ALTER TABLE samples ADD COLUMN items_path TEXT")
+        except:
+            pass
+        try:
+            self.conn.execute("ALTER TABLE samples ADD COLUMN source_path TEXT")
+        except:
+            pass
+        try:
+            self.conn.execute("ALTER TABLE samples ADD COLUMN line_number BIGINT")
+        except:
+            pass
+        try:
+            self.conn.execute("ALTER TABLE samples ADD COLUMN byte_offset BIGINT")
+        except:
+            pass
+        try:
+            self.conn.execute("ALTER TABLE samples ADD COLUMN source_fingerprint TEXT")
+        except:
+            pass
+        try:
+            self.conn.execute("ALTER TABLE samples ADD COLUMN message_count INTEGER")
         except:
             pass
         try:
@@ -207,8 +349,8 @@ class DuckDBStore:
         self.conn.execute(
             "UPDATE samples SET processing_status = COALESCE(processing_status, 'pending'), processing_updated_at = COALESCE(processing_updated_at, imported_at, CURRENT_TIMESTAMP)"
         )
-        self.conn.execute("UPDATE samples SET sample_uid = COALESCE(sample_uid, sha256(CAST(raw_json AS VARCHAR)))")
         self.conn.execute("UPDATE samples SET empty_response = COALESCE(empty_response, FALSE)")
+        self.conn.execute("UPDATE samples SET message_count = COALESCE(message_count, json_array_length(normalized_messages_json), 0)")
         self.conn.execute(
             "UPDATE samples SET num_turns = COALESCE(expected_episode_judgment_count, expected_judgment_count, num_turns, 0)"
         )
@@ -391,22 +533,32 @@ class DuckDBStore:
 
     def insert_sample(self, sample: Sample) -> int:
         """Insert sample, return auto-generated id."""
-        sample_uid = sample.sample_uid or generate_sample_uid(sample.raw_json)
+        extracted = self._coerce_sample_import_fields(sample)
+        sample_uid = extracted["sample_uid"]
         existing = self.conn.execute("SELECT id FROM samples WHERE sample_uid = ?", [sample_uid]).fetchone()
         if existing:
             return existing[0]
 
         insert_params = [
             sample_uid,
-            json.dumps(sample.raw_json),
-            sample.user_query,
-            sample.assistant_response,
-            sample.empty_response,
-            sample.num_turns,
-            sample.expected_judgment_count,
-            sample.expected_response_judgment_count,
-            sample.expected_episode_judgment_count,
-            sample.num_tool_calls,
+            _json_dumps(extracted["normalized_messages"]),
+            _json_dumps(extracted["normalized_tools"]),
+            _json_dumps(extracted["normalized_user_turns"]),
+            _json_dumps(extracted["source_metadata"]),
+            extracted["items_path"],
+            extracted["source_path"],
+            extracted["line_number"],
+            extracted["byte_offset"],
+            extracted["source_fingerprint"],
+            extracted["user_query"],
+            extracted["assistant_response"],
+            extracted["message_count"],
+            extracted["empty_response"],
+            extracted["num_turns"],
+            extracted["expected_judgment_count"],
+            extracted["expected_response_judgment_count"],
+            extracted["expected_episode_judgment_count"],
+            extracted["num_tool_calls"],
             datetime.now(),
             "pending",
             datetime.now(),
@@ -419,12 +571,14 @@ class DuckDBStore:
                 self.conn.execute(
                     """
                     INSERT INTO samples (
-                        id, sample_uid, raw_json, user_query, assistant_response, empty_response,
+                        id, sample_uid, normalized_messages_json, normalized_tools_json, normalized_user_turns_json,
+                        source_metadata_json, items_path, source_path, line_number, byte_offset,
+                        source_fingerprint, user_query, assistant_response, message_count, empty_response,
                         num_turns, expected_judgment_count, expected_response_judgment_count,
                         expected_episode_judgment_count, num_tool_calls, imported_at,
                         processing_status, processing_updated_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     [sample_id, *insert_params],
                 )
@@ -471,12 +625,14 @@ class DuckDBStore:
                 self.conn.executemany(
                     """
                     INSERT OR IGNORE INTO samples (
-                        id, sample_uid, raw_json, user_query, assistant_response, empty_response,
+                        id, sample_uid, normalized_messages_json, normalized_tools_json, normalized_user_turns_json,
+                        source_metadata_json, items_path, source_path, line_number, byte_offset,
+                        source_fingerprint, user_query, assistant_response, message_count, empty_response,
                         num_turns, expected_judgment_count, expected_response_judgment_count,
                         expected_episode_judgment_count, num_tool_calls, imported_at,
                         processing_status, processing_updated_at
                     )
-                    VALUES (nextval('sample_id_seq'), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (nextval('sample_id_seq'), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     pending_rows,
                 )
@@ -510,43 +666,113 @@ class DuckDBStore:
         return existing
 
     def _build_sample_record(self, row: tuple[Any, ...]) -> dict[str, Any]:
-        tool_stats = json.loads(row[15]) if row[15] else None
-        return {
+        tool_stats = _json_loads(row[24], None)
+        record = {
             "id": row[0],
             "sample_uid": row[1],
-            "raw_json": json.loads(row[2]) if row[2] else {},
-            "user_query": row[3],
-            "assistant_response": row[4],
-            "empty_response": bool(row[5]),
-            "num_turns": row[6] or 0,
-            "expected_judgment_count": row[7] or 0,
-            "expected_response_judgment_count": row[8] or 0,
-            "expected_episode_judgment_count": row[9] or 0,
-            "num_tool_calls": row[10] or 0,
+            "normalized_messages": _json_loads(row[2], []),
+            "normalized_tools": _json_loads(row[3], []),
+            "normalized_user_turns": _json_loads(row[4], []),
+            "source_metadata": _json_loads(row[5], {}),
+            "items_path": row[6],
+            "source_path": row[7],
+            "line_number": row[8],
+            "byte_offset": row[9],
+            "source_fingerprint": row[10],
+            "user_query": row[11],
+            "assistant_response": row[12],
+            "message_count": row[13] or 0,
+            "empty_response": bool(row[14]),
+            "num_turns": row[15] or 0,
+            "expected_judgment_count": row[16] or 0,
+            "expected_response_judgment_count": row[17] or 0,
+            "expected_episode_judgment_count": row[18] or 0,
+            "num_tool_calls": row[19] or 0,
             "has_error": (tool_stats or {}).get("has_error", False),
             "tool_stats": tool_stats,
-            "session_merge_status": row[16],
-            "session_merge_keep": row[17],
-            "session_merge_group_id": row[18],
-            "session_merge_group_size": row[19],
-            "session_merge_representative_uid": row[20],
-            "session_merge_reason": row[21],
-            "session_merge_updated_at": row[22],
-            "processing_status": row[23] or "pending",
-            "processing_updated_at": row[24],
-            "progress_rate": row[11] if row[11] is not None else (tool_stats or {}).get("response_progress_rate", 0),
-            "regress_rate": row[12] if row[12] is not None else (tool_stats or {}).get("response_regress_rate", 0),
-            "satisfied_rate": row[13] if row[13] is not None else (tool_stats or {}).get("user_satisfied_rate", 0),
-            "negative_feedback_rate": row[14] if row[14] is not None else (tool_stats or {}).get("user_negative_feedback_rate", 0),
+            "session_merge_status": row[25],
+            "session_merge_keep": row[26],
+            "session_merge_group_id": row[27],
+            "session_merge_group_size": row[28],
+            "session_merge_representative_uid": row[29],
+            "session_merge_reason": row[30],
+            "session_merge_updated_at": row[31],
+            "processing_status": row[32] or "pending",
+            "processing_updated_at": row[33],
+            "progress_rate": row[20] if row[20] is not None else (tool_stats or {}).get("response_progress_rate", 0),
+            "regress_rate": row[21] if row[21] is not None else (tool_stats or {}).get("response_regress_rate", 0),
+            "satisfied_rate": row[22] if row[22] is not None else (tool_stats or {}).get("user_satisfied_rate", 0),
+            "negative_feedback_rate": row[23] if row[23] is not None else (tool_stats or {}).get("user_negative_feedback_rate", 0),
+        }
+        return record
+
+    def _coerce_sample_import_fields(self, sample: Sample) -> dict[str, Any]:
+        if sample.raw_json and not sample.normalized_messages:
+            return extract_import_fields_from_payload(sample.raw_json)
+
+        sample_uid = sample.sample_uid
+        if not sample_uid:
+            if sample.raw_json:
+                sample_uid = extract_import_fields_from_payload(sample.raw_json)["sample_uid"]
+            else:
+                raise ValueError("sample_uid is required when raw_json is not available")
+
+        return {
+            "sample_uid": sample_uid,
+            "normalized_messages": sample.normalized_messages,
+            "normalized_tools": sample.normalized_tools,
+            "normalized_user_turns": sample.normalized_user_turns,
+            "source_metadata": sample.source_metadata,
+            "items_path": sample.items_path,
+            "source_path": sample.source_path,
+            "line_number": sample.line_number,
+            "byte_offset": sample.byte_offset,
+            "source_fingerprint": sample.source_fingerprint,
+            "user_query": sample.user_query,
+            "assistant_response": sample.assistant_response,
+            "message_count": sample.message_count,
+            "empty_response": sample.empty_response,
+            "num_turns": sample.num_turns,
+            "expected_judgment_count": sample.expected_judgment_count,
+            "expected_response_judgment_count": sample.expected_response_judgment_count,
+            "expected_episode_judgment_count": sample.expected_episode_judgment_count,
+            "num_tool_calls": sample.num_tool_calls,
         }
 
     def get_samples(self, limit: int = 100, offset: int = 0) -> list[Sample]:
         """Get samples."""
         rows = self.conn.execute(
-            "SELECT raw_json FROM samples LIMIT ? OFFSET ?",
+            f"SELECT {SAMPLE_RECORD_SELECT} FROM samples LIMIT ? OFFSET ?",
             [limit, offset]
         ).fetchall()
-        return [Sample.from_dict(json.loads(row[0])) for row in rows]
+        samples: list[Sample] = []
+        for row in rows:
+            record = self._build_sample_record(row)
+            samples.append(
+                Sample(
+                    id=record["id"],
+                    sample_uid=record["sample_uid"],
+                    normalized_messages=record["normalized_messages"],
+                    normalized_tools=record["normalized_tools"],
+                    normalized_user_turns=record["normalized_user_turns"],
+                    source_metadata=record["source_metadata"],
+                    items_path=record["items_path"],
+                    source_path=record["source_path"],
+                    line_number=record["line_number"],
+                    byte_offset=record["byte_offset"],
+                    source_fingerprint=record["source_fingerprint"],
+                    user_query=record["user_query"],
+                    assistant_response=record["assistant_response"],
+                    message_count=record["message_count"],
+                    empty_response=record["empty_response"],
+                    num_turns=record["num_turns"],
+                    expected_judgment_count=record["expected_judgment_count"],
+                    expected_response_judgment_count=record["expected_response_judgment_count"],
+                    expected_episode_judgment_count=record["expected_episode_judgment_count"],
+                    num_tool_calls=record["num_tool_calls"],
+                )
+            )
+        return samples
 
     def get_sample_count(self) -> int:
         """Get total sample count."""
@@ -843,7 +1069,7 @@ class DuckDBStore:
         try:
             rows = self.conn.execute(
                 """
-                SELECT sample_uid, raw_json
+                SELECT sample_uid, normalized_messages_json, normalized_tools_json, source_metadata_json
                 FROM samples
                 WHERE COALESCE(processing_status, 'pending') IN ('pending', 'failed')
                                     AND session_merge_keep = TRUE
@@ -867,13 +1093,23 @@ class DuckDBStore:
             raise
 
         logger.info("Claimed unprocessed samples: claimed=%s", len(rows))
-        return [(row[0], json.loads(row[1])) for row in rows]
+        return [
+            (
+                row[0],
+                {
+                    "normalized_messages": _json_loads(row[1], []),
+                    "normalized_tools": _json_loads(row[2], []),
+                    "source_metadata": _json_loads(row[3], {}),
+                },
+            )
+            for row in rows
+        ]
 
     def get_unprocessed_samples(self, limit: int = 100) -> list[tuple[str, dict]]:
         """Get samples that haven't been processed for round judgments."""
         rows = self.conn.execute(
             """
-            SELECT s.sample_uid, s.raw_json
+            SELECT s.sample_uid, s.normalized_messages_json, s.normalized_tools_json, s.source_metadata_json
             FROM samples s
             WHERE COALESCE(s.processing_status, 'pending') IN ('pending', 'failed')
                             AND s.session_merge_keep = TRUE
@@ -882,18 +1118,24 @@ class DuckDBStore:
             """,
             [limit],
         ).fetchall()
-        return [(row[0], json.loads(row[1])) for row in rows]
+        return [
+            (
+                row[0],
+                {
+                    "normalized_messages": _json_loads(row[1], []),
+                    "normalized_tools": _json_loads(row[2], []),
+                    "source_metadata": _json_loads(row[3], {}),
+                },
+            )
+            for row in rows
+        ]
 
     def get_sample_by_id(self, sample_id: int) -> dict[str, Any] | None:
         """Get a sample record with parsed JSON fields."""
         row = self.conn.execute(
-            """
-             SELECT id, sample_uid, raw_json, user_query, assistant_response, empty_response, num_turns, expected_judgment_count,
-                 expected_response_judgment_count, expected_episode_judgment_count, num_tool_calls,
-                  response_progress_rate, response_regress_rate, user_satisfied_rate,
-                  user_negative_feedback_rate, tool_stats, session_merge_status, session_merge_keep,
-                  session_merge_group_id, session_merge_group_size, session_merge_representative_uid,
-                 session_merge_reason, session_merge_updated_at, processing_status, processing_updated_at
+            f"""
+             SELECT
+                 {SAMPLE_RECORD_SELECT}
             FROM samples
             WHERE id = ?
             """,
@@ -903,13 +1145,9 @@ class DuckDBStore:
 
     def get_sample_by_uid(self, sample_uid: str) -> dict[str, Any] | None:
         row = self.conn.execute(
-            """
-             SELECT id, sample_uid, raw_json, user_query, assistant_response, empty_response, num_turns, expected_judgment_count,
-                 expected_response_judgment_count, expected_episode_judgment_count, num_tool_calls,
-                  response_progress_rate, response_regress_rate, user_satisfied_rate,
-                  user_negative_feedback_rate, tool_stats, session_merge_status, session_merge_keep,
-                  session_merge_group_id, session_merge_group_size, session_merge_representative_uid,
-                 session_merge_reason, session_merge_updated_at, processing_status, processing_updated_at
+            f"""
+             SELECT
+                 {SAMPLE_RECORD_SELECT}
             FROM samples
             WHERE sample_uid = ?
             """,
@@ -1000,12 +1238,7 @@ class DuckDBStore:
         total = total_row[0] if total_row else 0
 
         query = f"""
-             SELECT id, sample_uid, raw_json, user_query, assistant_response, empty_response, num_turns, expected_judgment_count,
-                 expected_response_judgment_count, expected_episode_judgment_count, num_tool_calls,
-                  response_progress_rate, response_regress_rate, user_satisfied_rate,
-                  user_negative_feedback_rate, tool_stats, session_merge_status, session_merge_keep,
-                  session_merge_group_id, session_merge_group_size, session_merge_representative_uid,
-                 session_merge_reason, session_merge_updated_at, processing_status, processing_updated_at
+               SELECT {SAMPLE_RECORD_SELECT}
             FROM samples s
             WHERE {combined_where}
             ORDER BY id

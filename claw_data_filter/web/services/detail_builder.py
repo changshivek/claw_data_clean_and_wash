@@ -1,6 +1,5 @@
 """Build detail-page view models from storage records."""
 from claw_data_filter.models.round_judgment import AssistantResponseJudgment, UserEpisodeJudgment
-from claw_data_filter.models.sample import extract_messages_from_payload
 from claw_data_filter.processors.round_feedback import TurnContextBuilder
 from claw_data_filter.web.view_models.sample_detail_view import (
     EpisodeDetailView,
@@ -16,7 +15,7 @@ def build_sample_detail_view(
 ) -> SampleDetailView:
     """Build a detail-page view model from a sample record and its judgments."""
     tool_stats = sample_record.get("tool_stats") or {}
-    messages = extract_messages_from_payload(sample_record.get("raw_json") or {})
+    messages = sample_record.get("normalized_messages") or []
     builder = TurnContextBuilder()
     response_contexts = builder.extract_response_contexts(sample_record.get("sample_uid") or "-", messages)
     episode_contexts = builder.extract_episode_contexts(sample_record.get("sample_uid") or "-", messages)

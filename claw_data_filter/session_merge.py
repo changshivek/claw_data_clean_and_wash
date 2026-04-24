@@ -105,18 +105,36 @@ def _hash_group_key(grouping_key: str) -> str:
     return hashlib.sha1(grouping_key.encode("utf-8")).hexdigest()[:16]
 
 
-def analyze_sample_row(row: tuple[str, int, str, int | None]) -> SessionMergeCandidate:
-    sample_uid, local_id, raw_json, num_turns = row
-    payload = json.loads(raw_json)
-    user_turns = extract_real_user_turns(payload)
+def analyze_sample_row(row: tuple[str, int, str | list[str] | None, int | None, int | None]) -> SessionMergeCandidate:
+    sample_uid, local_id, normalized_user_turns_json, message_count, num_turns = row
+    if isinstance(normalized_user_turns_json, str):
+        user_turns = tuple(json.loads(normalized_user_turns_json)) if normalized_user_turns_json else ()
+    elif isinstance(normalized_user_turns_json, list):
+        user_turns = tuple(str(item) for item in normalized_user_turns_json if item)
+    else:
+        user_turns = ()
     first_turn = user_turns[0] if user_turns else None
-    message_count = len(extract_messages_from_payload(payload))
     return SessionMergeCandidate(
         sample_uid=sample_uid,
         local_id=local_id,
         grouping_key=first_turn,
         user_turns=user_turns,
-        message_count=message_count,
+        message_count=message_count or 0,
+        num_turns=num_turns or 0,
+    )
+
+
+def analyze_raw_json_sample_row(row: tuple[str, int, str, int | None]) -> SessionMergeCandidate:
+    sample_uid, local_id, raw_json, num_turns = row
+    payload = json.loads(raw_json)
+    user_turns = extract_real_user_turns(payload)
+    first_turn = user_turns[0] if user_turns else None
+    return SessionMergeCandidate(
+        sample_uid=sample_uid,
+        local_id=local_id,
+        grouping_key=first_turn,
+        user_turns=user_turns,
+        message_count=len(extract_messages_from_payload(payload)),
         num_turns=num_turns or 0,
     )
 
@@ -313,13 +331,22 @@ def _load_candidates(
         )
     else:
         executor = ThreadPoolExecutor(max_workers=max_workers)
+    column_names = {row[1] for row in conn.execute("PRAGMA table_info('samples')").fetchall()}
+    use_structured_columns = {"normalized_user_turns_json", "message_count"}.issubset(column_names)
     with executor:
         for batch_index, offset in enumerate(range(0, total, batch_size), start=1):
-            rows = conn.execute(
-                "SELECT sample_uid, id, CAST(raw_json AS VARCHAR), num_turns FROM samples ORDER BY id LIMIT ? OFFSET ?",
-                [batch_size, offset],
-            ).fetchall()
-            candidates.extend(executor.map(analyze_sample_row, rows))
+            if use_structured_columns:
+                rows = conn.execute(
+                    "SELECT sample_uid, id, CAST(normalized_user_turns_json AS VARCHAR), message_count, num_turns FROM samples ORDER BY id LIMIT ? OFFSET ?",
+                    [batch_size, offset],
+                ).fetchall()
+                candidates.extend(executor.map(analyze_sample_row, rows))
+            else:
+                rows = conn.execute(
+                    "SELECT sample_uid, id, CAST(raw_json AS VARCHAR), num_turns FROM samples ORDER BY id LIMIT ? OFFSET ?",
+                    [batch_size, offset],
+                ).fetchall()
+                candidates.extend(executor.map(analyze_raw_json_sample_row, rows))
             if batch_index == 1 or batch_index % SESSION_MERGE_PROGRESS_LOG_INTERVAL == 0 or batch_index == total_batches:
                 logger.info(
                     "Session merge candidate scan progress: batches=%s/%s loaded_candidates=%s total_samples=%s",

@@ -185,7 +185,7 @@ class FilterQueryBuilder:
         limit_str = f"LIMIT {limit}" if limit else ""
 
         return f"""
-            SELECT s.id, s.raw_json, s.tool_stats
+            SELECT s.id, s.sample_uid, s.tool_stats
             FROM samples s
             WHERE {where}
             {limit_str}
@@ -195,7 +195,7 @@ class FilterQueryBuilder:
         """Build complete SELECT query with placeholders and params."""
         where, params = self.build_parameterized_where_clause(table_name="s")
         query = """
-            SELECT s.id, s.raw_json, s.tool_stats
+            SELECT s.id, s.sample_uid, s.tool_stats
             FROM samples s
             WHERE {where}
         """.format(where=where)

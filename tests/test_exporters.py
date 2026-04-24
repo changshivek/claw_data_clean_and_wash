@@ -4,7 +4,6 @@ from pathlib import Path
 from claw_data_filter.exporters.report_exporter import ReportExporter
 from claw_data_filter.exporters.unified_exporter import (
     OPENAI_ROUND_FEEDBACK,
-    RAW_JSONL,
     ExportFilterSpec,
     ExportRequest,
     UnifiedExporter,
@@ -18,8 +17,8 @@ TEST_DATA_DIR = Path(__file__).parent.parent / "data"
 TEST_DATA_DIR.mkdir(exist_ok=True)
 
 
-def test_raw_jsonl_export():
-    """Test exporting raw samples to JSONL."""
+def test_openai_round_feedback_export_basic():
+    """Test exporting structured samples to round-feedback JSONL."""
     db_path = TEST_DATA_DIR / "test_export.duckdb"
     output_path = TEST_DATA_DIR / "test_output.jsonl"
 
@@ -38,21 +37,22 @@ def test_raw_jsonl_export():
 
     # Export
     exporter = UnifiedExporter(store)
-    count = exporter.export(ExportRequest(output_path=output_path, export_format=RAW_JSONL))
+    count = exporter.export(ExportRequest(output_path=output_path, export_format=OPENAI_ROUND_FEEDBACK))
 
     assert count == 1
     with open(output_path) as f:
         lines = f.readlines()
         assert len(lines) == 1
         data = json.loads(lines[0])
-        assert "messages" in data
+        assert data["schema"] == "openai_round_feedback_v2"
+        assert data["conversation"]["messages"][0]["content"] == "Test"
 
     store.close()
-    print("test_raw_jsonl_export passed")
+    print("test_openai_round_feedback_export_basic passed")
 
 
-def test_raw_jsonl_export_with_filter():
-    """Test exporting with structured filter spec."""
+def test_openai_round_feedback_export_with_filter():
+    """Test structured export still honors filter specs."""
     db_path = TEST_DATA_DIR / "test_export_filter.duckdb"
     output_path = TEST_DATA_DIR / "test_output_filter.jsonl"
 
@@ -78,7 +78,7 @@ def test_raw_jsonl_export_with_filter():
     count = exporter.export(
         ExportRequest(
             output_path=output_path,
-            export_format=RAW_JSONL,
+            export_format=OPENAI_ROUND_FEEDBACK,
             filter_spec=ExportFilterSpec(progress_op=">=", progress_val=0.7),
         )
     )
@@ -86,7 +86,7 @@ def test_raw_jsonl_export_with_filter():
     assert count == 2  # rates 0.9 and 0.7
 
     store.close()
-    print("test_raw_jsonl_export_with_filter passed")
+    print("test_openai_round_feedback_export_with_filter passed")
 
 
 def test_openai_round_feedback_export_includes_turn_ranges_and_judgments():
@@ -432,7 +432,7 @@ def test_report_export():
 
 
 def test_unified_exporter_no_filter():
-    """Test exporter works without requiring judgments."""
+    """Test structured exporter works without requiring judgments."""
     db_path = TEST_DATA_DIR / "test_no_eval.duckdb"
     output_path = TEST_DATA_DIR / "test_no_eval.jsonl"
 
@@ -451,17 +451,19 @@ def test_unified_exporter_no_filter():
 
     # Export without filter should work
     exporter = UnifiedExporter(store)
-    count = exporter.export(ExportRequest(output_path=output_path, export_format=RAW_JSONL))
+    count = exporter.export(ExportRequest(output_path=output_path, export_format=OPENAI_ROUND_FEEDBACK))
 
     assert count == 3
     with open(output_path) as f:
         lines = f.readlines()
         assert len(lines) == 3
+        first_payload = json.loads(lines[0])
+        assert first_payload["schema"] == "openai_round_feedback_v2"
 
     # Export with id-based filter should also work
     filter_path = TEST_DATA_DIR / "test_no_eval_filtered.jsonl"
     count_filtered = exporter.export(
-        ExportRequest(output_path=filter_path, export_format=RAW_JSONL, filter_spec=ExportFilterSpec(selected_ids=[1, 2, 3]))
+        ExportRequest(output_path=filter_path, export_format=OPENAI_ROUND_FEEDBACK, filter_spec=ExportFilterSpec(selected_ids=[1, 2, 3]))
     )
     assert count_filtered == 3
 
@@ -503,8 +505,8 @@ def test_unified_export_preview_supports_estimation():
 
 
 if __name__ == "__main__":
-    test_raw_jsonl_export()
-    test_raw_jsonl_export_with_filter()
+    test_openai_round_feedback_export_basic()
+    test_openai_round_feedback_export_with_filter()
     test_openai_round_feedback_export_includes_turn_ranges_and_judgments()
     test_openai_round_feedback_export_converts_anthropic_system_and_tools()
     test_openai_round_feedback_export_preserves_openai_tools()

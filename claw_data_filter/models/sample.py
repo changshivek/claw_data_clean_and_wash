@@ -79,6 +79,70 @@ def extract_normalized_conversation_from_payload(data: dict[str, Any]) -> dict[s
     return conversation
 
 
+def extract_normalized_user_turns_from_messages(messages: list[dict[str, Any]]) -> list[str]:
+    """Extract normalized user turns from already-normalized messages."""
+    user_turns: list[str] = []
+    for message in messages:
+        if message.get("role") != "user":
+            continue
+        content = _extract_text_content(message.get("content"))
+        if content:
+            user_turns.append(content)
+    return user_turns
+
+
+def extract_normalized_user_turns_from_payload(data: dict[str, Any]) -> list[str]:
+    """Extract normalized user turns directly from a payload."""
+    return extract_normalized_user_turns_from_messages(extract_normalized_messages_from_payload(data))
+
+
+def extract_source_metadata_from_payload(data: dict[str, Any]) -> dict[str, Any]:
+    """Extract lightweight source metadata needed by runtime surfaces."""
+    request = data.get("request") if isinstance(data.get("request"), dict) else {}
+    body_json = request.get("bodyJson") if isinstance(request.get("bodyJson"), dict) else {}
+    metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+
+    def first_non_empty(*values: Any) -> Any:
+        for value in values:
+            if value is None:
+                continue
+            if isinstance(value, str) and not value.strip():
+                continue
+            return value
+        return None
+
+    result = {
+        "metadata": metadata,
+        "timestamp": first_non_empty(data.get("timestamp"), data.get("created_at"), request.get("timestamp")),
+        "model_requested": first_non_empty(body_json.get("model"), data.get("model")),
+        "user_agent": first_non_empty(data.get("user_agent"), request.get("user_agent"), request.get("userAgent")),
+        "request_id": first_non_empty(data.get("request_id"), data.get("requestId"), request.get("request_id"), request.get("requestId")),
+        "trace_id": first_non_empty(data.get("trace_id"), data.get("traceId"), request.get("trace_id"), request.get("traceId")),
+    }
+    return {key: value for key, value in result.items() if value not in (None, {}, [])}
+
+
+def extract_source_locator_from_payload(data: dict[str, Any]) -> dict[str, Any]:
+    """Extract source locator fields when present in payload metadata."""
+    metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+    request = data.get("request") if isinstance(data.get("request"), dict) else {}
+
+    def get_value(name: str) -> Any:
+        if name in data:
+            return data.get(name)
+        if name in metadata:
+            return metadata.get(name)
+        return request.get(name)
+
+    return {
+        "items_path": get_value("items_path"),
+        "source_path": get_value("source_path"),
+        "line_number": get_value("line_number"),
+        "byte_offset": get_value("byte_offset"),
+        "source_fingerprint": get_value("source_fingerprint"),
+    }
+
+
 def has_empty_response(messages: list[dict[str, Any]]) -> bool:
     """Return True when imported messages contain user input but no assistant reply."""
     has_user = False
@@ -380,6 +444,10 @@ def _extract_text_content(content: Any) -> str:
 def extract_import_fields_from_payload(data: dict[str, Any]) -> dict[str, Any]:
     """Extract import-time fields without constructing a Pydantic Sample model."""
     messages = extract_normalized_messages_from_payload(data)
+    normalized_tools = extract_normalized_tools_from_payload(data)
+    normalized_user_turns = extract_normalized_user_turns_from_messages(messages)
+    source_metadata = extract_source_metadata_from_payload(data)
+    source_locator = extract_source_locator_from_payload(data)
 
     user_query = ""
     for message in reversed(messages):
@@ -423,8 +491,18 @@ def extract_import_fields_from_payload(data: dict[str, Any]) -> dict[str, Any]:
     return {
         "sample_uid": generate_sample_uid(data),
         "raw_json": data,
+        "normalized_messages": messages,
+        "normalized_tools": normalized_tools,
+        "normalized_user_turns": normalized_user_turns,
+        "source_metadata": source_metadata,
+        "items_path": source_locator["items_path"],
+        "source_path": source_locator["source_path"],
+        "line_number": source_locator["line_number"],
+        "byte_offset": source_locator["byte_offset"],
+        "source_fingerprint": source_locator["source_fingerprint"],
         "user_query": user_query,
         "assistant_response": assistant_response,
+        "message_count": len(messages),
         "num_turns": num_turns,
         "expected_judgment_count": expected_judgment_count,
         "expected_response_judgment_count": expected_response_judgment_count,
@@ -441,8 +519,18 @@ class Sample(BaseModel):
     id: Optional[int] = None
     sample_uid: str = ""
     raw_json: dict[str, Any] = Field(default_factory=dict)
+    normalized_messages: list[dict[str, Any]] = Field(default_factory=list)
+    normalized_tools: list[dict[str, Any]] = Field(default_factory=list)
+    normalized_user_turns: list[str] = Field(default_factory=list)
+    source_metadata: dict[str, Any] = Field(default_factory=dict)
+    items_path: str | None = None
+    source_path: str | None = None
+    line_number: int | None = None
+    byte_offset: int | None = None
+    source_fingerprint: str | None = None
     user_query: str = ""
     assistant_response: str = ""
+    message_count: int = 0
     num_turns: int = 0
     expected_judgment_count: int = 0
     expected_response_judgment_count: int = 0

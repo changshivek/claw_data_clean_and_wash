@@ -14,20 +14,28 @@ def detect_empty_response(raw_json: dict[str, Any]) -> bool:
     return has_empty_response(messages)
 
 
+def detect_empty_response_from_normalized_messages(messages: list[dict[str, Any]]) -> bool:
+    """Apply the shared empty-response rule to normalized messages."""
+    return has_empty_response(messages)
+
+
 def backfill_empty_response(db_path: Path, dry_run: bool = False) -> dict[str, int]:
     """Backfill empty_response markers for an existing database."""
     store = DuckDBStore(db_path)
     try:
         rows = store.conn.execute(
-            "SELECT id, raw_json, empty_response FROM samples ORDER BY id"
+            "SELECT id, normalized_messages_json, empty_response FROM samples ORDER BY id"
         ).fetchall()
 
         updates: list[tuple[bool, int]] = []
         empty_response_count = 0
 
-        for sample_id, raw_json, current_value in rows:
-            payload = json.loads(raw_json) if isinstance(raw_json, str) else raw_json
-            new_value = detect_empty_response(payload or {})
+        for sample_id, normalized_messages_json, current_value in rows:
+            if isinstance(normalized_messages_json, str):
+                normalized_messages = json.loads(normalized_messages_json) if normalized_messages_json else []
+            else:
+                normalized_messages = normalized_messages_json or []
+            new_value = detect_empty_response_from_normalized_messages(normalized_messages)
             if new_value:
                 empty_response_count += 1
             if current_value is None or bool(current_value) != new_value:

@@ -11,16 +11,11 @@ from pathlib import Path
 from typing import Any
 
 from claw_data_filter.filters.query import ComparisonOp, FilterQueryBuilder
-from claw_data_filter.models.sample import (
-    extract_messages_from_payload,
-    extract_normalized_conversation_from_payload,
-)
 from claw_data_filter.processors.round_feedback import TurnContextBuilder
 from claw_data_filter.storage.duckdb_store import DuckDBStore
 
-RAW_JSONL = "raw_jsonl"
 OPENAI_ROUND_FEEDBACK = "openai_round_feedback"
-SUPPORTED_EXPORT_FORMATS = (RAW_JSONL, OPENAI_ROUND_FEEDBACK)
+SUPPORTED_EXPORT_FORMATS = (OPENAI_ROUND_FEEDBACK,)
 ALLOWED_IO_DIRS = ["data", "."]
 
 
@@ -51,7 +46,7 @@ class ExportRequest:
     """Full export request."""
 
     output_path: Path
-    export_format: str = RAW_JSONL
+    export_format: str = OPENAI_ROUND_FEEDBACK
     filter_spec: ExportFilterSpec = field(default_factory=ExportFilterSpec)
     limit: int | None = None
     allowed_output_dirs: list[Path] = field(default_factory=list)
@@ -74,7 +69,7 @@ def _validate_output_path(path: Path, extra_allowed_dirs: list[Path] | None = No
 
 
 class UnifiedExporter:
-    """Shared exporter for raw payload JSONL and OpenAI-compatible feedback JSONL."""
+    """Shared exporter for OpenAI-compatible feedback JSONL."""
 
     def __init__(self, store: DuckDBStore):
         self.store = store
@@ -83,7 +78,19 @@ class UnifiedExporter:
         """Return a lightweight preview for the current export filter."""
         where_clause, params = self._build_where_clause(filter_spec or ExportFilterSpec(), table_name="samples")
         row = self.store.conn.execute(
-            f"SELECT COUNT(*), COALESCE(AVG(length(CAST(raw_json AS VARCHAR))), 0) FROM samples WHERE {where_clause}",
+            f"""
+            SELECT COUNT(*),
+                   COALESCE(
+                       AVG(
+                           length(COALESCE(CAST(normalized_messages_json AS VARCHAR), ''))
+                           + length(COALESCE(CAST(normalized_tools_json AS VARCHAR), ''))
+                           + length(COALESCE(CAST(source_metadata_json AS VARCHAR), ''))
+                       ),
+                       0
+                   )
+            FROM samples
+            WHERE {where_clause}
+            """,
             params,
         ).fetchone()
         if row is None:
@@ -110,10 +117,7 @@ class UnifiedExporter:
             with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=request.output_path.parent, delete=False) as temp_file:
                 temp_path = Path(temp_file.name)
                 for row in rows:
-                    if request.export_format == RAW_JSONL:
-                        payload = row["raw_json"]
-                    else:
-                        payload = self._build_openai_round_feedback_record(row)
+                    payload = self._build_openai_round_feedback_record(row)
                     temp_file.write(json.dumps(payload, ensure_ascii=False) + "\n")
                     count += 1
 
@@ -128,7 +132,7 @@ class UnifiedExporter:
     def _fetch_sample_rows(self, filter_spec: ExportFilterSpec, limit: int | None) -> list[dict[str, Any]]:
         where_clause, params = self._build_where_clause(filter_spec, table_name="samples")
         query = f"""
-            SELECT id, sample_uid, raw_json, imported_at, empty_response,
+                        SELECT id, sample_uid, normalized_messages_json, normalized_tools_json, source_metadata_json, imported_at, empty_response,
                      num_turns, expected_judgment_count, expected_response_judgment_count,
                      expected_episode_judgment_count, num_tool_calls,
                    response_progress_rate, response_regress_rate,
@@ -147,23 +151,25 @@ class UnifiedExporter:
             {
                 "id": row[0],
                 "sample_uid": row[1],
-                "raw_json": json.loads(row[2]) if isinstance(row[2], str) else (row[2] or {}),
-                "imported_at": row[3],
-                "empty_response": bool(row[4]),
-                "num_turns": row[5] or 0,
-                "expected_judgment_count": row[6] or 0,
-                "expected_response_judgment_count": row[7] or 0,
-                "expected_episode_judgment_count": row[8] or 0,
-                "num_tool_calls": row[9] or 0,
-                "response_progress_rate": row[10],
-                "response_regress_rate": row[11],
-                "user_satisfied_rate": row[12],
-                "user_negative_feedback_rate": row[13],
-                "tool_stats": json.loads(row[14]) if row[14] else {},
-                "session_merge_status": row[15],
-                "session_merge_keep": row[16],
-                "session_merge_reason": row[17],
-                "processing_status": row[18],
+                "normalized_messages": json.loads(row[2]) if isinstance(row[2], str) else (row[2] or []),
+                "normalized_tools": json.loads(row[3]) if isinstance(row[3], str) else (row[3] or []),
+                "source_metadata": json.loads(row[4]) if isinstance(row[4], str) else (row[4] or {}),
+                "imported_at": row[5],
+                "empty_response": bool(row[6]),
+                "num_turns": row[7] or 0,
+                "expected_judgment_count": row[8] or 0,
+                "expected_response_judgment_count": row[9] or 0,
+                "expected_episode_judgment_count": row[10] or 0,
+                "num_tool_calls": row[11] or 0,
+                "response_progress_rate": row[12],
+                "response_regress_rate": row[13],
+                "user_satisfied_rate": row[14],
+                "user_negative_feedback_rate": row[15],
+                "tool_stats": json.loads(row[16]) if row[16] else {},
+                "session_merge_status": row[17],
+                "session_merge_keep": row[18],
+                "session_merge_reason": row[19],
+                "processing_status": row[20],
             }
             for row in rows
         ]
@@ -220,8 +226,9 @@ class UnifiedExporter:
         return where_clause, params
 
     def _build_openai_round_feedback_record(self, sample_row: dict[str, Any]) -> dict[str, Any]:
-        raw_json = sample_row["raw_json"]
-        conversation = extract_normalized_conversation_from_payload(raw_json)
+        conversation = {"messages": sample_row["normalized_messages"]}
+        if sample_row["normalized_tools"]:
+            conversation["tools"] = sample_row["normalized_tools"]
         messages = conversation["messages"]
         builder = TurnContextBuilder()
         response_contexts = builder.extract_response_contexts(sample_row["sample_uid"], messages)
@@ -269,7 +276,7 @@ class UnifiedExporter:
         return {
             "schema": "openai_round_feedback_v2",
             "metadata": self._build_metadata(sample_row),
-            "source_metadata": self._build_source_metadata(raw_json),
+            "source_metadata": self._build_source_metadata(sample_row),
             "conversation": conversation,
             "round_feedback": {
                 "response_progress_steps": response_steps,
@@ -301,43 +308,14 @@ class UnifiedExporter:
             "has_error": tool_stats.get("has_error", False),
         }
 
-    def _build_source_metadata(self, raw_json: dict[str, Any]) -> dict[str, Any]:
-        request_payload = raw_json.get("request")
-        request = request_payload if isinstance(request_payload, dict) else {}
-        headers_payload = request.get("headers")
-        headers = headers_payload if isinstance(headers_payload, dict) else {}
-        body_json_payload = request.get("bodyJson")
-        body_json = body_json_payload if isinstance(body_json_payload, dict) else {}
-        messages = extract_messages_from_payload(raw_json)
-        source_metadata = raw_json.get("metadata")
-
-        return {
-            "timestamp": self._first_non_empty(
-                raw_json.get("timestamp"),
-                raw_json.get("created_at"),
-                request.get("timestamp"),
-                request.get("createdAt"),
-            ),
-            "model_requested": self._first_non_empty(body_json.get("model"), raw_json.get("model")),
-            "user_agent": self._first_non_empty(
-                headers.get("user-agent"),
-                headers.get("User-Agent"),
-                raw_json.get("user_agent"),
-            ),
-            "request_id": self._first_non_empty(
-                raw_json.get("request_id"),
-                raw_json.get("requestId"),
-                request.get("request_id"),
-                headers.get("x-request-id"),
-            ),
-            "trace_id": self._first_non_empty(
-                raw_json.get("trace_id"),
-                raw_json.get("traceId"),
-                headers.get("x-trace-id"),
-            ),
-            "source_format": "anthropic" if any(isinstance(message.get("content"), list) for message in messages) else "openai",
-            "metadata": source_metadata,
-        }
+    def _build_source_metadata(self, sample_row: dict[str, Any]) -> dict[str, Any]:
+        source_metadata = dict(sample_row.get("source_metadata") or {})
+        messages = sample_row.get("normalized_messages") or []
+        source_metadata.setdefault(
+            "source_format",
+            "anthropic" if any(isinstance(message.get("content"), list) for message in messages) else "openai",
+        )
+        return source_metadata
 
     def _extract_text_content(self, content: Any) -> str:
         if isinstance(content, str):

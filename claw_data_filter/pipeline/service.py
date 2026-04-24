@@ -664,13 +664,23 @@ class PipelineService:
             placeholders = ", ".join(["?"] * len(chunk))
             if self.config.session_merge.enabled:
                 query = (
-                    f"SELECT sample_uid, raw_json FROM samples WHERE sample_uid IN ({placeholders}) "
+                    f"SELECT sample_uid, normalized_messages_json, normalized_tools_json, source_metadata_json FROM samples WHERE sample_uid IN ({placeholders}) "
                     "AND COALESCE(session_merge_keep, TRUE) = TRUE ORDER BY id"
                 )
             else:
-                query = f"SELECT sample_uid, raw_json FROM samples WHERE sample_uid IN ({placeholders}) ORDER BY id"
+                query = f"SELECT sample_uid, normalized_messages_json, normalized_tools_json, source_metadata_json FROM samples WHERE sample_uid IN ({placeholders}) ORDER BY id"
             rows = self.store.conn.execute(query, chunk).fetchall()
-            eligible_uids.extend((row[0], json.loads(row[1]) if isinstance(row[1], str) else row[1]) for row in rows)
+            eligible_uids.extend(
+                (
+                    row[0],
+                    {
+                        "normalized_messages": json.loads(row[1]) if isinstance(row[1], str) else (row[1] or []),
+                        "normalized_tools": json.loads(row[2]) if isinstance(row[2], str) else (row[2] or []),
+                        "source_metadata": json.loads(row[3]) if isinstance(row[3], str) else (row[3] or {}),
+                    },
+                )
+                for row in rows
+            )
         return eligible_uids
 
     def _extract_items_jsonl(self, archive_path: Path, extracted_dir: Path) -> list[Path]:
