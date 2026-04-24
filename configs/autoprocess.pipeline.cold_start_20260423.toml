@@ -1,0 +1,51 @@
+[paths]
+source_dir = "/kanas/nlp/liuchang/manydata/unirouter"
+unpack_dir = "/kanas/nlp/liuchang/manydata/unirouter_uncompress/cold_start_20260423"
+work_dir = "/kanas/nlp/liuchang/manydata/unirouter_in_process/cold_start_20260423"
+db_path = "/kanas/nlp/liuchang/manydata/unirouter_duckdb/incremental_pipeline_cold_start_20260423.duckdb"
+export_dir = "/kanas/nlp/liuchang/manydata/unirouter_unisound_format/cold_start_20260423"
+log_dir = "/kanas/nlp/liuchang/manydata/unirouter_in_process/cold_start_20260423/logs"
+
+[llm]
+endpoint = "http://120.220.102.24:31877/v1"
+model_id = "qwen35"
+timeout = 120.0
+max_retries = 6
+retry_base_delay = 10.0
+retry_max_delay = 120.0
+
+[import]
+workers = 2
+chunk_size = 4
+max_pending_chunks = 2
+reconnect_every_chunks = 25
+skip_errors = true
+
+[session_merge]
+enabled = true
+workers = 16
+batch_size = 512
+min_prefix_turns = 2
+
+[round_feedback]
+enabled = true
+workers = 2
+batch_size = 4
+
+[export]
+response_progress_rate = ""
+user_satisfied_rate = ""
+user_negative_feedback_rate = ""
+empty_response = false
+num_turns_min = 3
+session_merge_keep = true
+has_error = false
+keep_intermediate = true
+unisound_config_path = "configs/unisound_export.autoprocess.json"
+
+[schedule]
+cron = "*/30 * * * *"
+
+[web]
+host = "0.0.0.0"
+port = 8501

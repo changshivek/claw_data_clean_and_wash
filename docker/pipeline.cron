@@ -1,4 +1,4 @@
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-${CRON_SCHEDULE} cd /app && /app/docker/run_pipeline_if_due.sh ${CONFIG_PATH} ${CRON_MIN_INTERVAL_HOURS} >> ${CRON_LOG_PATH} 2>&1
+${CRON_SCHEDULE} cd /app && bash /app/docker/run_pipeline_if_due.sh ${CONFIG_PATH} ${CRON_MIN_INTERVAL_HOURS} >> ${CRON_LOG_PATH} 2>&1

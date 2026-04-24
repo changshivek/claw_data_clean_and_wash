@@ -12,6 +12,6 @@ if ! [[ "${POLL_SECONDS}" =~ ^[0-9]+$ ]] || (( POLL_SECONDS <= 0 )); then
 fi
 
 while true; do
-  /app/docker/run_pipeline_if_due.sh "${CONFIG_PATH}" "${MIN_INTERVAL_HOURS}"
+  bash /app/docker/run_pipeline_if_due.sh "${CONFIG_PATH}" "${MIN_INTERVAL_HOURS}"
   sleep "${POLL_SECONDS}"
 done

@@ -54,6 +54,11 @@ export CRON_STATE_FILE
 export SCHEDULER_MODE
 export SCHEDULER_POLL_SECONDS
 
+PIPELINE_ON_START_MODE="${PIPELINE_ON_START_MODE:-background}"
+PIPELINE_ON_START_LOG_PATH="${PIPELINE_ON_START_LOG_PATH:-${CRON_LOG_PATH}}"
+export PIPELINE_ON_START_MODE
+export PIPELINE_ON_START_LOG_PATH
+
 mapfile -t PIPELINE_DIRS < <(python - <<'PY'
 from pathlib import Path
 import os
@@ -80,11 +85,21 @@ PY
 
 mkdir -p /app/runtime "${PIPELINE_DIRS[@]}"
 
+if [[ -z "${HOME:-}" || "${HOME:-}" == "/" || ! -w "${HOME:-/}" ]]; then
+  export HOME="${PIPELINE_DIRS[2]}"
+fi
+mkdir -p "${HOME}/.streamlit"
+
 touch "${CRON_LOG_PATH}"
+touch "${PIPELINE_ON_START_LOG_PATH}"
 
 if [[ "${RUN_ON_START}" == "true" ]]; then
   cd /app
-  python -m claw_data_filter.cli pipeline-run --config "${CONFIG_PATH}"
+  if [[ "${PIPELINE_ON_START_MODE}" == "foreground" ]]; then
+    python -m claw_data_filter.cli pipeline-run --config "${CONFIG_PATH}"
+  else
+    python -m claw_data_filter.cli pipeline-run --config "${CONFIG_PATH}" >> "${PIPELINE_ON_START_LOG_PATH}" 2>&1 &
+  fi
 fi
 
 if [[ "${SCHEDULER_MODE}" == "cron" ]]; then
@@ -98,7 +113,7 @@ if [[ "${SCHEDULER_MODE}" == "cron" ]]; then
   crontab /etc/cron.d/claw-incremental-pipeline
   cron
 else
-  "${APP_ROOT}/docker/scheduler_loop.sh" "${CONFIG_PATH}" "${CRON_MIN_INTERVAL_HOURS}" "${SCHEDULER_POLL_SECONDS}" >> "${CRON_LOG_PATH}" 2>&1 &
+  bash "${APP_ROOT}/docker/scheduler_loop.sh" "${CONFIG_PATH}" "${CRON_MIN_INTERVAL_HOURS}" "${SCHEDULER_POLL_SECONDS}" >> "${CRON_LOG_PATH}" 2>&1 &
 fi
 
 cd /app
