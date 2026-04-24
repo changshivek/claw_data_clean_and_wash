@@ -39,7 +39,7 @@ python -m claw_data_filter.cli pipeline-run --config "${CONFIG_PATH}" && date +%
 - Pipeline `_run_round_feedback_for_samples` 同样在领取前显式调用回收
 
 ```python
-def reclaim_stale_processing_samples(self, stale_minutes: int = 30) -> int:
+def reclaim_stale_processing_samples(self, stale_minutes: int = 120) -> int:
     cutoff = datetime.now() - timedelta(minutes=stale_minutes)
     self.conn.execute(
         "UPDATE samples SET processing_status = 'pending' "
@@ -131,6 +131,19 @@ expected_judgment_count=(
 ## Round 2: 独立整理批次（不混入 Round 1）
 
 以下问题方向正确，但改动面大，应该等 Round 1 完全验证通过后单开一批：
+
+Round 2 的目标不是继续救火，而是把当前已经验证可用的 runtime / logging / maintenance 路径收口成更稳的默认行为，并且避免再次把不同性质的问题混成一个大提交。
+
+### Round 2 前提
+
+进入 Round 2 之前，以下事项已完成：
+- Round 1 三个主提交已落地
+- sample heartbeat follow-up 已落地
+- 全量测试已通过（当前基线：`156 passed`）
+
+Round 2 应继续遵守两个边界：
+- 不回滚或重写 Round 1 / follow-up 的语义
+- 每个批次只处理一种主问题，先跑窄验证，再做总体验证
 
 ---
 
@@ -225,9 +238,27 @@ fix: heartbeat active round-feedback samples
 
 **方案**: 默认值切为 `loop`。cron 路径保留不删（可能有依赖方），但降级为非默认。
 
+**建议文件范围**:
+- `docker/entrypoint.sh`
+- `scripts/docker_run_incremental_pipeline.sh`
+- 如有默认值透传，补看 `scripts/docker_run_incremental_pipeline_guarded.sh`
+
+**完成标准**:
+- 不显式传 `SCHEDULER_MODE` 时，容器默认走 loop 调度
+- 显式传 `SCHEDULER_MODE=cron` 时，旧路径仍可用
+- README / runtime 文档后续单独更新，不挟带进本 commit
+
 ### 2.2 `scheduler_loop.sh` 信号处理加固
 
 增加 SIGTERM/SIGINT trap，子脚本失败不终止循环（`|| true`）。
+
+**建议文件范围**:
+- `docker/scheduler_loop.sh`
+
+**完成标准**:
+- 调度循环收到 SIGTERM/SIGINT 时可干净退出
+- 单次 due-check / pipeline-run 失败不会把整个 loop 打死
+- 不引入新的后台孤儿进程
 
 ### 2.3 日志管理统一
 
@@ -236,11 +267,35 @@ fix: heartbeat active round-feedback samples
 - pipeline log 自动清理（保留最近 N 个 run）
 - `_tail_lines` seek-based 替代全量读入
 
+**建议文件范围**:
+- `claw_data_filter/logging_config.py`
+- CLI / pipeline 入口文件
+- `claw_data_filter/web/services/database_access.py`
+- 必要时补 `report_exporter.py` / Web 读取日志的相关位置
+
+**完成标准**:
+- CLI 与 pipeline 至少共享同一套 formatter / handler 初始化逻辑
+- Web 端 tail 日志不再整文件读入内存
+- 引入轮转或清理机制后，不破坏当前 Web 的日志查看路径
+
 ### 2.4 死代码与代码重复清理
 
 - 删除 `count_expected_judgments`、`detect_empty_response`、`_first_non_empty`、`JSON_FIELDS`、未使用的 `build_where_clause`
 - 合并 `_build_tool_stats` 双份实现
 - 提取 `ResponseProgressJudgmentProcessor` / `UserSatisfiedJudgmentProcessor` 公共基类
+
+**建议文件范围**:
+- `claw_data_filter/models/sample.py`
+- `claw_data_filter/empty_response.py`
+- `claw_data_filter/filters/query.py`
+- `claw_data_filter/exporters/unified_exporter.py`
+- `claw_data_filter/processors/round_feedback.py`
+- `claw_data_filter/storage/duckdb_store.py`
+
+**完成标准**:
+- 只删除已确认无 production 调用的死代码
+- 重复代码合并不改变对外行为和统计口径
+- 若牵涉测试改写，保持提交聚焦在“维护性收口”，不额外修改业务语义
 
 ### 2.5 错误处理加固
 
@@ -248,16 +303,248 @@ fix: heartbeat active round-feedback samples
 - `session_merge.py` `ensure_session_merge_schema`: 至少 log warning
 - `report_exporter.py`: `json.loads` 加 try/except，`export_report` 加 `mkdir`
 
+**建议文件范围**:
+- `claw_data_filter/storage/duckdb_store.py`
+- `claw_data_filter/session_merge.py`
+- `claw_data_filter/exporters/report_exporter.py`
+
+**完成标准**:
+- schema migration 失败不会留下静默半迁移状态
+- session merge 和 report export 的异常至少可观测
+- 不在这一批混入结构性重构
+
 ### 2.6 Docker 安全加固
 
 - `HEALTHCHECK` 指令
 - base image digest 锁定
 - `.dockerignore`
 
+**建议文件范围**:
+- `Dockerfile`
+- `.dockerignore`
+
+**完成标准**:
+- 不改变当前容器运行用户模型（仍由 `--user` 主导）
+- `HEALTHCHECK` 与当前 streamlit 启动方式兼容
+- `.dockerignore` 不误排除构建所需源码 / 配置
+
 ### 2.7 `entrypoint.sh` 清理
 
 - TOML 解析增加错误处理
 - 移除 HOME 覆写 hack
+
+**建议文件范围**:
+- `docker/entrypoint.sh`
+
+**完成标准**:
+- 配置解析失败时入口脚本清晰退出
+- 不再覆写 `HOME`，同时保留当前 streamlit 运行所需目录可写性
+
+### Round 2 建议执行批次
+
+#### Batch A: Docker 默认行为收口
+
+范围：2.1 + 2.2 + 2.7
+
+理由：
+- 这三项共同决定容器启动后的默认调度行为和退出语义
+- 都属于 docker/runtime 主路径，不应与日志统一或代码清理混提
+
+建议验证：
+
+```bash
+.venv/bin/pytest tests/test_pipeline_service.py -q
+```
+
+以及一次容器级 smoke check：默认不传 `SCHEDULER_MODE` 时 loop 生效，停止容器时 scheduler 不残留。
+
+#### Batch B: 日志统一与 Web tail 优化
+
+范围：2.3
+
+理由：
+- 这是独立的观测性改进面
+- 一旦混入 Docker 默认值切换，定位回归会变难
+
+建议验证：
+
+```bash
+.venv/bin/pytest tests/test_web_database_access.py tests/test_pipeline_service.py -q
+```
+
+#### Batch C: 维护性收口
+
+范围：2.4 + 2.5 + 2.6
+
+理由：
+- 这些项的共同目标是减少技术债和提升健壮性
+- 其风险主要在“是否改变了原有行为”，适合在 Docker/runtime 稳定后单开一批
+
+建议验证：
+
+```bash
+.venv/bin/pytest tests/ -q
+```
+
+必要时再补相关窄测试集。
+
+---
+
+## Round 2 Post-Review Follow-up
+
+在 Round 2 提交完成后，复审发现仍有 2 个需要收口的问题：
+
+### F2. Docker runtime 的 Streamlit writable-home fallback 实际无效
+
+**涉及提交**:
+- `7621793 fix: default to loop scheduler and harden Docker runtime`
+
+**现状**:
+- `entrypoint.sh` 不再覆写 `HOME`，转而创建并导出 `STREAMLIT_HOME`
+- 当前环境中的 Streamlit 仍通过 `Path.home()` 解析 `~/.streamlit`，并不识别 `STREAMLIT_HOME`
+
+**问题**:
+- 当容器内 `HOME` 不可写时，当前实现会再次回到“Streamlit 试图写入不可写 `~/.streamlit`”的旧问题
+- 也就是说，这一提交在受限 HOME / root_squash / 非 root 场景下存在功能回归风险
+
+**修复原则**:
+- 不恢复脚本级全局 `HOME` hack
+- 只对最终启动的 Streamlit 进程提供一个确定可写的 `HOME`
+- 其他子进程在 entrypoint 执行期仍尽量保留原始 `HOME`
+
+**建议修复方案**:
+
+#### F2.1 为 Streamlit 子进程单独计算有效 HOME
+
+在 `entrypoint.sh` 中区分：
+- `EFFECTIVE_HOME`：当前 shell / pipeline 使用的原始 `HOME`
+- `STREAMLIT_EFFECTIVE_HOME`：仅供最终 `exec streamlit` 使用的可写 HOME
+
+逻辑建议：
+- 若当前 `HOME` 存在且可写，则 `STREAMLIT_EFFECTIVE_HOME="${HOME}"`
+- 否则令 `STREAMLIT_EFFECTIVE_HOME="${PIPELINE_DIRS[2]}"`
+- 显式创建 `"${STREAMLIT_EFFECTIVE_HOME}/.streamlit"`
+
+#### F2.2 仅在 exec streamlit 时覆写 HOME
+
+建议改成：
+
+```bash
+HOME="${STREAMLIT_EFFECTIVE_HOME}" exec streamlit run ...
+```
+
+这样：
+- Streamlit 会继续通过 `Path.home()` 落到可写目录
+- entrypoint 前半段不会把全局 `HOME` 永久改掉
+- 语义上比导出一个 Streamlit 不识别的 `STREAMLIT_HOME` 更准确
+
+#### F2.3 验收重点
+
+- `HOME` 可写时，仍使用原始 `HOME`
+- `HOME` 不可写时，Streamlit 成功落到 work_dir 下的 `.streamlit`
+- 默认 loop scheduler 行为不受影响
+
+**建议文件范围**:
+- `docker/entrypoint.sh`
+
+### F3. `session_merge` schema 变更异常仍然被整体吞掉
+
+**涉及提交**:
+- `1bc9404 fix: harden error handling in schema migration and report export`
+
+**现状**:
+- `ensure_session_merge_schema` 将所有 `ALTER TABLE` 异常统一捕获
+- 当前仅记录 debug 日志：`session_merge schema column may already exist`
+
+**问题**:
+- 如果失败原因不是“列已存在”，而是权限、磁盘、数据库损坏或 SQL 语法问题，当前实现仍会继续执行
+- 这会把“已存在”与“真实失败”混在一起，不能算真正的错误处理加固
+
+**修复原则**:
+- 不再把异常当正常控制流
+- 只对“列已存在”这一种可接受情况做跳过
+- 其他异常必须原样抛出，阻止 session merge 在半可用 schema 上继续运行
+
+**建议修复方案**:
+
+#### F3.1 用 schema introspection 代替异常分支
+
+推荐优先方案：
+- 在执行 `ALTER TABLE ... ADD COLUMN ...` 前，先查询现有列集合
+- 只有缺列时才执行 `ALTER TABLE`
+
+例如：
+
+```python
+existing_columns = {
+    row[1]
+    for row in conn.execute("PRAGMA table_info('samples')").fetchall()
+}
+if "session_merge_status" not in existing_columns:
+    conn.execute("ALTER TABLE samples ADD COLUMN session_merge_status TEXT")
+```
+
+优点：
+- 逻辑直接
+- 不需要依赖 DuckDB 异常消息文本
+- 真异常自然向上抛出
+
+#### F3.2 若暂时保留 try/except，则只放过 duplicate-column
+
+如果为了最小改动暂不做 introspection，也至少要：
+- 精确判断异常是否为“column already exists”
+- 否则重新抛出异常
+
+但这只是次优方案，不建议长期保留。
+
+#### F3.3 验收重点
+
+- 缺列时能正常补列
+- 已有列时平稳跳过
+- 非 duplicate-column 错误不会被吞掉
+
+**建议文件范围**:
+- `claw_data_filter/session_merge.py`
+- 如需补窄测试，再纳入对应测试文件
+
+### Round 2 Follow-up 建议执行顺序
+
+#### Follow-up A: 修正 Streamlit writable-home fallback
+
+**提交消息**:
+
+```text
+fix: restore writable home fallback for streamlit
+```
+
+**文件范围**:
+- `docker/entrypoint.sh`
+
+**建议验证**:
+- 容器启动 smoke check
+- 不可写 HOME 场景下 Web 正常启动
+
+#### Follow-up B: 只放过 duplicate-column 的 session_merge schema 迁移
+
+**提交消息**:
+
+```text
+fix: stop swallowing session-merge schema errors
+```
+
+**文件范围**:
+- `claw_data_filter/session_merge.py`
+- 必要时补对应测试文件
+
+**建议验证**:
+
+```bash
+.venv/bin/pytest tests/ -q
+```
+
+如可单独补测试，更推荐加一个窄测试覆盖：
+- 列已存在时平稳通过
+- 模拟真实异常时应抛出
 
 ---
 
@@ -361,12 +648,75 @@ fix: preserve zero counts in detail view
 .venv/bin/pytest tests/test_cli.py tests/test_pipeline_service.py tests/test_unisound_export.py tests/test_exporters.py -q
 ```
 
-### Round 2 的提交原则
+### Round 2 建议提交计划
 
-Round 2 暂不在本节展开具体 commit 列表，只定义边界：
-- 调度默认值收口、`scheduler_loop.sh` 加固、`entrypoint.sh` 清理应作为 Docker/runtime 主题提交
-- 日志统一应单独成批，不与 Docker 默认值切换混提
-- 死代码/重复代码清理和错误处理加固应拆成维护性提交，不挟带功能行为变化
+#### Commit A: 切换默认调度到 loop 并加固 scheduler 退出行为
+
+**提交消息**:
+
+```text
+fix: default docker scheduler to loop mode
+```
+
+**文件范围**:
+- `docker/entrypoint.sh`
+- `docker/scheduler_loop.sh`
+- `scripts/docker_run_incremental_pipeline.sh`
+- 如确有默认值透传改动，再纳入 `scripts/docker_run_incremental_pipeline_guarded.sh`
+
+**包含内容**:
+- 默认 `SCHEDULER_MODE` 从 `cron` 切到 `loop`
+- `scheduler_loop.sh` 增加信号处理与失败后续跑能力
+- `entrypoint.sh` 做最小必要的启动/退出清理
+
+#### Commit B: 统一 runtime logging 并优化 Web 日志读取
+
+**提交消息**:
+
+```text
+refactor: centralize runtime logging
+```
+
+**文件范围**:
+- `claw_data_filter/logging_config.py`
+- CLI / pipeline 入口文件
+- `claw_data_filter/web/services/database_access.py`
+- 必要的相关测试文件
+
+**包含内容**:
+- 引入集中 logging 配置
+- 统一主要 runtime 路径的日志初始化
+- 优化 Web 端 tail 读取，避免整文件读入
+
+#### Commit C: 清理维护性债务并补强错误处理
+
+**提交消息**:
+
+```text
+refactor: reduce round-feedback maintenance debt
+```
+
+**文件范围**:
+- `claw_data_filter/models/sample.py`
+- `claw_data_filter/empty_response.py`
+- `claw_data_filter/filters/query.py`
+- `claw_data_filter/exporters/unified_exporter.py`
+- `claw_data_filter/processors/round_feedback.py`
+- `claw_data_filter/storage/duckdb_store.py`
+- `claw_data_filter/session_merge.py`
+- `claw_data_filter/exporters/report_exporter.py`
+- `Dockerfile`
+- `.dockerignore`
+
+**包含内容**:
+- 删除已确认死代码
+- 合并关键重复实现
+- 收紧错误处理与导出容错
+- 做最小 Docker build hygiene 收口
+
+如 Commit C 变大，应继续拆成两个提交：
+- `refactor: remove dead code in round feedback stack`
+- `fix: harden schema and report export error handling`
 
 ---
 

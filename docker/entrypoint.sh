@@ -109,15 +109,15 @@ fi
 
 mkdir -p /app/runtime "${PIPELINE_DIRS[@]}"
 
-# Streamlit needs a writable config directory.  Prefer the user's real
-# HOME when available; fall back to the pipeline work_dir otherwise.
+# Streamlit resolves ~/.streamlit via Path.home(), so only the final
+# streamlit process should receive a fallback HOME when the original one
+# is missing or not writable.
 if [[ -n "${HOME:-}" && -w "${HOME:-}" ]]; then
-  STREAMLIT_HOME="${HOME}/.streamlit"
+  STREAMLIT_EFFECTIVE_HOME="${HOME}"
 else
-  STREAMLIT_HOME="${PIPELINE_DIRS[2]}/.streamlit"
+  STREAMLIT_EFFECTIVE_HOME="${PIPELINE_DIRS[2]}"
 fi
-mkdir -p "${STREAMLIT_HOME}"
-export STREAMLIT_HOME
+mkdir -p "${STREAMLIT_EFFECTIVE_HOME}/.streamlit"
 
 touch "${CRON_LOG_PATH}"
 touch "${PIPELINE_ON_START_LOG_PATH}"
@@ -146,6 +146,6 @@ else
 fi
 
 cd /app
-exec streamlit run claw_data_filter/web/app.py \
+HOME="${STREAMLIT_EFFECTIVE_HOME}" exec streamlit run claw_data_filter/web/app.py \
   --server.address "${STREAMLIT_HOST}" \
   --server.port "${STREAMLIT_PORT}"

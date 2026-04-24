@@ -299,20 +299,23 @@ def plan_session_merge(
 
 def ensure_session_merge_schema(conn: duckdb.DuckDBPyConnection) -> None:
     """Ensure samples table exposes the marker columns used by session merge."""
+    existing_columns = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info('samples')").fetchall()
+    }
     alterations = [
-        "ALTER TABLE samples ADD COLUMN session_merge_status TEXT",
-        "ALTER TABLE samples ADD COLUMN session_merge_keep BOOLEAN",
-        "ALTER TABLE samples ADD COLUMN session_merge_group_id TEXT",
-        "ALTER TABLE samples ADD COLUMN session_merge_group_size INTEGER",
-        "ALTER TABLE samples ADD COLUMN session_merge_representative_uid TEXT",
-        "ALTER TABLE samples ADD COLUMN session_merge_reason TEXT",
-        "ALTER TABLE samples ADD COLUMN session_merge_updated_at TIMESTAMP",
+        ("session_merge_status", "TEXT"),
+        ("session_merge_keep", "BOOLEAN"),
+        ("session_merge_group_id", "TEXT"),
+        ("session_merge_group_size", "INTEGER"),
+        ("session_merge_representative_uid", "TEXT"),
+        ("session_merge_reason", "TEXT"),
+        ("session_merge_updated_at", "TIMESTAMP"),
     ]
-    for sql in alterations:
-        try:
-            conn.execute(sql)
-        except Exception:
-            logger.debug("session_merge schema column may already exist: %s", sql.split()[-1])
+    for column_name, column_type in alterations:
+        if column_name in existing_columns:
+            continue
+        conn.execute(f"ALTER TABLE samples ADD COLUMN {column_name} {column_type}")
 
 
 def _load_candidates(

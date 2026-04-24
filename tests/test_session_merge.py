@@ -3,9 +3,11 @@ import tempfile
 from pathlib import Path
 
 import duckdb
+import pytest
 
 from claw_data_filter.session_merge import (
     SessionMergeCandidate,
+    ensure_session_merge_schema,
     extract_real_user_turns,
     plan_session_merge,
     run_session_merge,
@@ -132,3 +134,49 @@ def test_run_session_merge_writes_markers_into_duckdb():
         assert rows[0] == ("uid-1", "merged", False, "uid-2", "strict_prefix_of_longer_sequence")
         assert rows[1] == ("uid-2", "keep", True, "uid-2", "leaf_sequence")
         assert rows[2] == ("uid-3", "keep", True, "uid-3", "singleton_group")
+
+
+def test_ensure_session_merge_schema_adds_missing_columns_once():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "session_merge_schema.db"
+        conn = duckdb.connect(str(db_path))
+        conn.execute(
+            """
+            CREATE TABLE samples (
+                id INTEGER PRIMARY KEY,
+                sample_uid TEXT,
+                raw_json JSON
+            )
+            """
+        )
+
+        ensure_session_merge_schema(conn)
+        ensure_session_merge_schema(conn)
+
+        column_names = {row[1] for row in conn.execute("PRAGMA table_info('samples')").fetchall()}
+        conn.close()
+
+        assert {
+            "session_merge_status",
+            "session_merge_keep",
+            "session_merge_group_id",
+            "session_merge_group_size",
+            "session_merge_representative_uid",
+            "session_merge_reason",
+            "session_merge_updated_at",
+        }.issubset(column_names)
+
+
+def test_ensure_session_merge_schema_propagates_non_duplicate_failures():
+    class FakeResult:
+        def fetchall(self):
+            return [(0, "id"), (1, "sample_uid")]
+
+    class FakeConn:
+        def execute(self, sql: str):
+            if sql == "PRAGMA table_info('samples')":
+                return FakeResult()
+            raise RuntimeError("disk full")
+
+    with pytest.raises(RuntimeError, match="disk full"):
+        ensure_session_merge_schema(FakeConn())
