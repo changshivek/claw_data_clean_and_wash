@@ -7,7 +7,7 @@ CONFIG_PATH="${CONFIG_PATH:-${APP_ROOT}/configs/autoprocess.pipeline.toml}"
 CRON_SCHEDULE="${CRON_SCHEDULE:-}"
 CRON_MIN_INTERVAL_HOURS="${CRON_MIN_INTERVAL_HOURS:-0}"
 RUN_ON_START="${RUN_ON_START:-false}"
-SCHEDULER_MODE="${SCHEDULER_MODE:-cron}"
+SCHEDULER_MODE="${SCHEDULER_MODE:-loop}"
 SCHEDULER_POLL_SECONDS="${SCHEDULER_POLL_SECONDS:-3600}"
 STREAMLIT_HOST="${STREAMLIT_HOST:-0.0.0.0}"
 STREAMLIT_PORT="${STREAMLIT_PORT:-8501}"
@@ -19,23 +19,35 @@ fi
 
 export CONFIG_PATH
 
-mapfile -t CONFIG_VALUES < <(python - <<'PY'
+CONFIG_VALUES=()
+while IFS= read -r line; do
+  CONFIG_VALUES+=("${line}")
+done < <(python - <<'PY'
 from pathlib import Path
 import os
+import sys
 
 try:
     import tomllib
 except ModuleNotFoundError:
-    import tomli as tomllib  # type: ignore
+    import tomli as tomllib
 
-config_path = Path(os.environ["CONFIG_PATH"])
-payload = tomllib.loads(config_path.read_text(encoding="utf-8"))
-print(payload["paths"]["db_path"])
-print(payload.get("schedule", {}).get("cron", "*/30 * * * *"))
-print(Path(payload["paths"]["log_dir"]).expanduser() / "cron.log")
-print(Path(payload["paths"]["work_dir"]).expanduser() / "cron.last_run_at")
+try:
+    config_path = Path(os.environ["CONFIG_PATH"])
+    payload = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    print(payload["paths"]["db_path"])
+    print(payload.get("schedule", {}).get("cron", "*/30 * * * *"))
+    print(Path(payload["paths"]["log_dir"]).expanduser() / "cron.log")
+    print(Path(payload["paths"]["work_dir"]).expanduser() / "cron.last_run_at")
+except Exception as exc:
+    print(f"Failed to parse config: {exc}", file=sys.stderr)
+    sys.exit(1)
 PY
 )
+if [[ ${#CONFIG_VALUES[@]} -ne 4 ]]; then
+  echo "Failed to parse required values from config file" >&2
+  exit 1
+fi
 
 DB_PATH_VALUE="${CONFIG_VALUES[0]}"
 CONFIG_CRON_SCHEDULE="${CONFIG_VALUES[1]:-*/30 * * * *}"
@@ -59,36 +71,53 @@ PIPELINE_ON_START_LOG_PATH="${PIPELINE_ON_START_LOG_PATH:-${CRON_LOG_PATH}}"
 export PIPELINE_ON_START_MODE
 export PIPELINE_ON_START_LOG_PATH
 
-mapfile -t PIPELINE_DIRS < <(python - <<'PY'
+PIPELINE_DIRS=()
+while IFS= read -r line; do
+  PIPELINE_DIRS+=("${line}")
+done < <(python - <<'PY'
 from pathlib import Path
 import os
+import sys
 
 try:
-  import tomllib
+    import tomllib
 except ModuleNotFoundError:
-  import tomli as tomllib  # type: ignore
+    import tomli as tomllib
 
-config_path = Path(os.environ["CONFIG_PATH"])
-payload = tomllib.loads(config_path.read_text(encoding="utf-8"))
-paths = payload["paths"]
-dir_candidates = [
-  Path(paths["db_path"]).expanduser().parent,
-  Path(paths["unpack_dir"]).expanduser(),
-  Path(paths["work_dir"]).expanduser(),
-  Path(paths["export_dir"]).expanduser(),
-  Path(paths["log_dir"]).expanduser(),
-]
-for path in dir_candidates:
-  print(path)
+try:
+    config_path = Path(os.environ["CONFIG_PATH"])
+    payload = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    paths = payload["paths"]
+    dir_candidates = [
+      Path(paths["db_path"]).expanduser().parent,
+      Path(paths["unpack_dir"]).expanduser(),
+      Path(paths["work_dir"]).expanduser(),
+      Path(paths["export_dir"]).expanduser(),
+      Path(paths["log_dir"]).expanduser(),
+    ]
+    for path in dir_candidates:
+      print(path)
+except Exception as exc:
+    print(f"Failed to parse config directories: {exc}", file=sys.stderr)
+    sys.exit(1)
 PY
 )
+if [[ ${#PIPELINE_DIRS[@]} -ne 5 ]]; then
+  echo "Failed to parse directory paths from config file" >&2
+  exit 1
+fi
 
 mkdir -p /app/runtime "${PIPELINE_DIRS[@]}"
 
-if [[ -z "${HOME:-}" || "${HOME:-}" == "/" || ! -w "${HOME:-/}" ]]; then
-  export HOME="${PIPELINE_DIRS[2]}"
+# Streamlit needs a writable config directory.  Prefer the user's real
+# HOME when available; fall back to the pipeline work_dir otherwise.
+if [[ -n "${HOME:-}" && -w "${HOME:-}" ]]; then
+  STREAMLIT_HOME="${HOME}/.streamlit"
+else
+  STREAMLIT_HOME="${PIPELINE_DIRS[2]}/.streamlit"
 fi
-mkdir -p "${HOME}/.streamlit"
+mkdir -p "${STREAMLIT_HOME}"
+export STREAMLIT_HOME
 
 touch "${CRON_LOG_PATH}"
 touch "${PIPELINE_ON_START_LOG_PATH}"

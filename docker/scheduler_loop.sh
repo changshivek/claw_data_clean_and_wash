@@ -11,7 +11,14 @@ if ! [[ "${POLL_SECONDS}" =~ ^[0-9]+$ ]] || (( POLL_SECONDS <= 0 )); then
   exit 1
 fi
 
+_cleanup() {
+  echo "Scheduler loop exiting" >&2
+  exit 0
+}
+trap _cleanup SIGTERM SIGINT
+
 while true; do
-  bash /app/docker/run_pipeline_if_due.sh "${CONFIG_PATH}" "${MIN_INTERVAL_HOURS}"
-  sleep "${POLL_SECONDS}"
+  bash /app/docker/run_pipeline_if_due.sh "${CONFIG_PATH}" "${MIN_INTERVAL_HOURS}" || true
+  sleep "${POLL_SECONDS}" &
+  wait $!
 done
